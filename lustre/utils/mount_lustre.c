@@ -816,7 +816,7 @@ int main(int argc, char *const argv[])
 
 	set_defaults(&mop);
 
-	g_pagesize = sysconf(_SC_PAGESIZE);
+	g_pagesize = sysconf(_SC_PAGESIZE); /* 获取系统页面大小 */
 	if (g_pagesize == -1) {
 		rc = errno;
 		printf("error: %d failed to get page size.\n", rc);

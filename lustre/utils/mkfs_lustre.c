@@ -861,6 +861,9 @@ int main(int argc, char *const argv[])
 	/*
 	 * For tunefs, we must read in the old values before parsing any
 	 * new ones.
+	 * 
+	 * tunefs 主要用于调整现有文件系统的参数，比如磁盘块大小、inode数量等，
+	 * 而无需重新格式化该文件系统。这对于在系统运行时动态调整文件系统特性非常有用。
 	 */
 
 	/* Check whether the disk has already been formatted by mkfs.lustre */
@@ -1026,6 +1029,9 @@ int main(int argc, char *const argv[])
 		goto out;
 	}
 
+	/*
+	 * Check mount table entry 遍历所有挂载点，判断设备是否已经挂载
+	 */
 	if (check_mtab_entry(mop.mo_device, mop.mo_device, NULL, NULL)) {
 		fprintf(stderr, "%s: is currently mounted, exiting without any change\n",
 			mop.mo_device);

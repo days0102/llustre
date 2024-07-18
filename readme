@@ -1,0 +1,83 @@
+# 目录解释
+
+# Lustre
+
+## ldiskfs
+    后端存储文件系统Ldiskfs
+
+## libcfs
+    Libcfs提供了由基本原语组成的api，用于Lustre中的进程管理和调试支持。
+    Libcfs在LNet、Lustre和相关的实用程序中使用。
+    它的api定义了一个可移植的运行时环境，在所有支持的构建目标上一致地实现。
+    除了调试支持之外，libcfs还提供了用于故障注入、Linux内核兼容性、
+    数据加密、Linux 64位时间添加、使用tracefile进行日志收集、字符串解析支持
+    以及查询和操作CPU分区表的功能的api。Libcfs是Lustre加载的第一个模块。
+
+    模块加载函数可以在tests/test-framework.sh脚本中找到。
+    当Lustre被挂载时，mount_facet()函数被调用，它调用load_modules()函数。
+    load_modules()调用load_modules_local()，以相同的顺序加载Lustre模块
+    libcfs、lnet、obdclass、ptl-rpc、fld、fid和lmv。
+
+## lnet
+    Lustre网络库，负责处理节点间的网络通信
+
+## lustre
+### ec
+### fid
+    文件标识符（File Identifier）管理，用于唯一标识文件系统中的对象。
+### fld
+    FLD是FID Location Database，它存储FID所在的位置(IE, MDT)。
+
+    数据库基本上是一个记录文件，每个记录由一个FID序列范围、MDT/OST索引和标志组成。
+    整个FS的FLD目前只存储在序列控制器(MDT0)上，但是每个目标也有自己的本地FLD，它只存储本地序列。
+
+    FLD子系统通常有两个任务:
+    1. 维护数据库，即当序列控制器分配时新序列范围到某些节点时，
+    它将调用FLD API在FLDB中插入位置信息<sequence_range, node_index>。
+
+    2. 处理来自其他节点的请求，例如，如果客户端需要知道在哪里定位FID，
+    如果在本地缓存中找不到信息，它将发送一个FLD查找RPC到FLD服务，
+    而FLD服务将查找FLDB条目并将位置信息返回给客户端。
+### kunit
+    Kunit是Lustre文件系统中用于测试和调试的工具，
+    它提供了一个框架来模拟Lustre环境中的内核操作。
+    Kunit允许开发者在用户空间模拟内核模块的行为，
+    这样可以更容易地测试和调试Lustre的内核代码，
+    而不必直接在内核空间中进行这些操作。
+### ldlm
+    锁管理 Distributed Lock Manager
+### lfsck
+    文件系统检查工具，用于检查和修复文件系统的问题。
+### llite
+### lmv
+### lod
+### lov
+### mdc
+### mdd
+### mdt
+### mgc
+### mgs
+### obdclass
+    Lustre中的obdclass子系统提供了一个抽象层，允许在不了解特定组件的情况下
+    在Lustre组件上应用通用操作。MGC、MDC、OSC、LOV、LMV是Lustre中使用obd类
+    通用抽象层的obd设备的例子。obd设备可以以不同的方式连接，形成客户端-服务器对，
+    用于Lustre内部通信和数据交换。注意，这里提到的客户端和服务器是服务客户端和服务器角色，
+    由obd设备临时承担，而不是代表Lustre客户端和Lustre服务器的物理节点。
+### obdecho
+### ofd
+### osc
+### osd-ldiskfs
+### osd-zfs
+### osp
+    OSP（Object Storage Proxy）是Lustre文件系统中的一个组件，
+    它作为客户端和对象存储目标（OST）之间的代理。
+    OSP的主要作用是管理客户端对OST的访问，处理客户端的请求并将其转发到适当的OST，
+    同时也处理来自OST的响应。
+### ost
+### ptlrpc
+### quota
+
+### utils
+
+
+[Lustre Arch](https://wiki.lustre.org/Understanding_Lustre_Internals)

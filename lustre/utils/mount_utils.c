@@ -123,6 +123,15 @@ int run_command(char *cmd, int cmdsz)
 #ifdef HAVE_SERVER_SUPPORT
 int add_param(char *buf, char *key, char *val)
 {
+	/*
+	 * 实际上，这段代码并没有真正去访问内存地址0处的数据。
+	 * 这里使用(struct lustre_disk_data *)0创建了一个指向类型为
+	 * struct lustre_disk_data的空指针（即地址为0的指针），
+	 * 但其后紧跟的->ldd_params操作只是用来获取结构体内ldd_params成员的偏移量，
+	 * 而不是尝试读取或写入该地址的数据。因此，这行代码不会触发访问违规错误。
+	 * sizeof运算符在编译时计算大小，它并不实际访问内存，
+	 * 所以这种用法是安全的，也是C语言中一种常见技巧，用于获取结构体成员的偏移量。
+	 */
 	int end = sizeof(((struct lustre_disk_data *)0)->ldd_params);
 	int start = strlen(buf);
 	int keylen = 0;
