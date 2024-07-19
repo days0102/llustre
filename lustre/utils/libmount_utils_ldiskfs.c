@@ -492,7 +492,19 @@ static int enable_default_ext4_features(struct mkfs_opts *mop, char *anchor,
 			append_unique(anchor, ",", "extents", NULL, maxbuflen);
 		else
 			append_unique(anchor, ",", "^extents", NULL, maxbuflen);
-		append_unique(anchor, ",", "dirdata", NULL, maxbuflen);
+
+		/*
+		 * dirdata 通过将目录条目的数据与文件的数据块一起存储在同一个组中来提高目录操作的性能。
+		 * 这样可以减少查找文件时磁盘寻道的次数，从而提高性能。
+		 */
+		/*
+		 * Notice: dirdata 在 (Ubuntu 24 LTS + e2fsprogs 1.47.0-2.4) mkfs 存在问题，
+		 * 		   在(Ubuntu 24 LTS + e2fsprogs 1.47.0-2.4)上暂时注释关闭，以正常使用
+		 * 
+		 * 如果不同步安装，需要更新 /usr/lib/mount_osd_ldiskfs.so 动态库文件
+		 * 
+		 */
+		// append_unique(anchor, ",", "dirdata", NULL, maxbuflen);
 	}
 
 	/* Multiple mount protection enabled only if failover node specified */

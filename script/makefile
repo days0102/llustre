@@ -53,7 +53,13 @@ mkfs:
 	@echo "start mkfs.lustre..."
 	sudo mkfs.lustre --mgs /dev/loop30
 	sudo mkfs.lustre --mdt --mgsnode=$(IP)@tcp --fsname=lustrefs --index=0 /dev/loop31
-	sudo mkfs.lustre --ost --mgsnode=$(IP)@tcp ---fsname=lustrefs -index=0 /dev/loop32
+	sudo mkfs.lustre --ost --mgsnode=$(IP)@tcp --fsname=lustrefs --index=0 /dev/loop32
+
+remkfs:
+	@echo "start mkfs.lustre..."
+	sudo mkfs.lustre --mgs --reformat /dev/loop30
+	sudo mkfs.lustre --mdt --mgsnode=$(IP)@tcp --reformat --fsname=lustrefs --index=0 /dev/loop31
+	sudo mkfs.lustre --ost --mgsnode=$(IP)@tcp --reformat --fsname=lustrefs --index=0 /dev/loop32
 
 # Mount file systems
 mount: mount_mgt mount_mdt mount_ost mount_client

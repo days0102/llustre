@@ -135,3 +135,5 @@ doxygen.*
 
 # 忽略测试和调试用的image
 *.img
+# Lustre 挂载目录
+script/mnt/
