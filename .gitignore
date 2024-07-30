@@ -137,3 +137,6 @@ doxygen.*
 *.img
 # Lustre 挂载目录
 script/mnt/
+
+compile_commands*.json
+build/.tmp*
