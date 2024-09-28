@@ -381,7 +381,7 @@ struct obd_device *class_newdev(const char *type_name, const char *name,
 		RETURN(ERR_PTR(-ENODEV));
 	}
 
-	newdev = obd_device_alloc();
+	newdev = obd_device_alloc(); /* 分配内存 */
 	if (newdev == NULL) {
 		class_put_type(type);
 		RETURN(ERR_PTR(-ENOMEM));

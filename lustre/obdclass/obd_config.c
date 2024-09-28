@@ -88,6 +88,9 @@ static const struct rhashtable_params uuid_hash_params = {
 	.automatic_shrinking = true,
 };
 
+/**
+ * @brief 将obd_export结构与obd_device的 UUID哈希表关联
+ */
 int obd_uuid_add(struct obd_device *obd, struct obd_export *export)
 {
 	int rc;
@@ -636,7 +639,7 @@ int class_attach(struct lustre_cfg *lcfg)
 		RETURN(-EINVAL);
 	}
 
-	obd = class_newdev(typename, name, uuid);
+	obd = class_newdev(typename, name, uuid); /* 创建一个typename后端的obd，如果后端模块没有则加载 */
 	if (IS_ERR(obd)) { /* Already exists or out of obds */
 		rc = PTR_ERR(obd);
 		CERROR("Cannot create device %s of type %s : %d\n",
@@ -660,7 +663,7 @@ int class_attach(struct lustre_cfg *lcfg)
 	list_del_init(&exp->exp_obd_chain_timed);
 	class_export_put(exp);
 
-	rc = class_register_device(obd);
+	rc = class_register_device(obd); /* 添加 obd 到 obd_devs */
 	if (rc != 0) {
 		class_decref(obd, "newdev", obd);
 		RETURN(rc);

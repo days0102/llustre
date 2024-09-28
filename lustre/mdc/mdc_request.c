@@ -2967,7 +2967,7 @@ int mdc_setup(struct obd_device *obd, struct lustre_cfg *cfg)
 	if (rc < 0)
 		RETURN(rc);
 
-	rc = mdc_tunables_init(obd);
+	rc = mdc_tunables_init(obd); /* sysfs, procfs -> /sys和/proc */
 	if (rc)
 		GOTO(err_osc_cleanup, rc);
 

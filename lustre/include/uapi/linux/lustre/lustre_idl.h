@@ -1900,6 +1900,7 @@ enum md_transient_state {
 };
 
 struct mdt_body {
+	/* mbo_fid1可能表示文件本身的fid，而mbo_fid2则可能表示其父目录的fid */
 	struct lu_fid mbo_fid1;
 	struct lu_fid mbo_fid2;
 	struct lustre_handle mbo_open_handle;
@@ -2713,12 +2714,12 @@ struct mgs_nidtbl_entry {
 };
 
 enum mgs_cfg_type {
-	MGS_CFG_T_CONFIG	= 0,
-	MGS_CFG_T_SPTLRPC	= 1,
-	MGS_CFG_T_RECOVER	= 2,
-	MGS_CFG_T_PARAMS	= 3,
-	MGS_CFG_T_NODEMAP	= 4,
-	MGS_CFG_T_BARRIER	= 5,
+	MGS_CFG_T_CONFIG	= 0,	/* 基本配置 */
+	MGS_CFG_T_SPTLRPC	= 1,	/* rpc 相关配置 */
+	MGS_CFG_T_RECOVER	= 2,	/* 恢复配置 */
+	MGS_CFG_T_PARAMS	= 3,	/* 参数配置 */
+	MGS_CFG_T_NODEMAP	= 4,	/* nodemap 配置 */
+	MGS_CFG_T_BARRIER	= 5,	/* barrier 同步配置 */
 	MGS_CFG_T_MAX
 };
 

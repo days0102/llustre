@@ -2112,6 +2112,12 @@ static int osd_start(struct lustre_sb_info *lsi, unsigned long mflags)
 	bitmap_to_arr32(&lmd_flags, lmd->lmd_flags, LMD_FLG_NUM_FLAGS);
 	snprintf(flagstr, sizeof(flagstr), "%lu:%u", mflags, lmd_flags);
 
+	/**
+	 * @brief obd 设备提供了 Lustre 组件级别的抽象
+	 * 		  可以在不知道特定设备的情况下应用通用操作
+	 */
+
+	/* 根据obdname获取对应的obd结构体实例 */
 	obd = class_name2obd(lsi->lsi_osd_obdname);
 	if (!obd) {
 		rc = lustre_start_simple(lsi->lsi_osd_obdname,
@@ -2135,6 +2141,9 @@ static int osd_start(struct lustre_sb_info *lsi, unsigned long mflags)
 			RETURN(-EALREADY);
 	}
 
+	/* 连接到对象存储设备OSD以建立通信链路
+	 * 是分布式文件系统客户端与服务器之间通信的基础
+	 */
 	rc = obd_connect(NULL, &lsi->lsi_osd_exp,
 			 obd, &obd->obd_uuid, NULL, NULL);
 

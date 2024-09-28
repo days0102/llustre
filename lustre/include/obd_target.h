@@ -38,11 +38,17 @@
 #define OBT_MAGIC       0xBDDECEAE
 /* hold common fields for "target" device */
 struct obd_device_target {
+	/* 魔法数字，用于验证结构体的正确性 */
 	__u32			obt_magic;
+	/* 实例编号，标识特定的目标设备实例 */
 	__u32			obt_instance;
+	/* 指向逻辑目标设备的指针，用于关联逻辑设备信息 */
 	struct lu_target       *obt_lut;
+	/* 目标设备的挂载次数，用于跟踪设备使用情况 */
 	__u64			obt_mount_count;
+	/* 目标设备的工作统计信息，用于性能监控和分析 */
 	struct obd_job_stats	obt_jobstats;
+	/* 指向节点映射配置文件的指针，用于网络通信配置 */
 	struct nm_config_file	*obt_nodemap_config_file;
 };
 

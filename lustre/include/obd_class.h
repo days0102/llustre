@@ -259,11 +259,11 @@ static inline unsigned long ll_get_cfg_instance(struct super_block *sb)
 	return (unsigned long)sb;
 }
 
-#define CONFIG_SUB_SPTLRPC	0x01
-#define CONFIG_SUB_RECOVER	0x02
-#define CONFIG_SUB_PARAMS	0x04
-#define CONFIG_SUB_NODEMAP	0x08
-#define CONFIG_SUB_BARRIER	0x10
+#define CONFIG_SUB_SPTLRPC	0x01  /* 支持特殊远程过程调用 */
+#define CONFIG_SUB_RECOVER	0x02  /* 支持恢复或容错机制 */
+#define CONFIG_SUB_PARAMS	0x04  /* 支持参数管理功能 */
+#define CONFIG_SUB_NODEMAP	0x08  /* 支持节点映射或网络中的节点识别 */
+#define CONFIG_SUB_BARRIER	0x10  /* 现同步屏障功能，可能用于进程间的同步 */
 
 /* Sub clds should be attached to the config_llog_data when processing
  * config log for client or server target. */
@@ -584,7 +584,7 @@ static inline int obd_setup(struct obd_device *obd, struct lustre_cfg *cfg)
 
 	ENTRY;
 
-	wait_var_event(&type->typ_lu,
+	wait_var_event(&type->typ_lu,	/* 等待 class_register_type() 注册 OBD_DEVICE */
 		       smp_load_acquire(&type->typ_lu) != OBD_LU_TYPE_SETUP);
 	ldt = type->typ_lu;
 	if (ldt != NULL) {
@@ -599,6 +599,13 @@ static inline int obd_setup(struct obd_device *obd, struct lustre_cfg *cfg)
 		if (rc == 0) {
 			struct lu_device *dev;
 			env.le_ses = &session_ctx;
+			/**
+			 * @brief 为对应设备分配内存     初始化
+			 * osd :  						          挂载后端文件系统 
+			 * mgs :  mgs_device_alloc() mgs_init0()  启动 mgs(ptlrpc) 服务
+			 * lov :  lov_device_alloc() lov_init0()  
+			 * mdc :  mdc_device_alloc() mdc_init0()  
+			 */
 			dev = ldt->ldt_ops->ldto_device_alloc(&env, ldt, cfg);
 			lu_env_fini(&env);
 			if (!IS_ERR(dev)) {

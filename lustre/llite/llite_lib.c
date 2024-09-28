@@ -1449,7 +1449,7 @@ int ll_fill_super(struct super_block *sb)
 	/* Call ll_debugfs_register_super() before lustre_process_log()
 	 * so that "llite.*.*" params can be processed correctly.
 	 */
-	err = ll_debugfs_register_super(sb, name);
+	err = ll_debugfs_register_super(sb, name);		/* /sys,/proc */
 	if (err < 0) {
 		CERROR("%s: could not register mountpoint in llite: rc = %d\n",
 		       sbi->ll_fsname, err);

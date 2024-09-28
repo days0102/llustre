@@ -607,6 +607,19 @@ struct obd_llog_group {
 /* corresponds to one of the obd's */
 #define OBD_DEVICE_MAGIC        0XAB5CD6EF
 
+/**
+ * @brief obd 设备提供了 Lustre 组件级别的抽象，可以在不知道特定设备的情况下应用通用操作
+ * 
+ * 每个 obd 设备都分配了一个整数(obd_minor)，在给定节点上最多可以创建 MAX_OBD_DEVICES
+ * 可以通过整数(obd_minor)、名称或 uid 来检索 obd 设备。所有obd设备都存储在内部的数组中
+ * 该API 大致可分为以下五个类别：
+ * 1.注册和注销设备类型。
+ * 2.分配和释放OBD设备，使用obd_device_alloc()和obd_device_free()函数
+ * 3.创建和释放OBD设备，可以通过class_newdev()函数使用字符串类型和字符串名称创建新的OBD设备
+ *   可以通过提供要释放的OBD设备的指针来释放一个设备。在这两种情况下，它们都会调用分配和释放函数
+ * 4.搜索，可以通过class_search_type()函数按类型进行搜索
+ * 5.转换工具
+ */
 struct obd_device {
 	struct obd_type			*obd_type;
 	__u32				 obd_magic; /* OBD_DEVICE_MAGIC */
