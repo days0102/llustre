@@ -130,3 +130,11 @@ doxygen.*
 /lnet/klnds/o2iblnd/Module.symvers
 /debian/changelog
 /debian/control
+
+
+### Insert new rules here ###
+
+# 忽略测试和调试用的image
+*.img
+# Lustre 挂载目录
+script/mnt/

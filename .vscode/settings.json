@@ -1,0 +1,11 @@
+{
+    "files.associations": {
+        "lustre_dlm.h": "c",
+        "list.h": "c",
+        "backing-dev.h": "c",
+        "uuid.h": "c",
+        "lnet-types.h": "c",
+        "libcfs.h": "c",
+        "lnet_rdma.h": "c"
+    }
+}

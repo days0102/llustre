@@ -78,6 +78,7 @@
 #include "mount_utils.h"
 
 #define MAX_HW_SECTORS_KB_PATH	"queue/max_hw_sectors_kb"
+#define MAX_SECTORS_KB_PATH	"queue/max_sectors_kb"
 #define SCHEDULER_PATH		"queue/scheduler"
 #define STRIPE_CACHE_SIZE	"md/stripe_cache_size"
 
@@ -159,6 +160,17 @@ int ldiskfs_write_ldd(struct mkfs_opts *mop)
 		dev = mop->mo_loopdev;
 
 	/* Multiple mount protection enabled if failover node specified */
+	/**
+	 * Failover 模式是一种备份操作模式，“故障转移，失败自动切换”
+	 * 	   (MGS)
+	 *     *  *
+	 *    *    *
+	 *  (MGT) (MGT)
+	 *    主 	从
+	 * “failover”模式意味其中多个节点可能尝试挂载同一个文件系统。
+	 * 例如，在一个双机热备系统中，如果主节点失败，备用节点应该能
+	 * 够接管并挂载相同的文件系统来继续提供服务。
+	 */
 	if (mop->mo_flags & MO_FAILOVER) {
 		if (!backfs)
 			ext2fs_open(dev, open_flags, 0, 0,
@@ -505,7 +517,19 @@ static int enable_default_ext4_features(struct mkfs_opts *mop, char *anchor,
 			append_unique(anchor, ",", "extents", NULL, maxbuflen);
 		else
 			append_unique(anchor, ",", "^extents", NULL, maxbuflen);
-		append_unique(anchor, ",", "dirdata", NULL, maxbuflen);
+
+		/*
+		 * dirdata 通过将目录条目的数据与文件的数据块一起存储在同一个组中来提高目录操作的性能。
+		 * 这样可以减少查找文件时磁盘寻道的次数，从而提高性能。
+		 */
+		/*
+		 * Notice: dirdata 在 (Ubuntu 24 LTS + e2fsprogs 1.47.0-2.4) mkfs 存在问题，
+		 * 		   在(Ubuntu 24 LTS + e2fsprogs 1.47.0-2.4)上暂时注释关闭，以正常使用
+		 * 
+		 * 如果不同步安装，需要更新 /usr/lib/mount_osd_ldiskfs.so 动态库文件
+		 * 
+		 */
+		// append_unique(anchor, ",", "dirdata", NULL, maxbuflen);
 	}
 
 	/* Multiple mount protection enabled only if failover node specified */
@@ -681,6 +705,21 @@ int ldiskfs_make_lustre(struct mkfs_opts *mop)
 			/* If the LUN size is just over 2^32 blocks, limit the
 			 * filesystem size to 2^32-1 blocks to avoid problems
 			 * with ldiskfs/mkfs not handling this well. b=22906
+			 * 
+			 * 这段代码的目的是为了兼容性和错误预防：
+			 * 1. 许多早期的文件系统和相关工具（如ldiskfs和mkfs），设计时可能
+			 * 没有考虑到超过32位地址空间的情况。因此，当尝试在超过2^32个块的设
+			 * 备上创建文件系统时，这些工具可能会遇到问题或失败。
+			 * 2. 当逻辑单元LUN大小刚好超过2^32块时，如果不进行处理，直接使用这
+			 * 个值可能会导致整数溢出或计算错误，尤其是在32位系统或不支持64位地址
+			 * 空间的软件中。将大小限制在2^32-1块可以确保所有相关的计算和操作都在
+			 * 安全范围内进行，避免潜在的错误。
+			 * 
+			 * 如果LUN大小远大于2^32块，代码会启用enable_64bit标志，
+			 * 后续的处理将使用64位的地址空间和数据类型，以支持更大的文件系统。
+			 * 这是为了适应现代存储设备越来越大的容量需求。
+			 * 
+			 * 通过这种方式，代码试图在保持向后兼容的同时，也提供对大容量存储的支持。
 			 */
 			if (block_count < 0x100002000ULL)
 				mop->mo_device_kb =
@@ -839,6 +878,7 @@ int ldiskfs_make_lustre(struct mkfs_opts *mop)
 		strscat(mop->mo_mkfsopts, " -q", sizeof(mop->mo_mkfsopts));
 
 	/* start handle -O mkfs options */
+	/* 特征 */
 	start = strstr(mop->mo_mkfsopts, "-O");
 	if (start) {
 		if (strstr(start + 2, "-O") != NULL) {
@@ -861,6 +901,7 @@ int ldiskfs_make_lustre(struct mkfs_opts *mop)
 	/* end handle -O mkfs options */
 
 	/* start handle -E mkfs options */
+	/* 拓展属性 */
 	start = strstr(mop->mo_mkfsopts, "-E");
 	if (start) {
 		if (strstr(start + 2, "-E") != NULL) {
@@ -886,7 +927,7 @@ int ldiskfs_make_lustre(struct mkfs_opts *mop)
 	 */
 	if (!enable_64bit && strstr(mop->mo_mkfsopts, "meta_bg") == NULL &&
 	    IS_OST(&mop->mo_ldd) && mop->mo_device_kb > 100 * 1024) {
-		unsigned int group_blocks = mop->mo_blocksize_kb * 8192;
+		unsigned int group_blocks = mop->mo_blocksize_kb * 8192; // 位图bitmap 8*1k
 		unsigned int desc_per_block = mop->mo_blocksize_kb * 1024 / 32;
 		unsigned int resize_blks;
 		__u64 block_count = mop->mo_device_kb / mop->mo_blocksize_kb;
@@ -901,17 +942,17 @@ int ldiskfs_make_lustre(struct mkfs_opts *mop)
 	}
 
 	/* Avoid zeroing out the full journal - speeds up mkfs */
-	if (is_e2fsprogs_feature_supp("-E lazy_journal_init")) {
+	if (is_e2fsprogs_feature_supp("-E lazy_journal_init")) { /* 延迟初始化日志 */
 		append_unique(start, ext_opts ? "," : " -E ",
 			      "lazy_journal_init", NULL, maxbuflen);
 		ext_opts = 1;
 	}
-	if (is_e2fsprogs_feature_supp("-E lazy_itable_init=0")) {
+	if (is_e2fsprogs_feature_supp("-E lazy_itable_init=0")) { /* 延迟初始化inode */
 		append_unique(start, ext_opts ? "," : " -E ",
 			    "lazy_itable_init", "0", maxbuflen);
 		ext_opts = 1;
 	}
-	if (is_e2fsprogs_feature_supp("-E packed_meta_blocks")) {
+	if (is_e2fsprogs_feature_supp("-E packed_meta_blocks")) { /* 元数据块打包存储 */
 		append_unique(start, ext_opts ? "," : " -E ",
 			      "packed_meta_blocks", NULL, maxbuflen);
 		ext_opts = 1;
@@ -972,6 +1013,13 @@ int ldiskfs_prepare_lustre(struct mkfs_opts *mop,
 	}
 
 	if (IS_MDT(ldd) || IS_MGS(ldd))
+		/*
+		 * 在类Unix系统中，user_xattr是一个挂载选项，允许在文件和目录上定义用户自定义的扩展属性。
+		 * 扩展属性可以存储超出通用权限、所有权等文件元数据，user_xattr特别允许用户设置和操作这些属性。
+		 * 
+		 * MDT节点和MGS节点都需要user_xattr，可能用于安全策略或者应用程序特定的元数据。
+		 * OST节点不需要user_xattr，因为OST节点存储文件块，不需要扩展属性。
+		 */
 		strscat(wanted_mountopts, ",user_xattr", len);
 
 	return 0;
@@ -979,6 +1027,9 @@ int ldiskfs_prepare_lustre(struct mkfs_opts *mop,
 
 int ldiskfs_fix_mountopts(struct mkfs_opts *mop, char *mountopts, size_t len)
 {
+	/*
+	 * errors=remount-ro 当文件系统检测到错误时，自动将文件系统重新挂载为只读模式。
+	 */
 	if (strstr(mountopts, "errors=") == NULL)
 		strscat(mountopts, ",errors=remount-ro", len);
 
@@ -1022,6 +1073,10 @@ static int write_file(const char *path, const char *buf)
 	return rc < 0 ? errno : 0;
 }
 
+/*
+ * 调整Linux系统中多路径设备(RAID)条带缓存的大小。
+ * 通过写/sys/block/<device>/md/stripe_cache_size文件修改。
+ */
 static int tune_md_stripe_cache_size(const char *sys_path,
 				     struct mount_opts *mop)
 {
@@ -1064,6 +1119,78 @@ static int tune_md_stripe_cache_size(const char *sys_path,
 	return 0;
 }
 
+// static int tune_max_sectors_kb(const char *sys_path, struct mount_opts *mop)
+// {
+// 	char path[PATH_MAX];
+// 	unsigned long max_hw_sectors_kb;
+// 	unsigned long old_max_sectors_kb;
+// 	unsigned long new_max_sectors_kb;
+// 	char buf[3 * sizeof(old_max_sectors_kb) + 2];
+// 	int rc;
+
+// 	if (mop->mo_max_sectors_kb >= 0) {
+// 		new_max_sectors_kb = mop->mo_max_sectors_kb;
+// 		goto have_new_max_sectors_kb;
+// 	}
+
+// 	snprintf(path, sizeof(path), "%s/%s", sys_path, MAX_HW_SECTORS_KB_PATH);
+// 	rc = read_file(path, buf, sizeof(buf));
+// 	if (rc != 0) {
+// 		/* No MAX_HW_SECTORS_KB_PATH isn't necessary an
+// 		 * error for some devices. */
+// 		return 0;
+// 	}
+
+// 	max_hw_sectors_kb = strtoul(buf, NULL, 0);
+// 	if (max_hw_sectors_kb == 0 || max_hw_sectors_kb == ULLONG_MAX) {
+// 		/* No digits at all or something weird. */
+// 		return 0;
+// 	}
+
+// 	new_max_sectors_kb = max_hw_sectors_kb;
+
+// 	/* Don't increase IO request size limit past 16MB.  It is
+// 	 * about PTLRPC_MAX_BRW_SIZE, but that isn't in a public
+// 	 * header.  Note that even though the block layer allows
+// 	 * larger values, setting max_sectors_kb = 32768 causes
+// 	 * crashes (LU-6974). */
+// 	if (new_max_sectors_kb > 16 * 1024)
+// 		new_max_sectors_kb = 16 * 1024;
+
+// have_new_max_sectors_kb:
+// 	snprintf(path, sizeof(path), "%s/%s", sys_path, MAX_SECTORS_KB_PATH);
+// 	rc = read_file(path, buf, sizeof(buf));
+// 	if (rc != 0) {
+// 		/* No MAX_SECTORS_KB_PATH isn't necessary an error for
+// 		 * some devices. */
+// 		return 0;
+// 	}
+
+// 	old_max_sectors_kb = strtoul(buf, NULL, 0);
+// 	if (old_max_sectors_kb == 0 || old_max_sectors_kb == ULLONG_MAX) {
+// 		/* No digits at all or something weird. */
+// 		return 0;
+// 	}
+
+// 	if (new_max_sectors_kb <= old_max_sectors_kb)
+// 		return 0;
+
+// 	snprintf(buf, sizeof(buf), "%lu", new_max_sectors_kb);
+// 	rc = write_file(path, buf);
+// 	if (rc != 0) {
+// 		if (verbose)
+// 			fprintf(stderr, "warning: cannot write '%s': %s\n",
+// 				path, strerror(errno));
+// 		return rc;
+// 	}
+
+// 	fprintf(stderr, "%s: increased '%s' from %lu to %lu\n",
+// 		progname, path, old_max_sectors_kb, new_max_sectors_kb);
+
+// 	return 0;
+// }
+
+/* 修改块设备的调度程序 */
 static int tune_block_dev_scheduler(const char *sys_path, const char *new_sched)
 {
 	char path[PATH_MAX];

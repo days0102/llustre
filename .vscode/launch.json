@@ -1,0 +1,88 @@
+{
+    // 使用 IntelliSense 了解相关属性。 
+    // 悬停以查看现有属性的描述。
+    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "mount.lustre",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/lustre/utils/mount.lustre",
+            "args": [
+                "/dev/loop25",
+                "${workspaceFolder}/script/mnt/debug"
+            ],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "miDebuggerPath": "${workspaceFolder}/script/root_debug",
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "为 gdb 启用整齐打印",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "将反汇编风格设置为 Intel",
+                    "text": "-gdb-set disassembly-flavor intel",
+                    "ignoreFailures": true
+                }
+            ]
+        },
+        {
+            "name": "mkfs.lustre",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/lustre/utils/mkfs.lustre",
+            "args": [
+                "--mgs",
+                "/dev/loop25"
+            ],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/script",
+            "environment": [],
+            "externalConsole": false,
+            "miDebuggerPath": "${workspaceFolder}/script/root_debug",
+            "MIMode": "gdb",
+            "symbolLoadInfo": {
+                "loadAll": true,
+                "exceptionList": ""
+            },
+            "setupCommands": [
+                {
+                    "description": "为 gdb 启用整齐打印",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "将反汇编风格设置为 Intel",
+                    "text": "-gdb-set disassembly-flavor intel",
+                    "ignoreFailures": true
+                }
+            ]
+        },
+        {
+            "name": "(gdb) 附加",
+            "type": "cppdbg",
+            "request": "attach",
+            "program": "${workspaceFolder}/lustre/osp/osp.o",
+            "processId":"${command:pickProcess}",
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "为 gdb 启用整齐打印",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "将反汇编风格设置为 Intel",
+                    "text": "-gdb-set disassembly-flavor intel",
+                    "ignoreFailures": true
+                }
+            ]
+        }
+    ]
+}
