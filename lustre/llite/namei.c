@@ -1403,6 +1403,7 @@ static int ll_new_node(struct inode *dir, struct dentry *dchild,
 	if (unlikely(tgt != NULL))
 		tgt_len = strlen(tgt) + 1;
 
+again:
 	op_data = ll_prep_md_op_data(NULL, dir, NULL, name->name,
 				     name->len, 0, opc, NULL);
 	if (IS_ERR(op_data))

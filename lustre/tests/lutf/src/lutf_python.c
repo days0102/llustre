@@ -188,7 +188,10 @@ lutf_rc_t python_init(void)
 
 	//char *path;
 	//char new_path[MAX_STR_LEN];
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 	Py_SetProgramName(program);
+#pragma GCC diagnostic pop
 	//char *py_args[1];
 
 	//py_args[0] = argv[0];

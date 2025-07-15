@@ -1,8 +1,8 @@
-lustre (lustre/ChangeLog: needs mergelustre/kernel-patches/which-patch: needs mergelustre/osd-ldiskfs/osd-io.c: needs merge2.14.0-21-gd4b9557-dirty-1) unstable; urgency=low
+lustre (2.14.51-233-g1e9fd69-dirty-1) unstable; urgency=low
 
   * Automated changelog entry update
 
- -- Andreas Dilger <adilger@whamcloud.com>  Tue, 15 Jul 2025 09:16:52 +0800
+ -- Andreas Dilger <adilger@whamcloud.com>  Tue, 15 Jul 2025 09:59:05 +0800
 
 lustre (2.12.0-dirty-1) unstable; urgency=low
 
