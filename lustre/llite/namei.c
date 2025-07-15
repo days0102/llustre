@@ -1387,6 +1387,8 @@ void ll_update_times(struct ptlrpc_request *request, struct inode *inode)
 		inode->i_ctime.tv_sec = body->mbo_ctime;
 }
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-label"
 static int ll_new_node(struct inode *dir, struct dentry *dchild,
 		       const char *tgt, umode_t mode, int rdev, __u32 opc)
 {
@@ -1560,6 +1562,7 @@ err_exit:
 
 	RETURN(err);
 }
+#pragma GCC diagnostic pop
 
 static int ll_mknod(struct inode *dir, struct dentry *dchild, umode_t mode,
 		    dev_t rdev)
