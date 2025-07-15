@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #define DEBUG_SUBSYSTEM S_RPC
@@ -63,6 +62,8 @@ MODULE_PARM_DESC(at_extra, "How much extra time to give with each early reply");
 static int ptlrpc_server_post_idle_rqbds(struct ptlrpc_service_part *svcpt);
 static void ptlrpc_server_hpreq_fini(struct ptlrpc_request *req);
 static void ptlrpc_at_remove_timed(struct ptlrpc_request *req);
+static int ptlrpc_start_threads(struct ptlrpc_service *svc);
+static int ptlrpc_start_thread(struct ptlrpc_service_part *svcpt, int wait);
 
 /** Holds a list of all PTLRPC services */
 LIST_HEAD(ptlrpc_all_services);
@@ -743,7 +744,7 @@ struct ptlrpc_service *ptlrpc_register_service(struct ptlrpc_service_conf *conf,
 						 strlen(cconf->cc_pattern),
 						 0, ncpts - 1, &el);
 			if (rc != 0) {
-				CERROR("%s: invalid CPT pattern string: %s",
+				CERROR("%s: invalid CPT pattern string: %s\n",
 				       conf->psc_name, cconf->cc_pattern);
 				RETURN(ERR_PTR(-EINVAL));
 			}
@@ -905,8 +906,6 @@ void ptlrpc_server_drop_request(struct ptlrpc_request *req)
 	struct ptlrpc_service_part	  *svcpt = rqbd->rqbd_svcpt;
 	struct ptlrpc_service		  *svc = svcpt->scp_service;
 	int				   refcount;
-	struct list_head			  *tmp;
-	struct list_head			  *nxt;
 
 	if (!atomic_dec_and_test(&req->rq_refcount))
 		return;
@@ -961,9 +960,7 @@ void ptlrpc_server_drop_request(struct ptlrpc_request *req)
 			 * remove rqbd's reqs from svc's req history while
 			 * I've got the service lock
 			 */
-			list_for_each(tmp, &rqbd->rqbd_reqs) {
-				req = list_entry(tmp, struct ptlrpc_request,
-						 rq_list);
+			list_for_each_entry(req, &rqbd->rqbd_reqs, rq_list) {
 				/* Track the highest culled req seq */
 				if (req->rq_history_seq >
 				    svcpt->scp_hist_seq_culled) {
@@ -975,10 +972,9 @@ void ptlrpc_server_drop_request(struct ptlrpc_request *req)
 
 			spin_unlock(&svcpt->scp_lock);
 
-			list_for_each_safe(tmp, nxt, &rqbd->rqbd_reqs) {
-				req = list_entry(rqbd->rqbd_reqs.next,
-						 struct ptlrpc_request,
-						 rq_list);
+			while ((req = list_first_entry_or_null(
+					&rqbd->rqbd_reqs,
+					struct ptlrpc_request, rq_list))) {
 				list_del(&req->rq_list);
 				ptlrpc_server_free_request(req);
 			}
@@ -1356,7 +1352,8 @@ static int ptlrpc_at_send_early_reply(struct ptlrpc_request *req)
 
 	ENTRY;
 
-	if (CFS_FAIL_CHECK(OBD_FAIL_TGT_REPLAY_RECONNECT)) {
+	if (CFS_FAIL_CHECK(OBD_FAIL_TGT_REPLAY_RECONNECT) ||
+	    CFS_FAIL_PRECHECK(OBD_FAIL_PTLRPC_ENQ_RESEND)) {
 		/* don't send early reply */
 		RETURN(1);
 	}
@@ -1862,6 +1859,7 @@ static int ptlrpc_server_request_add(struct ptlrpc_service_part *svcpt,
 				ptlrpc_at_remove_timed(orig);
 			spin_unlock(&orig->rq_rqbd->rqbd_svcpt->scp_at_lock);
 			orig->rq_deadline = req->rq_deadline;
+			orig->rq_rep_mbits = req->rq_rep_mbits;
 			if (likely(linked))
 				ptlrpc_at_add_timed(orig);
 			ptlrpc_server_drop_request(orig);
@@ -2055,6 +2053,7 @@ static int ptlrpc_server_handle_req_in(struct ptlrpc_service_part *svcpt,
 	struct ptlrpc_service *svc = svcpt->scp_service;
 	struct ptlrpc_request *req;
 	__u32 deadline;
+	__u32 opc;
 	int rc;
 
 	ENTRY;
@@ -2111,8 +2110,9 @@ static int ptlrpc_server_handle_req_in(struct ptlrpc_service_part *svcpt,
 		goto err_req;
 	}
 
+	opc = lustre_msg_get_opc(req->rq_reqmsg);
 	if (OBD_FAIL_CHECK(OBD_FAIL_PTLRPC_DROP_REQ_OPC) &&
-	    lustre_msg_get_opc(req->rq_reqmsg) == cfs_fail_val) {
+	    opc == cfs_fail_val) {
 		CERROR("drop incoming rpc opc %u, x%llu\n",
 		       cfs_fail_val, req->rq_xid);
 		goto err_req;
@@ -2126,7 +2126,7 @@ static int ptlrpc_server_handle_req_in(struct ptlrpc_service_part *svcpt,
 		goto err_req;
 	}
 
-	switch (lustre_msg_get_opc(req->rq_reqmsg)) {
+	switch (opc) {
 	case MDS_WRITEPAGE:
 	case OST_WRITE:
 	case OUT_UPDATE:
@@ -2197,7 +2197,19 @@ static int ptlrpc_server_handle_req_in(struct ptlrpc_service_part *svcpt,
 		thread->t_env->le_ses = &req->rq_session;
 	}
 
+
+	if (unlikely(OBD_FAIL_PRECHECK(OBD_FAIL_PTLRPC_ENQ_RESEND) &&
+		     (opc == LDLM_ENQUEUE) &&
+		     (lustre_msg_get_flags(req->rq_reqmsg) & MSG_RESENT)))
+		OBD_FAIL_TIMEOUT(OBD_FAIL_PTLRPC_ENQ_RESEND, 6);
+
 	ptlrpc_at_add_timed(req);
+
+	if (opc != OST_CONNECT && opc != MDS_CONNECT &&
+	    opc != MGS_CONNECT && req->rq_export != NULL) {
+		if (exp_connect_flags2(req->rq_export) & OBD_CONNECT2_REP_MBITS)
+			req->rq_rep_mbits = lustre_msg_get_mbits(req->rq_reqmsg);
+	}
 
 	/* Move it over to the request processing queue */
 	rc = ptlrpc_server_request_add(svcpt, req);
@@ -3016,7 +3028,7 @@ static void ptlrpc_stop_hr_threads(void)
 		if (hrp->hrp_thrs == NULL)
 			continue; /* uninitialized */
 		for (j = 0; j < hrp->hrp_nthrs; j++)
-			wake_up_all(&hrp->hrp_thrs[j].hrt_waitq);
+			wake_up(&hrp->hrp_thrs[j].hrt_waitq);
 	}
 
 	cfs_percpt_for_each(hrp, i, ptlrpc_hr.hr_partitions) {
@@ -3116,7 +3128,7 @@ static void ptlrpc_svcpt_stop_threads(struct ptlrpc_service_part *svcpt)
 /**
  * Stops all threads of a particular service \a svc
  */
-void ptlrpc_stop_all_threads(struct ptlrpc_service *svc)
+static void ptlrpc_stop_all_threads(struct ptlrpc_service *svc)
 {
 	struct ptlrpc_service_part *svcpt;
 	int i;
@@ -3131,7 +3143,7 @@ void ptlrpc_stop_all_threads(struct ptlrpc_service *svc)
 	EXIT;
 }
 
-int ptlrpc_start_threads(struct ptlrpc_service *svc)
+static int ptlrpc_start_threads(struct ptlrpc_service *svc)
 {
 	int rc = 0;
 	int i;
@@ -3163,7 +3175,7 @@ int ptlrpc_start_threads(struct ptlrpc_service *svc)
 	RETURN(rc);
 }
 
-int ptlrpc_start_thread(struct ptlrpc_service_part *svcpt, int wait)
+static int ptlrpc_start_thread(struct ptlrpc_service_part *svcpt, int wait)
 {
 	struct ptlrpc_thread *thread;
 	struct ptlrpc_service *svc;
@@ -3490,7 +3502,23 @@ ptlrpc_service_purge_all(struct ptlrpc_service *svc)
 			ptlrpc_server_finish_active_request(svcpt, req);
 		}
 
-		LASSERT(list_empty(&svcpt->scp_rqbd_posted));
+		/*
+		 * The portal may be shared by several services (eg:OUT_PORTAL).
+		 * So the request could be referenced by other target. So we
+		 * have to wait the ptlrpc_server_drop_request invoked.
+		 *
+		 * TODO: move the req_buffer as global rather than per service.
+		 */
+		spin_lock(&svcpt->scp_lock);
+		while (!list_empty(&svcpt->scp_rqbd_posted)) {
+			spin_unlock(&svcpt->scp_lock);
+			wait_event_idle_timeout(svcpt->scp_waitq,
+				list_empty(&svcpt->scp_rqbd_posted),
+				cfs_time_seconds(1));
+			spin_lock(&svcpt->scp_lock);
+		}
+		spin_unlock(&svcpt->scp_lock);
+
 		LASSERT(svcpt->scp_nreqs_incoming == 0);
 		LASSERT(svcpt->scp_nreqs_active == 0);
 		/*

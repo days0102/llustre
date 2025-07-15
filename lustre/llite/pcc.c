@@ -787,17 +787,16 @@ pcc_dataset_get(struct pcc_super *super, enum lu_pcc_type type, __u32 id)
 	struct pcc_dataset *dataset;
 	struct pcc_dataset *selected = NULL;
 
-	if (id == 0)
-		return NULL;
-
 	/*
 	 * archive ID (read-write ID) or read-only ID is unique in the list,
 	 * we just return last added one as first priority.
+	 * @id == 0, it will select the first one as candidate dataset.
 	 */
 	down_read(&super->pccs_rw_sem);
 	list_for_each_entry(dataset, &super->pccs_datasets, pccd_linkage) {
-		if (type == LU_PCC_READWRITE && (dataset->pccd_rwid != id ||
-		    !(dataset->pccd_flags & PCC_DATASET_RWPCC)))
+		if (type == LU_PCC_READWRITE &&
+		    (!(dataset->pccd_rwid == id || id == 0) ||
+		     !(dataset->pccd_flags & PCC_DATASET_RWPCC)))
 			continue;
 		atomic_inc(&dataset->pccd_refcount);
 		selected = dataset;
@@ -805,7 +804,8 @@ pcc_dataset_get(struct pcc_super *super, enum lu_pcc_type type, __u32 id)
 	}
 	up_read(&super->pccs_rw_sem);
 	if (selected)
-		CDEBUG(D_CACHE, "matched id %u, PCC mode %d\n", id, type);
+		CDEBUG(D_CACHE, "matched id %u:%u, PCC mode %d\n",
+		       selected->pccd_rwid, id, type);
 
 	return selected;
 }
@@ -1060,15 +1060,15 @@ void pcc_inode_free(struct inode *inode)
 #define MAX_PCC_DATABASE_PATH (6 * 5 + FID_NOBRACE_LEN + 1)
 static int pcc_fid2dataset_path(char *buf, int sz, struct lu_fid *fid)
 {
-	return snprintf(buf, sz, "%04x/%04x/%04x/%04x/%04x/%04x/"
-			DFID_NOBRACE,
-			(fid)->f_oid       & 0xFFFF,
-			(fid)->f_oid >> 16 & 0xFFFF,
-			(unsigned int)((fid)->f_seq       & 0xFFFF),
-			(unsigned int)((fid)->f_seq >> 16 & 0xFFFF),
-			(unsigned int)((fid)->f_seq >> 32 & 0xFFFF),
-			(unsigned int)((fid)->f_seq >> 48 & 0xFFFF),
-			PFID(fid));
+	return scnprintf(buf, sz, "%04x/%04x/%04x/%04x/%04x/%04x/"
+			 DFID_NOBRACE,
+			 (fid)->f_oid       & 0xFFFF,
+			 (fid)->f_oid >> 16 & 0xFFFF,
+			 (unsigned int)((fid)->f_seq       & 0xFFFF),
+			 (unsigned int)((fid)->f_seq >> 16 & 0xFFFF),
+			 (unsigned int)((fid)->f_seq >> 32 & 0xFFFF),
+			 (unsigned int)((fid)->f_seq >> 48 & 0xFFFF),
+			 PFID(fid));
 }
 
 static inline const struct cred *pcc_super_cred(struct super_block *sb)
@@ -1129,27 +1129,27 @@ static int pcc_get_layout_info(struct inode *inode, struct cl_layout *clt)
 		RETURN(PTR_ERR(env));
 
 	rc = cl_object_layout_get(env, lli->lli_clob, clt);
-	if (rc)
+	if (rc < 0)
 		CDEBUG(D_INODE, "Cannot get layout for "DFID"\n",
 		       PFID(ll_inode2fid(inode)));
 
 	cl_env_put(env, &refcheck);
-	RETURN(rc);
+	RETURN(rc < 0 ? rc : 0);
 }
 
 static int pcc_fid2dataset_fullpath(char *buf, int sz, struct lu_fid *fid,
 				    struct pcc_dataset *dataset)
 {
-	return snprintf(buf, sz, "%s/%04x/%04x/%04x/%04x/%04x/%04x/"
-			DFID_NOBRACE,
-			dataset->pccd_pathname,
-			(fid)->f_oid       & 0xFFFF,
-			(fid)->f_oid >> 16 & 0xFFFF,
-			(unsigned int)((fid)->f_seq       & 0xFFFF),
-			(unsigned int)((fid)->f_seq >> 16 & 0xFFFF),
-			(unsigned int)((fid)->f_seq >> 32 & 0xFFFF),
-			(unsigned int)((fid)->f_seq >> 48 & 0xFFFF),
-			PFID(fid));
+	return scnprintf(buf, sz, "%s/%04x/%04x/%04x/%04x/%04x/%04x/"
+			 DFID_NOBRACE,
+			 dataset->pccd_pathname,
+			 (fid)->f_oid       & 0xFFFF,
+			 (fid)->f_oid >> 16 & 0xFFFF,
+			 (unsigned int)((fid)->f_seq       & 0xFFFF),
+			 (unsigned int)((fid)->f_seq >> 16 & 0xFFFF),
+			 (unsigned int)((fid)->f_seq >> 32 & 0xFFFF),
+			 (unsigned int)((fid)->f_seq >> 48 & 0xFFFF),
+			 PFID(fid));
 }
 
 /* Must be called with pcci->pcci_lock held */
@@ -1548,7 +1548,7 @@ static void pcc_io_fini(struct inode *inode)
 
 	LASSERT(pcci && atomic_read(&pcci->pcci_active_ios) > 0);
 	if (atomic_dec_and_test(&pcci->pcci_active_ios))
-		wake_up_all(&pcci->pcci_waitq);
+		wake_up(&pcci->pcci_waitq);
 }
 
 
@@ -1760,7 +1760,7 @@ int pcc_inode_getattr(struct inode *inode, u32 request_mask,
 		GOTO(out, rc);
 
 	ll_inode_size_lock(inode);
-	if (ll_file_test_and_clear_flag(lli, LLIF_UPDATE_ATIME) ||
+	if (test_and_clear_bit(LLIF_UPDATE_ATIME, &lli->lli_flags) ||
 	    inode->i_atime.tv_sec < lli->lli_atime)
 		inode->i_atime.tv_sec = lli->lli_atime;
 
@@ -1954,7 +1954,7 @@ int pcc_page_mkwrite(struct vm_area_struct *vma, struct vm_fault *vmf,
 		       "%s: PCC backend fs not support ->page_mkwrite()\n",
 		       ll_i2sbi(inode)->ll_fsname);
 		pcc_ioctl_detach(inode, PCC_DETACH_OPT_UNCACHE);
-		up_read(&mm->mmap_sem);
+		mmap_read_unlock(mm);
 		*cached = true;
 		RETURN(VM_FAULT_RETRY | VM_FAULT_NOPAGE);
 	}
@@ -1981,7 +1981,7 @@ int pcc_page_mkwrite(struct vm_area_struct *vma, struct vm_fault *vmf,
 		 */
 		if (page->mapping == pcc_file->f_mapping) {
 			*cached = true;
-			up_read(&mm->mmap_sem);
+			mmap_read_unlock(mm);
 			RETURN(VM_FAULT_RETRY | VM_FAULT_NOPAGE);
 		}
 
@@ -1995,7 +1995,7 @@ int pcc_page_mkwrite(struct vm_area_struct *vma, struct vm_fault *vmf,
 	if (OBD_FAIL_CHECK(OBD_FAIL_LLITE_PCC_DETACH_MKWRITE)) {
 		pcc_io_fini(inode);
 		pcc_ioctl_detach(inode, PCC_DETACH_OPT_UNCACHE);
-		up_read(&mm->mmap_sem);
+		mmap_read_unlock(mm);
 		RETURN(VM_FAULT_RETRY | VM_FAULT_NOPAGE);
 	}
 
@@ -2684,5 +2684,133 @@ int pcc_ioctl_state(struct file *file, struct inode *inode,
 out_unlock:
 	pcc_inode_unlock(inode);
 	OBD_FREE(buf, buf_len);
+	RETURN(rc);
+}
+
+int pcc_wbc_commit_data(struct inode *inode, __u32 rwid)
+{
+	struct ll_inode_info *lli = ll_i2info(inode);
+	struct pcc_super *super = ll_i2pccs(inode);
+	const struct cred *old_cred;
+	struct pcc_dataset *dataset;
+	struct dentry *pcc_dentry;
+	struct pcc_inode *pcci;
+	struct file *pcc_filp;
+	struct path path;
+	struct pagevec pvec;
+	pgoff_t index = 0;
+	loff_t isize;
+	int nr_pages;
+	int rc;
+
+	ENTRY;
+
+	/* Already instantiate the PCC copy? */
+	pcci = ll_i2pcci(inode);
+	if (pcci && pcc_inode_has_layout(pcci))
+		RETURN(0);
+	/*
+	 * Should this dataset be pinnned on the client to avoid it
+	 * being deleted?
+	 */
+	dataset = pcc_dataset_get(super, LU_PCC_READWRITE, rwid);
+	if (dataset == NULL)
+		RETURN(-ENOENT);
+
+	old_cred = override_creds(super->pccs_cred);
+	rc = __pcc_inode_create(dataset, &lli->lli_fid, &pcc_dentry);
+	if (rc)
+		GOTO(out_dataset_put, rc);
+
+	path.mnt = dataset->pccd_path.mnt;
+	path.dentry = pcc_dentry;
+	pcc_filp = dentry_open(&path, O_WRONLY | O_LARGEFILE, current_cred());
+	if (IS_ERR_OR_NULL(pcc_filp)) {
+		rc = pcc_filp == NULL ? -EINVAL : PTR_ERR(pcc_filp);
+		GOTO(out_dentry, rc);
+	}
+
+	isize = i_size_read(inode);
+	ll_pagevec_init(&pvec, 0);
+	for ( ; ; ) {
+		struct page *page;
+		int i;
+
+#ifdef HAVE_PAGEVEC_LOOKUP_THREE_PARAM
+		nr_pages = pagevec_lookup(&pvec, inode->i_mapping, &index);
+#else
+		nr_pages = pagevec_lookup(&pvec, inode->i_mapping, index,
+					  PAGEVEC_SIZE);
+#endif
+		if (nr_pages <= 0)
+			break;
+
+		for (i = 0; i < nr_pages; i++) {
+			loff_t offset;
+			ssize_t count;
+			char *buf;
+
+			page = pvec.pages[i];
+			lock_page(page);
+			/*
+			 * FIXME: don't need to wait page writeback as there
+			 * is no any writeback backend storage as the page is
+			 * pinned and unevictable in MemFS.
+			 */
+			wait_on_page_writeback(page);
+			//delete_from_page_cache(page);
+			unlock_page(page);
+
+			buf = kmap(page);
+			offset = page->index << PAGE_SHIFT;
+			if (offset + PAGE_SIZE - 1 > isize)
+				count = isize - offset;
+			else
+				count = PAGE_SIZE;
+			rc = pcc_filp_write(pcc_filp, buf, count, &offset);
+			kunmap(page);
+			if (rc < 0) {
+				CERROR("Failed to write PCC copy: rc=%d\n", rc);
+				pagevec_release(&pvec);
+				GOTO(out_fput, rc);
+			}
+		}
+
+		index = page->index + 1;
+		pagevec_release(&pvec);
+		cond_resched();
+	}
+
+	truncate_inode_pages(inode->i_mapping, 0);
+	pcc_inode_lock(inode);
+	pcci = ll_i2pcci(inode);
+	LASSERT(!pcci);
+	OBD_SLAB_ALLOC_PTR_GFP(pcci, pcc_inode_slab, GFP_NOFS);
+	if (pcci == NULL)
+		GOTO(out_unlock, rc = -ENOMEM);
+
+	pcc_inode_attach_set(super, dataset, lli, pcci,
+			     pcc_dentry, LU_PCC_READWRITE);
+
+	rc = pcc_layout_xattr_set(pcci, 0);
+	if (rc) {
+		(void) pcc_inode_remove(inode, pcc_dentry);
+		pcc_inode_put(pcci);
+		GOTO(out_unlock, rc);
+	}
+	/* Set the layout generation of newly created file with 0 */
+	pcc_layout_gen_set(pcci, 0);
+out_unlock:
+	pcc_inode_unlock(inode);
+out_fput:
+	fput(pcc_filp);
+out_dentry:
+	if (rc) {
+		(void) pcc_inode_remove(inode, pcc_dentry);
+		dput(pcc_dentry);
+	}
+	revert_creds(old_cred);
+out_dataset_put:
+	pcc_dataset_put(dataset);
 	RETURN(rc);
 }

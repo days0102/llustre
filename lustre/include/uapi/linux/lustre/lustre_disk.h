@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * Lustre disk format definitions.
  *
@@ -102,6 +101,8 @@
 #define LDD_F_ERROR		0x4000
 /** process at lctl conf_param */
 #define LDD_F_PARAM2		0x8000
+/** the target shouldn't use local logs */
+#define LDD_F_NO_LOCAL_LOGS	0x10000
 
 #define LDD_MAGIC 0x1dd00001
 

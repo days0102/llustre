@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/mgs/mgs_nids.c
  *
@@ -432,7 +431,7 @@ static int mgs_ir_notify(void *arg)
 	snprintf(name, sizeof(name) - 1, "mgs_%s_notify", fsdb->fsdb_name);
 	complete(&fsdb->fsdb_notify_comp);
 	set_user_nice(current, -2);
-	mgc_fsname2resid(fsdb->fsdb_name, &resid, CONFIG_T_RECOVER);
+	mgc_fsname2resid(fsdb->fsdb_name, &resid, MGS_CFG_T_RECOVER);
 	while (1) {
 		wait_event_idle(fsdb->fsdb_notify_waitq,
 				fsdb->fsdb_notify_stop ||
@@ -445,7 +444,7 @@ static int mgs_ir_notify(void *arg)
 		       name, atomic_read(&fsdb->fsdb_notify_phase));
 
 		fsdb->fsdb_notify_start = ktime_get();
-		mgs_revoke_lock(fsdb->fsdb_mgs, fsdb, CONFIG_T_RECOVER);
+		mgs_revoke_lock(fsdb->fsdb_mgs, fsdb, MGS_CFG_T_RECOVER);
 	}
 
 	complete(&fsdb->fsdb_notify_comp);
@@ -617,7 +616,7 @@ int mgs_get_ir_logs(struct ptlrpc_request *req)
 	if (!body)
 		RETURN(-EINVAL);
 
-	if (body->mcb_type != CONFIG_T_RECOVER)
+	if (body->mcb_type != MGS_CFG_T_RECOVER)
 		RETURN(-EINVAL);
 
 	rc = delogname(body->mcb_name, fsname, &type);
@@ -636,7 +635,7 @@ int mgs_get_ir_logs(struct ptlrpc_request *req)
 	CDEBUG(D_MGS, "Reading IR log %s bufsize %ld.\n",
 	       body->mcb_name, bufsize);
 
-	OBD_ALLOC_PTR_ARRAY(pages, nrpages);
+	OBD_ALLOC_PTR_ARRAY_LARGE(pages, nrpages);
 	if (!pages)
 		GOTO(out, rc = -ENOMEM);
 
@@ -682,7 +681,7 @@ out:
 			__free_page(pages[i]);
 		}
 
-		OBD_FREE_PTR_ARRAY(pages, nrpages);
+		OBD_FREE_PTR_ARRAY_LARGE(pages, nrpages);
 	}
 
 	if (fsdb)
@@ -693,7 +692,7 @@ out:
 
 static int lprocfs_ir_set_state(struct fs_db *fsdb, const char *buf)
 {
-	const char *strings[] = IR_STRINGS;
+	const char *const strings[] = IR_STRINGS;
 	int state = -1;
 	int i;
 
@@ -805,7 +804,7 @@ int lprocfs_rd_ir_state(struct seq_file *seq, void *data)
 {
 	struct fs_db *fsdb = data;
 	struct mgs_nidtbl *tbl = &fsdb->fsdb_nidtbl;
-	const char *ir_strings[] = IR_STRINGS;
+	const char *const ir_strings[] = IR_STRINGS;
 	struct timespec64 ts_max;
 	struct timespec64 ts;
 

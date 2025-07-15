@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #ifndef _LUSTREAPI_H_
@@ -65,6 +64,16 @@ extern "C" {
 typedef struct statx lstatx_t;
 
 #define lustre_fid struct lu_fid
+
+/*
+ * BUILD_BUG_ON() is Compile-time check which verifies correctness at
+ * compile-time rather than runtime. If "cond" is true, (1 - 2*!!(cond))
+ * will be a negative value, which will cause the compiler to complain.
+ *
+ */
+#ifndef BUILD_BUG_ON
+#define BUILD_BUG_ON(cond) ((void)sizeof(char[1 - 2*!!(cond)]))
+#endif
 
 /* Currently external applications can access this but in the
  * future this will no longer be exposed for the user. Instead
@@ -131,6 +140,9 @@ struct llapi_stripe_param {
 	/* Number of stripes. Size of lsp_osts[] if lsp_specific is true.*/
 	int			lsp_stripe_count;
 	bool			lsp_is_specific;
+	bool			lsp_is_create;
+	__u8			lsp_max_inherit;
+	__u8			lsp_max_inherit_rr;
 	__u32			lsp_osts[0];
 };
 
@@ -164,25 +176,27 @@ void llapi_set_command_name(const char *cmd);
 void llapi_clear_command_name(void);
 
 enum llapi_layout_verbose  {
-	VERBOSE_STRIPE_COUNT	=     0x1,
-	VERBOSE_STRIPE_SIZE	=     0x2,
-	VERBOSE_STRIPE_OFFSET	=     0x4,
-	VERBOSE_POOL		=     0x8,
-	VERBOSE_DETAIL		=    0x10,
-	VERBOSE_OBJID		=    0x20,
-	VERBOSE_GENERATION	=    0x40,
-	VERBOSE_MDTINDEX	=    0x80,
-	VERBOSE_PATTERN		=   0x100,
-	VERBOSE_COMP_COUNT	=   0x200,
-	VERBOSE_COMP_FLAGS	=   0x400,
-	VERBOSE_COMP_START	=   0x800,
-	VERBOSE_COMP_END	=  0x1000,
-	VERBOSE_COMP_ID		=  0x2000,
-	VERBOSE_DFID		=  0x4000,
-	VERBOSE_HASH_TYPE	=  0x8000,
-	VERBOSE_MIRROR_COUNT	= 0x10000,
-	VERBOSE_MIRROR_ID	= 0x20000,
-	VERBOSE_EXT_SIZE	= 0x40000,
+	VERBOSE_STRIPE_COUNT	=      0x1,
+	VERBOSE_STRIPE_SIZE	=      0x2,
+	VERBOSE_STRIPE_OFFSET	=      0x4,
+	VERBOSE_POOL		=      0x8,
+	VERBOSE_DETAIL		=     0x10,
+	VERBOSE_OBJID		=     0x20,
+	VERBOSE_GENERATION	=     0x40,
+	VERBOSE_MDTINDEX	=     0x80,
+	VERBOSE_PATTERN		=    0x100,
+	VERBOSE_COMP_COUNT	=    0x200,
+	VERBOSE_COMP_FLAGS	=    0x400,
+	VERBOSE_COMP_START	=    0x800,
+	VERBOSE_COMP_END	=   0x1000,
+	VERBOSE_COMP_ID		=   0x2000,
+	VERBOSE_DFID		=   0x4000,
+	VERBOSE_HASH_TYPE	=   0x8000,
+	VERBOSE_MIRROR_COUNT	=  0x10000,
+	VERBOSE_MIRROR_ID	=  0x20000,
+	VERBOSE_EXT_SIZE	=  0x40000,
+	VERBOSE_INHERIT		=  0x80000,
+	VERBOSE_INHERIT_RR	= 0x100000,
 	VERBOSE_DEFAULT		= VERBOSE_STRIPE_COUNT | VERBOSE_STRIPE_SIZE |
 				  VERBOSE_STRIPE_OFFSET | VERBOSE_POOL |
 				  VERBOSE_OBJID | VERBOSE_GENERATION |
@@ -190,7 +204,8 @@ enum llapi_layout_verbose  {
 				  VERBOSE_COMP_COUNT | VERBOSE_COMP_FLAGS |
 				  VERBOSE_COMP_START | VERBOSE_COMP_END |
 				  VERBOSE_COMP_ID | VERBOSE_MIRROR_COUNT |
-				  VERBOSE_MIRROR_ID | VERBOSE_EXT_SIZE
+				  VERBOSE_MIRROR_ID | VERBOSE_EXT_SIZE |
+				  VERBOSE_INHERIT | VERBOSE_INHERIT_RR
 };
 /* Compatibility with original names */
 #define VERBOSE_SIZE	VERBOSE_STRIPE_SIZE
@@ -287,7 +302,7 @@ struct find_param {
 				 fp_exclude_mirror_index:1,
 				 fp_check_mdt_count:1,
 				 fp_exclude_mdt_count:1,
-				 fp_check_hash_type:1,
+				 fp_check_hash_flag:1,
 				 fp_exclude_hash_type:1,
 				 fp_yaml:1,	/* output layout in YAML */
 				 fp_check_blocks:1,
@@ -373,6 +388,8 @@ struct find_param {
 
 	time_t			 fp_btime;
 	int			 fp_bsign;
+	unsigned int		 fp_hash_inflags;
+	unsigned int		 fp_hash_exflags;
 };
 
 int llapi_ostlist(char *path, struct find_param *param);
@@ -394,6 +411,7 @@ int llapi_dir_create_pool(const char *name, int flags, int stripe_offset,
 			  int stripe_count, int stripe_pattern,
 			  const char *poolname);
 int llapi_direntry_remove(char *dname);
+int llapi_unlink_foreign(char *dname);
 
 int llapi_obd_fstatfs(int fd, __u32 type, __u32 index,
 		      struct obd_statfs *stat_buf, struct obd_uuid *uuid_buf);
@@ -442,6 +460,8 @@ int llapi_get_connect_flags(const char *mnt, __u64 *flags);
 int llapi_cp(int argc, char *argv[]);
 int llapi_ls(int argc, char *argv[]);
 int llapi_fid_parse(const char *fidstr, struct lu_fid *fid, char **endptr);
+int llapi_fid2path_at(int mnt_fd, const struct lu_fid *fid, char *path,
+		      int pathlen, long long *recno, int *linkno);
 int llapi_fid2path(const char *device, const char *fidstr, char *path,
 		   int pathlen, long long *recno, int *linkno);
 int llapi_path2fid(const char *path, struct lu_fid *fid);
@@ -604,6 +624,12 @@ int llapi_lease_put(int fd); /* obsoleted */
 /* Group lock */
 int llapi_group_lock(int fd, int gid);
 int llapi_group_unlock(int fd, int gid);
+int llapi_group_lock64(int fd, __u64 gid);
+int llapi_group_unlock64(int fd, __u64 gid);
+
+bool llapi_file_is_sparse(int fd);
+off_t llapi_data_seek(int src_fd, off_t offset, size_t *length);
+int llapi_hole_punch(int fd, off_t start, size_t length);
 
 /* Ladvise */
 int llapi_ladvise(int fd, unsigned long long flags, int num_advise,
@@ -625,6 +651,12 @@ int llapi_pcc_state_get_fd(int fd, struct lu_pcc_state *state);
 int llapi_pcc_state_get(const char *path, struct lu_pcc_state *state);
 int llapi_pccdev_set(const char *mntpath, const char *cmd);
 int llapi_pccdev_get(const char *mntpath);
+
+/* WBC */
+int llapi_wbc_state_get_fd(int fd, struct lu_wbc_state *state);
+int llapi_wbc_state_get(const char *path, struct lu_wbc_state *state);
+int llapi_wbc_unreserve_file(const char *path, __u32 unrsv_siblings);
+int llapi_wbc_unreserve_file_fd(int fd, __u32 unrsv_siblings);
 /** @} llapi */
 
 /* llapi_layout user interface */
@@ -663,8 +695,18 @@ int llapi_mirror_resync_many(int fd, struct llapi_layout *layout,
  * Flags to control how layouts are retrieved.
  */
 
-/* Replace non-specified values with expected inherited values. */
-#define LAYOUT_GET_EXPECTED 0x1
+enum llapi_layout_get_flags {
+	/** Replace non-specified values with expected inherited values. */
+	LLAPI_LAYOUT_GET_EXPECTED	= 0x0001,
+	/** Use a temporary buffer to swab and return xattrs. */
+	LLAPI_LAYOUT_GET_COPY		= 0x0002,
+	/** Verify xattr contains sane layout values. */
+	LLAPI_LAYOUT_GET_CHECK		= 0x0004,
+};
+/* compatibility macros for old interfaces */
+#define LAYOUT_GET_EXPECTED	LLAPI_LAYOUT_GET_EXPECTED
+#define LLAPI_LXF_COPY		LLAPI_LAYOUT_GET_COPY
+#define LLAPI_LXF_CHECK		LLAPI_LAYOUT_GET_CHECK
 
 /**
  * Return a pointer to a newly-allocated opaque data structure containing
@@ -672,7 +714,8 @@ int llapi_mirror_resync_many(int fd, struct llapi_layout *layout,
  * llapi_layout_free() when it is no longer needed. Failure is indicated
  * by a NULL return value and an appropriate error code stored in errno.
  */
-struct llapi_layout *llapi_layout_get_by_path(const char *path, uint32_t flags);
+struct llapi_layout *llapi_layout_get_by_path(const char *path,
+					     enum llapi_layout_get_flags flags);
 
 /**
  * Return a pointer to a newly-allocated opaque data type containing the
@@ -681,7 +724,8 @@ struct llapi_layout *llapi_layout_get_by_path(const char *path, uint32_t flags);
  * needed. Failure is indicated by a NULL return value and an
  * appropriate error code stored in errno.
  */
-struct llapi_layout *llapi_layout_get_by_fd(int fd, uint32_t flags);
+struct llapi_layout *llapi_layout_get_by_fd(int fd,
+					    enum llapi_layout_get_flags flags);
 
 /**
  * Return a pointer to a newly-allocated opaque data type containing the
@@ -695,12 +739,7 @@ struct llapi_layout *llapi_layout_get_by_fd(int fd, uint32_t flags);
  */
 struct llapi_layout *llapi_layout_get_by_fid(const char *path,
 					     const struct lu_fid *fid,
-					     uint32_t flags);
-
-enum llapi_layout_xattr_flags {
-	LLAPI_LXF_CHECK = 0x0001,
-	LLAPI_LXF_COPY  = 0x0002,
-};
+					     enum llapi_layout_get_flags flags);
 
 /**
  * Return a pointer to a newly-allocated opaque data type containing the
@@ -710,18 +749,18 @@ enum llapi_layout_xattr_flags {
  * properly. Thus, \a lov_xattr will be modified during the process. If the
  * \a LLAPI_LXF_CHECK flag of \a flags is set, this function will check whether
  * the objects count in lum is consistent with the stripe count in lum. This
- * check only apply to regular file, so \a LLAPI_LXF_CHECK flag should be
- * cleared if the xattr belongs to a directory. If the \a LLAPI_LXF_COPY flag
- * of \a flags is set, this function will use a temporary buffer for byte
- * swapping when necessary, leaving \a lov_xattr untouched. Otherwise, the byte
- * swapping will be done to the \a lov_xattr buffer directly.  The returned
+ * check only apply to regular file, so \a LLAPI_LAYOUT_GET_CHECK flag should
+ * be cleared if the xattr belongs to a directory. If the flag \a
+ * LLAPI_LAYOUT_GET_COPY is set, this function will use a temporary buffer for
+ * byte swapping when necessary, leaving \a lov_xattr untouched. Otherwise, the
+ * byte swapping will be done to the \a lov_xattr buffer directly.  The returned
  * pointer should be freed with llapi_layout_free() when it is no longer
  * needed.  Failure is  * indicated with a NULL return value and an appropriate
  * error code stored in errno.
  */
 struct llapi_layout *llapi_layout_get_by_xattr(void *lov_xattr,
-					       ssize_t lov_xattr_size,
-					       uint32_t flags);
+					     ssize_t lov_xattr_size,
+					     enum llapi_layout_get_flags flags);
 
 /**
  * Allocate a new layout. Use this when creating a new file with
@@ -804,6 +843,10 @@ int llapi_layout_stripe_count_get(const struct llapi_layout *layout,
  */
 int llapi_layout_stripe_count_set(struct llapi_layout *layout, uint64_t count);
 
+/**
+ * Check if the stripe count \a stripe_count \a is valid.
+ */
+bool llapi_layout_stripe_count_is_valid(int64_t stripe_count);
 /******************** Stripe Size ********************/
 
 /**
@@ -935,7 +978,7 @@ int llapi_layout_pool_name_get(const struct llapi_layout *layout,
  * \retval -1	Invalid argument, errno set to EINVAL.
  */
 int llapi_layout_pool_name_set(struct llapi_layout *layout,
-			      const char *pool_name);
+			       char *pool_name);
 
 /******************** File Creation ********************/
 
@@ -1149,11 +1192,15 @@ ssize_t llapi_mirror_read(int fd, unsigned int id,
 			   void *buf, size_t count, off_t pos);
 ssize_t llapi_mirror_copy_many(int fd, __u16 src, __u16 *dst, size_t count);
 int llapi_mirror_copy(int fd, unsigned int src, unsigned int dst,
-		       off_t pos, size_t count);
+		      off_t pos, size_t count);
+off_t llapi_mirror_data_seek(int fd, unsigned int id, off_t pos, size_t *size);
+int llapi_mirror_punch(int fd, unsigned int id, off_t start, size_t length);
 
 int llapi_heat_get(int fd, struct lu_heat *heat);
 int llapi_heat_set(int fd, __u64 flags);
-int llapi_layout_sanity(struct llapi_layout *layout, bool incomplete, bool flr);
+
+int llapi_layout_sanity(struct llapi_layout *layout, const char *fname,
+			bool incomplete, bool flr);
 void llapi_layout_sanity_perror(int error);
 int llapi_layout_dom_size(struct llapi_layout *layout, uint64_t *size);
 

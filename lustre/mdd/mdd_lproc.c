@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/mdd/mdd_lproc.c
  *
@@ -458,6 +457,34 @@ static ssize_t sync_permission_store(struct kobject *kobj,
 }
 LUSTRE_RW_ATTR(sync_permission);
 
+static ssize_t async_tree_remove_show(struct kobject *kobj,
+				      struct attribute *attr, char *buf)
+{
+	struct mdd_device *mdd = container_of(kobj, struct mdd_device,
+					      mdd_kobj);
+
+	return sprintf(buf, "%d\n", mdd->mdd_async_tree_remove);
+}
+
+static ssize_t async_tree_remove_store(struct kobject *kobj,
+				       struct attribute *attr,
+				       const char *buffer, size_t count)
+{
+	struct mdd_device *mdd = container_of(kobj, struct mdd_device,
+					      mdd_kobj);
+	bool val;
+	int rc;
+
+	rc = kstrtobool(buffer, &val);
+	if (rc)
+		return rc;
+
+	mdd->mdd_async_tree_remove = val;
+
+	return count;
+}
+LUSTRE_RW_ATTR(async_tree_remove);
+
 static ssize_t lfsck_speed_limit_show(struct kobject *kobj,
 				      struct attribute *attr, char *buf)
 {
@@ -548,7 +575,7 @@ static ssize_t append_stripe_count_show(struct kobject *kobj,
 	struct mdd_device *mdd = container_of(kobj, struct mdd_device,
 					      mdd_kobj);
 
-	return snprintf(buf, PAGE_SIZE, "%d\n", mdd->mdd_append_stripe_count);
+	return scnprintf(buf, PAGE_SIZE, "%d\n", mdd->mdd_append_stripe_count);
 }
 
 /**
@@ -601,7 +628,7 @@ static ssize_t append_pool_show(struct kobject *kobj,
 	struct mdd_device *mdd = container_of(kobj, struct mdd_device,
 					      mdd_kobj);
 
-	return snprintf(buf, LOV_MAXPOOLNAME + 1, "%s\n", mdd->mdd_append_pool);
+	return scnprintf(buf, PAGE_SIZE, "%s\n", mdd->mdd_append_pool);
 }
 
 /**
@@ -669,6 +696,7 @@ static struct attribute *mdd_attrs[] = {
 	&lustre_attr_lfsck_async_windows.attr,
 	&lustre_attr_lfsck_speed_limit.attr,
 	&lustre_attr_sync_permission.attr,
+	&lustre_attr_async_tree_remove.attr,
 	&lustre_attr_append_stripe_count.attr,
 	&lustre_attr_append_pool.attr,
 	NULL,

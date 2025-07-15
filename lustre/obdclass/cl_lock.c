@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * Client Extent Lock.
  *
@@ -109,8 +108,7 @@ int cl_lock_init(const struct lu_env *env, struct cl_lock *lock,
 	LASSERT(obj != NULL);
 
 	INIT_LIST_HEAD(&lock->cll_layers);
-	list_for_each_entry(scan, &obj->co_lu.lo_header->loh_layers,
-			    co_lu.lo_linkage) {
+	cl_object_for_each(scan, obj) {
 		if (scan->co_ops->coo_lock_init != NULL)
 			result = scan->co_ops->coo_lock_init(env, scan, lock,
 							     io);

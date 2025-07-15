@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #ifndef __LIBCFS_LINUX_MISC_H__
@@ -41,6 +40,7 @@
 #include <linux/mutex.h>
 #include <linux/user_namespace.h>
 #include <linux/uio.h>
+#include <linux/kallsyms.h>
 
 #ifndef HAVE_IOV_ITER_TYPE
 #ifdef HAVE_IOV_ITER_HAS_TYPE_MEMBER
@@ -57,8 +57,6 @@
 #define iov_iter_is_discard(iter)	0
 #endif
 #endif /* HAVE_IOV_ITER_TYPE */
-
-int cfs_get_environ(const char *key, char *value, int *val_len);
 
 int cfs_kernel_write(struct file *filp, const void *buf, size_t count,
 		     loff_t *pos);
@@ -137,6 +135,27 @@ void cfs_arch_init(void);
 	void *__mptr = (void *)(ptr);					\
 	IS_ERR_OR_NULL(__mptr) ? ERR_CAST(__mptr) :			\
 		((type *)(__mptr - offsetof(type, member))); })
+#endif
+
+/*
+ * Linux v4.15-rc2-5-g4229a470175b added sizeof_field()
+ * Linux v5.5-rc4-1-g1f07dcc459d5 removed FIELD_SIZEOF()
+ * Proved a sizeof_field in terms of FIELD_SIZEOF() when one is not provided
+ */
+#ifndef sizeof_field
+#define sizeof_field(type, member)	FIELD_SIZEOF(type, member)
+#endif
+
+#ifdef HAVE_KALLSYMS_LOOKUP_NAME
+static inline void *cfs_kallsyms_lookup_name(const char *name)
+{
+	return (void *)kallsyms_lookup_name(name);
+}
+#else
+static inline void *cfs_kallsyms_lookup_name(const char *name)
+{
+	return NULL;
+}
 #endif
 
 #endif /* __LIBCFS_LINUX_MISC_H__ */

@@ -23,12 +23,15 @@ GSSLIB =
 endif
 
 # mount only finds helpers in /sbin
-rootsbin_PROGRAMS = mount.lustre mount.lustre_tgt
+rootsbin_PROGRAMS = mount.lustre
+if SERVER
+rootsbin_PROGRAMS += mount.lustre_tgt
+endif
 bin_SCRIPTS   = llstat llobdstat plot-llstat
 bin_PROGRAMS  = lfs
 sbin_SCRIPTS  = ldlm_debug_upcall
 sbin_PROGRAMS = lctl l_getidentity llverfs lustre_rsync ll_decode_linkea \
-		llsom_sync
+		llsom_sync l_foreign_symlink
 
 if TESTS
 sbin_PROGRAMS += wiretest
@@ -100,7 +103,9 @@ liblustreapi_la_SOURCES = liblustreapi.c liblustreapi_hsm.c \
 			  liblustreapi_kernelconn.c liblustreapi_param.c \
 			  liblustreapi_mirror.c liblustreapi_fid.c \
 			  liblustreapi_ladvise.c liblustreapi_chlg.c \
-			  liblustreapi_heat.c liblustreapi_pcc.c
+			  liblustreapi_heat.c liblustreapi_pcc.c \
+			  liblustreapi_lseek.c liblustreapi_swap.c \
+			  liblustreapi_wbc.c
 liblustreapi_la_LDFLAGS = $(LIBREADLINE) -version-info 1:0:0 \
 			  -Wl,--version-script=liblustreapi.map
 liblustreapi_la_LIBADD = $(top_builddir)/libcfs/libcfs/libcfs.la
@@ -220,12 +225,17 @@ l_tunedisk_CPPFLAGS := ${MNTMODCFLAGS}
 l_tunedisk_LDFLAGS  := ${MNTMODLDFLAGS}
 l_tunedisk_LDADD    := $(mount_lustre_LDADD)
 
+l_foreign_symlink_SOURCES = l_foreign_symlink.c
+l_foreign_symlink_LDADD := $(top_builddir)/libcfs/libcfs/libcfs.la
+l_foreign_symlink_DEPENDENCIES := $(top_builddir)/libcfs/libcfs/libcfs.la
+
 l_getidentity_SOURCES = l_getidentity.c
 l_getidentity_LDADD := $(top_builddir)/libcfs/libcfs/libcfs.la
 l_getidentity_DEPENDENCIES := $(top_builddir)/libcfs/libcfs/libcfs.la
 
 lhsmtool_posix_SOURCES = lhsmtool_posix.c pid_file.c pid_file.h
-lhsmtool_posix_LDADD := liblustreapi.la $(PTHREAD_LIBS)
+lhsmtool_posix_LDADD := liblustreapi.la $(PTHREAD_LIBS) \
+		$(top_builddir)/lnet/utils/lnetconfig/liblnetconfig.la
 lhsmtool_posix_DEPENDENCIES := liblustreapi.la
 
 l_getsepol_SOURCES = l_getsepol.c

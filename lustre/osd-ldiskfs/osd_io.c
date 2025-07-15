@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/osd/osd_io.c
  *
@@ -45,6 +44,7 @@
 /* prerequisite for linux/xattr.h */
 #include <linux/fs.h>
 #include <linux/mm.h>
+#include <linux/swap.h>
 #include <linux/pagevec.h>
 
 /*
@@ -908,6 +908,8 @@ bypass_checks:
 			GOTO(cleanup, rc = -ENOMEM);
 
 		lnb->lnb_locked = 1;
+		if (cache)
+			mark_page_accessed(lnb->lnb_page);
 	}
 
 #if 0
@@ -1313,7 +1315,6 @@ static int osd_is_mapped(struct dt_object *dt, __u64 offset,
 	sector_t start;
 	struct fiemap_extent_info fei = { 0 };
 	struct fiemap_extent fe = { 0 };
-	mm_segment_t saved_fs;
 	int rc;
 
 	if (block >= cached_extent->start && block < cached_extent->end)
@@ -1329,10 +1330,7 @@ static int osd_is_mapped(struct dt_object *dt, __u64 offset,
 	fei.fi_extents_max = 1;
 	fei.fi_extents_start = &fe;
 
-	saved_fs = get_fs();
-	set_fs(KERNEL_DS);
 	rc = inode->i_op->fiemap(inode, &fei, offset, FIEMAP_MAX_OFFSET-offset);
-	set_fs(saved_fs);
 	if (rc != 0)
 		return 0;
 
@@ -1471,6 +1469,10 @@ static int osd_declare_write_commit(const struct lu_env *env,
 	 * level index/leaf need to be changed in case of the tree split.
 	 * If more extents are inserted, they could cause the whole tree
 	 * split more than once, but this is really rare.
+	
+	 * each extent can go into new leaf causing a split
+	 * 5 is max tree depth: inode + 4 index blocks
+	 * with blockmaps, depth is 3 at most
 	 */
 	if (LDISKFS_I(inode)->i_flags & LDISKFS_EXTENTS_FL) {
 		depth = ext_depth(inode);
@@ -1515,6 +1517,11 @@ static int osd_declare_write_commit(const struct lu_env *env,
 		credits += LDISKFS_SB(osd_sb(osd))->s_gdb_count;
 	else
 		credits += dirty_groups;
+
+	CDEBUG(D_INODE,
+	       "%s: inode #%lu extent_bytes %u extents %d credits %d\n",
+	       osd_ino2name(inode), inode->i_ino, extent_bytes, extents,
+	       credits);
 
 	CDEBUG(D_INODE,
 	       "%s: inode #%lu extent_bytes %u extents %d credits %d\n",
@@ -2208,10 +2215,10 @@ static int osd_declare_fallocate(const struct lu_env *env,
 	ENTRY;
 
 	/*
-	 * Only mode == 0 (which is standard prealloc) is supported now.
+	 * mode == 0 (which is standard prealloc) and PUNCH is supported
 	 * Rest of mode options is not supported yet.
 	 */
-	if (mode & ~FALLOC_FL_KEEP_SIZE)
+	if (mode & ~(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE))
 		RETURN(-EOPNOTSUPP);
 
 	/* disable fallocate completely */
@@ -2220,6 +2227,16 @@ static int osd_declare_fallocate(const struct lu_env *env,
 
 	LASSERT(th);
 	LASSERT(inode);
+
+	if (mode & FALLOC_FL_PUNCH_HOLE) {
+		rc = osd_declare_inode_qid(env, i_uid_read(inode),
+					   i_gid_read(inode),
+					   i_projid_read(inode), 0, oh,
+					   osd_dt_obj(dt), NULL, OSD_QID_BLK);
+		if (rc == 0)
+			rc = osd_trunc_lock(osd_dt_obj(dt), oh, false);
+		RETURN(rc);
+	}
 
 	/* quota space for metadata blocks
 	 * approximate metadata estimate should be good enough.
@@ -2241,8 +2258,10 @@ static int osd_declare_fallocate(const struct lu_env *env,
 	RETURN(rc);
 }
 
-static int osd_fallocate(const struct lu_env *env, struct dt_object *dt,
-			 __u64 start, __u64 end, int mode, struct thandle *th)
+static int osd_fallocate_preallocate(const struct lu_env *env,
+				     struct dt_object *dt,
+				     __u64 start, __u64 end, int mode,
+				     struct thandle *th)
 {
 	struct osd_thandle *oh = container_of(th, struct osd_thandle, ot_super);
 	handle_t *handle = ldiskfs_journal_current_handle();
@@ -2364,6 +2383,61 @@ out:
 
 	inode_unlock(inode);
 
+	RETURN(rc);
+}
+
+static int osd_fallocate_punch(const struct lu_env *env, struct dt_object *dt,
+			       __u64 start, __u64 end, int mode,
+			       struct thandle *th)
+{
+	struct osd_object *obj = osd_dt_obj(dt);
+	struct inode *inode = obj->oo_inode;
+	struct osd_access_lock *al;
+	struct osd_thandle *oh;
+	int rc = 0, found = 0;
+
+	ENTRY;
+
+	LASSERT(dt_object_exists(dt));
+	LASSERT(osd_invariant(obj));
+	LASSERT(inode != NULL);
+
+	dquot_initialize(inode);
+
+	LASSERT(th);
+	oh = container_of(th, struct osd_thandle, ot_super);
+	LASSERT(oh->ot_handle->h_transaction != NULL);
+
+	list_for_each_entry(al, &oh->ot_trunc_locks, tl_list) {
+		if (obj != al->tl_obj)
+			continue;
+		LASSERT(al->tl_shared == 0);
+		found = 1;
+		/* do actual punch in osd_trans_stop() */
+		al->tl_start = start;
+		al->tl_end = end;
+		al->tl_mode = mode;
+		al->tl_punch = true;
+		break;
+	}
+
+	RETURN(rc);
+}
+
+static int osd_fallocate(const struct lu_env *env, struct dt_object *dt,
+			 __u64 start, __u64 end, int mode, struct thandle *th)
+{
+	int rc;
+
+	ENTRY;
+
+	if (mode & FALLOC_FL_PUNCH_HOLE) {
+		/* punch */
+		rc = osd_fallocate_punch(env, dt, start, end, mode, th);
+	} else {
+		/* standard preallocate */
+		rc = osd_fallocate_preallocate(env, dt, start, end, mode, th);
+	}
 	RETURN(rc);
 }
 
@@ -2519,7 +2593,6 @@ static int osd_fiemap_get(const struct lu_env *env, struct dt_object *dt,
 	struct inode *inode = osd_dt_obj(dt)->oo_inode;
 	u64 len;
 	int rc;
-	mm_segment_t cur_fs;
 
 	LASSERT(inode);
 	if (inode->i_op->fiemap == NULL)
@@ -2539,17 +2612,9 @@ static int osd_fiemap_get(const struct lu_env *env, struct dt_object *dt,
 	if (fieinfo.fi_flags & FIEMAP_FLAG_SYNC)
 		filemap_write_and_wait(inode->i_mapping);
 
-	/* Save previous value address limit */
-	cur_fs = get_fs();
-	/* Set the address limit of the kernel */
-	set_fs(KERNEL_DS);
-
 	rc = inode->i_op->fiemap(inode, &fieinfo, fm->fm_start, len);
 	fm->fm_flags = fieinfo.fi_flags;
 	fm->fm_mapped_extents = fieinfo.fi_extents_mapped;
-
-	/* Restore the previous address limt */
-	set_fs(cur_fs);
 
 	return rc;
 }
@@ -2698,6 +2763,27 @@ void osd_trunc_unlock_all(const struct lu_env *env, struct list_head *list)
 	}
 }
 
+/*
+ * For a partial-page truncate, flush the page to disk immediately to
+ * avoid data corruption during direct disk write.  b=17397
+ */
+static void osd_partial_page_flush(struct osd_device *d, struct inode *inode,
+				   loff_t offset)
+{
+	if (!(offset & ~PAGE_MASK))
+		return;
+
+	if (osd_use_page_cache(d)) {
+		filemap_fdatawrite_range(inode->i_mapping, offset, offset + 1);
+	} else {
+		/* Notice we use "wait" version to ensure I/O is complete */
+		filemap_write_and_wait_range(inode->i_mapping, offset,
+					     offset + 1);
+		invalidate_mapping_pages(inode->i_mapping, offset >> PAGE_SHIFT,
+					 offset >> PAGE_SHIFT);
+	}
+}
+
 void osd_execute_truncate(struct osd_object *obj)
 {
 	struct osd_device *d = osd_obj2dev(obj);
@@ -2733,24 +2819,22 @@ void osd_execute_truncate(struct osd_object *obj)
 		spin_unlock(&inode->i_lock);
 		osd_dirty_inode(inode, I_DIRTY_DATASYNC);
 	}
-
-	/*
-	 * For a partial-page truncate, flush the page to disk immediately to
-	 * avoid data corruption during direct disk write.  b=17397
-	 */
-	if ((size & ~PAGE_MASK) == 0)
-		return;
-	if (osd_use_page_cache(d)) {
-		filemap_fdatawrite_range(inode->i_mapping, size, size + 1);
-	} else {
-		/* Notice we use "wait" version to ensure I/O is complete */
-		filemap_write_and_wait_range(inode->i_mapping, size, size + 1);
-		invalidate_mapping_pages(inode->i_mapping, size >> PAGE_SHIFT,
-					 size >> PAGE_SHIFT);
-	}
+	osd_partial_page_flush(d, inode, size);
 }
 
-void osd_process_truncates(struct list_head *list)
+void osd_execute_punch(const struct lu_env *env, struct osd_object *obj,
+		       loff_t start, loff_t end, int mode)
+{
+	struct osd_device *d = osd_obj2dev(obj);
+	struct inode *inode = obj->oo_inode;
+	struct file *file = osd_quasi_file(env, inode);
+
+	file->f_op->fallocate(file, mode, start, end - start);
+	osd_partial_page_flush(d, inode, start);
+	osd_partial_page_flush(d, inode, end - 1);
+}
+
+void osd_process_truncates(const struct lu_env *env, struct list_head *list)
 {
 	struct osd_access_lock *al;
 
@@ -2759,8 +2843,10 @@ void osd_process_truncates(struct list_head *list)
 	list_for_each_entry(al, list, tl_list) {
 		if (al->tl_shared)
 			continue;
-		if (!al->tl_truncate)
-			continue;
-		osd_execute_truncate(al->tl_obj);
+		if (al->tl_truncate)
+			osd_execute_truncate(al->tl_obj);
+		else if (al->tl_punch)
+			osd_execute_punch(env, al->tl_obj, al->tl_start,
+					  al->tl_end, al->tl_mode);
 	}
 }

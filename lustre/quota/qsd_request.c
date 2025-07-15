@@ -171,7 +171,7 @@ static int qsd_intent_interpret(const struct lu_env *env,
 	req_qbody = req_capsule_client_get(&req->rq_pill, &RMF_QUOTA_BODY);
 	req_capsule_client_get(&req->rq_pill, &RMF_LDLM_INTENT);
 
-	rc = ldlm_cli_enqueue_fini(aa->aa_exp, req, &einfo, 0, &flags,
+	rc = ldlm_cli_enqueue_fini(aa->aa_exp, &req->rq_pill, &einfo, 0, &flags,
 				   aa->aa_lvb, sizeof(*(aa->aa_lvb)),
 				   lockh, rc);
 	if (rc < 0) {
@@ -425,7 +425,7 @@ int qsd_fetch_index(const struct lu_env *env, struct obd_export *exp,
 	req_ii = req_capsule_server_get(&req->rq_pill, &RMF_IDX_INFO);
 	*ii = *req_ii;
 
-	*need_swab = ptlrpc_rep_need_swab(req);
+	*need_swab = req_capsule_rep_need_swab(&req->rq_pill);
 
 	EXIT;
 out:

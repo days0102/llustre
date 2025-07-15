@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/osd-zfs/osd_object.c
  *
@@ -64,9 +63,9 @@
 char *osd_obj_tag = "osd_object";
 static int osd_object_sync_delay_us = -1;
 
-static struct dt_object_operations osd_obj_ops;
-static struct lu_object_operations osd_lu_obj_ops;
-static struct dt_object_operations osd_obj_otable_it_ops;
+static const struct dt_object_operations osd_obj_ops;
+static const struct lu_object_operations osd_lu_obj_ops;
+static const struct dt_object_operations osd_obj_otable_it_ops;
 
 static void
 osd_object_sa_fini(struct osd_object *obj)
@@ -616,8 +615,11 @@ zget:
 		GOTO(out, rc = 0);
 
 	rc = osd_check_lma(env, obj);
-	if ((!rc && !remote) || (rc != -EREMCHG))
+	if (rc != -EREMCHG)
 		GOTO(out, rc);
+
+	osd_scrub_refresh_mapping(env, osd, fid, oid, DTO_INDEX_DELETE, true,
+				  NULL);
 
 trigger:
 	/* We still have chance to get the valid dnode: for the object that is
@@ -661,8 +663,9 @@ trigger:
 	/* It is me to trigger the OI scrub. */
 	rc1 = osd_scrub_start(env, osd, SS_CLEAR_DRYRUN |
 			      SS_CLEAR_FAILOUT | SS_AUTO_FULL);
-	LCONSOLE_WARN("%s: trigger OI scrub by RPC for the "DFID": rc = %d\n",
-		      osd_name(osd), PFID(fid), rc1);
+	CDEBUG_LIMIT(D_LFSCK | D_CONSOLE | D_WARNING,
+		     "%s: trigger OI scrub by RPC for "DFID"/%#llx: rc = %d\n",
+		     osd_name(osd), PFID(fid), oid, rc1);
 	if (!rc) {
 		LASSERT(remote);
 
@@ -851,12 +854,12 @@ static int osd_destroy(const struct lu_env *env, struct dt_object *dt,
 		LASSERT(obj->oo_attr.la_size <= osd_sync_destroy_max_size);
 		rc = -dmu_object_free(osd->od_os, oid, oh->ot_tx);
 		if (rc)
-			CERROR("%s: failed to free %s %llu: rc = %d\n",
+			CERROR("%s: failed to free %s/%#llx: rc = %d\n",
 			       osd->od_svname, buf, oid, rc);
 	} else if (obj->oo_destroy == OSD_DESTROY_SYNC) {
 		rc = -dmu_object_free(osd->od_os, oid, oh->ot_tx);
 		if (rc)
-			CERROR("%s: failed to free %s %llu: rc = %d\n",
+			CERROR("%s: failed to free %s/%#llx: rc = %d\n",
 			       osd->od_svname, buf, oid, rc);
 	} else { /* asynchronous destroy */
 		char *key = info->oti_key;
@@ -869,7 +872,7 @@ static int osd_destroy(const struct lu_env *env, struct dt_object *dt,
 		rc = osd_zap_add(osd, osd->od_unlinked->dn_object,
 				 osd->od_unlinked, key, 8, 1, &oid, oh->ot_tx);
 		if (rc)
-			CERROR("%s: zap_add_int() failed %s %llu: rc = %d\n",
+			CERROR("%s: zap_add_int() failed %s/%#llx: rc = %d\n",
 			       osd->od_svname, buf, oid, rc);
 	}
 
@@ -1013,7 +1016,7 @@ static int osd_attr_get(const struct lu_env *env, struct dt_object *dt,
 	}
 	read_unlock(&obj->oo_attr_lock);
 	if (attr->la_valid & LA_FLAGS && attr->la_flags & LUSTRE_ORPHAN_FL)
-		CDEBUG(D_INFO, "%s: set orphan flag on "DFID" (%llx/%x)\n",
+		CDEBUG(D_INFO, "%s: set orphan flag on "DFID" (%#llx/%#x)\n",
 		       osd_obj2dev(obj)->od_svname,
 		       PFID(lu_object_fid(&dt->do_lu)),
 		       attr->la_valid, obj->oo_lma_flags);
@@ -1972,7 +1975,7 @@ static int osd_create(const struct lu_env *env, struct dt_object *dt,
 
 	zde->zde_pad = 0;
 	zde->zde_dnode = dn->dn_object;
-	zde->zde_type = IFTODT(attr->la_mode & S_IFMT);
+	zde->zde_type = S_DT(attr->la_mode & S_IFMT);
 
 	zapid = osd_get_name_n_idx(env, osd, fid, buf,
 				   sizeof(info->oti_str), &zdn);
@@ -2146,7 +2149,12 @@ static int osd_invalidate(const struct lu_env *env, struct dt_object *dt)
 	return 0;
 }
 
-static struct dt_object_operations osd_obj_ops = {
+static bool osd_check_stale(struct dt_object *dt)
+{
+	return false;
+}
+
+static const struct dt_object_operations osd_obj_ops = {
 	.do_read_lock		= osd_read_lock,
 	.do_write_lock		= osd_write_lock,
 	.do_read_unlock		= osd_read_unlock,
@@ -2173,9 +2181,10 @@ static struct dt_object_operations osd_obj_ops = {
 	.do_xattr_list		= osd_xattr_list,
 	.do_object_sync		= osd_object_sync,
 	.do_invalidate		= osd_invalidate,
+	.do_check_stale		= osd_check_stale,
 };
 
-static struct lu_object_operations osd_lu_obj_ops = {
+static const struct lu_object_operations osd_lu_obj_ops = {
 	.loo_object_init	= osd_object_init,
 	.loo_object_delete	= osd_object_delete,
 	.loo_object_release	= osd_object_release,
@@ -2192,7 +2201,7 @@ static int osd_otable_it_attr_get(const struct lu_env *env,
 	return 0;
 }
 
-static struct dt_object_operations osd_obj_otable_it_ops = {
+static const struct dt_object_operations osd_obj_otable_it_ops = {
 	.do_attr_get		= osd_otable_it_attr_get,
 	.do_index_try		= osd_index_try,
 };

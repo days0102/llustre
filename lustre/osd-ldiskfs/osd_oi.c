@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/osd/osd_oi.c
  *
@@ -368,8 +367,8 @@ static int osd_remove_ois(struct osd_thread_info *info, struct osd_device *osd)
 		RETURN(-EROFS);
 
 	for (i = 0; i < OSD_OI_FID_NR_MAX; i++) {
-		namelen = snprintf(name, sizeof(name), "%s.%d",
-				   OSD_OI_NAME_BASE, i);
+		namelen = scnprintf(name, sizeof(name), "%s.%d",
+				    OSD_OI_NAME_BASE, i);
 		rc = osd_remove_oi_one(osd, osd_sb(osd)->s_root, name, namelen);
 		if (rc != 0) {
 			CERROR(
@@ -379,7 +378,7 @@ static int osd_remove_ois(struct osd_thread_info *info, struct osd_device *osd)
 		}
 	}
 
-	namelen = snprintf(name, sizeof(name), "%s", OSD_OI_NAME_BASE);
+	namelen = scnprintf(name, sizeof(name), "%s", OSD_OI_NAME_BASE);
 	rc = osd_remove_oi_one(osd, osd_sb(osd)->s_root, name, namelen);
 	if (rc != 0)
 		CERROR("%s: fail to remove the stale OI file %s: rc = %d\n",
@@ -405,6 +404,8 @@ int osd_oi_init(struct osd_thread_info *info, struct osd_device *osd,
 	}
 
 	if (restored) {
+		LCONSOLE_WARN("%s: reset Object Index mappings\n",
+			      osd_dev2name(osd));
 		rc = osd_remove_ois(info, osd);
 		if (rc)
 			RETURN(rc);

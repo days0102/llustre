@@ -324,6 +324,70 @@ test_1c() {
 }
 run_test 1c "LFSCK can find out and repair lost FID-in-dirent"
 
+test_1d() {
+	[ $MDS1_VERSION -lt $(version_code 2.13.57) ] &&
+		skip "MDS older than 2.13.57"
+	[ $MDSCOUNT -lt 2 ] && skip "needs >= 2 MDTs"
+
+	check_mount_and_prep
+
+	touch $DIR/$tdir/$tfile
+	mkdir $DIR/$tdir/subdir
+	$LFS mkdir -i 1 $DIR/$tdir/remotedir
+	$LFS path2fid $DIR/$tdir
+	ll_decode_linkea $DIR/$tdir/$tfile
+	ll_decode_linkea $DIR/$tdir/subdir
+	ll_decode_linkea $DIR/$tdir/remotedir
+
+	local mntpt=$(facet_mntpt mds1)
+
+	# unlink OI files to remove the stale entry
+	local saved_opts=$MDS_MOUNT_OPTS
+
+	stopall
+	mount_fstype mds1 $mntpt
+	# increase $tdir FID oid in LMA
+	do_facet mds1 "getfattr -d -m trusted.lma -e hex \
+		--absolute-names $mntpt/ROOT/$tdir | \
+		sed -E 's/0(.{8})$/1\1/' | setfattr --restore=-"
+	unmount_fstype mds1 $mntpt
+	setupall
+
+	# the FID oid in LMA was increased above, and it's not in OI table,
+	# run scrub first to generate mapping in OI, so the following namespace
+	# check can fix linkea correctly, this is not necessary normally.
+	do_facet mds1 $LCTL lfsck_start -M ${MDT_DEV} -t scrub ||
+		error "failed to start LFSCK for scrub!"
+	wait_update_facet mds1 "$LCTL get_param -n \
+		osd-*.$(facet_svc mds1).oi_scrub |
+		awk '/^status/ { print \\\$2 }'" "completed" 32 ||
+		error "unexpected status"
+
+	$START_NAMESPACE -r -A || error "fail to start LFSCK for namespace!"
+	wait_update_facet mds1 "$LCTL get_param -n \
+		mdd.${MDT_DEV}.lfsck_namespace |
+		awk '/^status/ { print \\\$2 }'" "completed" 32 || {
+		$SHOW_NAMESPACE
+		error "unexpected status"
+	}
+	$LFS path2fid $DIR/$tdir
+	ll_decode_linkea $DIR/$tdir/$tfile
+	ll_decode_linkea $DIR/$tdir/subdir
+	ll_decode_linkea $DIR/$tdir/remotedir
+
+	local pfid
+	local fid
+
+	fid=$($LFS path2fid $DIR/$tdir)
+	for f in $tfile subdir remotedir; do
+		pfid=$(ll_decode_linkea $DIR/$tdir/$f |
+			awk '/pfid/ { print $3 }')
+		pfid=${pfid%,}
+		[ "$pfid" == "$fid" ] || error "$fid in LMA != $pfid in linkea"
+	done
+}
+run_test 1d "LFSCK can fix mismatch of FID in LMA and FID in child linkea"
+
 test_2a() {
 	lfsck_prep 1 1
 
@@ -4848,6 +4912,10 @@ test_31a() {
 	[ $repaired -ge 1 ] ||
 		error "(5) Fail to repair bad name hash: $repaired"
 
+	local rc=$($LFS find -H badtype $DIR/$tdir/striped_dir | wc -l)
+	[ $rc -ge 1 ] ||
+		error "Fail to find flag bad type: $rc"
+
 	umount_client $MOUNT || error "(6) umount failed"
 	mount_client $MOUNT || error "(7) mount failed"
 
@@ -4950,6 +5018,9 @@ test_31c() {
 			 awk '/^striped_dirs_repaired/ { print $2 }')
 	[ $repaired -eq 1 ] ||
 		error "(4) Fail to re-generate master LMV EA: $repaired"
+
+	local rc=$($LFS find -H lostlmv $DIR/$tdir/striped_dir | wc -l)
+	[ $rc -eq 1 ] || error "Fail to find flag lost LMV: $rc"
 
 	umount_client $MOUNT || error "(5) umount failed"
 	mount_client $MOUNT || error "(6) mount failed"
@@ -5712,7 +5783,7 @@ test_38()
 	local uuid2=$(cat /proc/sys/kernel/random/uuid)
 
 	# create foreign file
-	$LFS setstripe --foreign=daos --flags 0xda05 \
+	$LFS setstripe --foreign=none --flags 0xda05 \
 		-x "${uuid1}@${uuid2}" $DIR/$tdir/$tfile ||
 		error "$DIR/$tdir/$tfile: create failed"
 
@@ -5722,7 +5793,7 @@ test_38()
 	# lfm_length is LOV EA size - sizeof(lfm_magic) - sizeof(lfm_length)
 	$LFS getstripe -v $DIR/$tdir/$tfile | grep "lfm_length:.*73" ||
 		error "$DIR/$tdir/$tfile: invalid LOV EA foreign size"
-	$LFS getstripe -v $DIR/$tdir/$tfile | grep "lfm_type:.*daos" ||
+	$LFS getstripe -v $DIR/$tdir/$tfile | grep "lfm_type:.*none" ||
 		error "$DIR/$tdir/$tfile: invalid LOV EA foreign type"
 	$LFS getstripe -v $DIR/$tdir/$tfile |
 		grep "lfm_flags:.*0x0000DA05" ||
@@ -5765,7 +5836,7 @@ test_38()
 	# lfm_length is LOV EA size - sizeof(lfm_magic) - sizeof(lfm_length)
 	$LFS getstripe -v $DIR/$tdir/$tfile | grep "lfm_length:.*73" ||
 		error "$DIR/$tdir/$tfile: invalid LOV EA foreign size"
-	$LFS getstripe -v $DIR/$tdir/$tfile | grep "lfm_type:.*daos" ||
+	$LFS getstripe -v $DIR/$tdir/$tfile | grep "lfm_type:.*none" ||
 		error "$DIR/$tdir/$tfile: invalid LOV EA foreign type"
 	$LFS getstripe -v $DIR/$tdir/$tfile |
 		grep "lfm_flags:.*0x0000DA05" ||
@@ -5799,7 +5870,7 @@ test_39()
 	local uuid2=$(cat /proc/sys/kernel/random/uuid)
 
 	# create foreign dir
-	$LFS mkdir --foreign=daos --xattr="${uuid1}@${uuid2}" --flags=0xda05 \
+	$LFS mkdir --foreign=none --xattr="${uuid1}@${uuid2}" --flags=0xda05 \
 		$DIR/$tdir/${tdir}2 ||
 		error "$DIR/$tdir/${tdir}2: create failed"
 
@@ -5810,7 +5881,7 @@ test_39()
 	# - sizeof(lfm_type) - sizeof(lfm_flags)
 	$LFS getdirstripe -v $DIR/$tdir/${tdir}2 | grep "lfm_length:.*73" ||
 		error "$DIR/$tdir/${tdir}2: invalid LMV EA size"
-	$LFS getdirstripe -v $DIR/$tdir/${tdir}2 | grep "lfm_type:.*daos" ||
+	$LFS getdirstripe -v $DIR/$tdir/${tdir}2 | grep "lfm_type:.*none" ||
 		error "$DIR/$tdir/${tdir}2: invalid LMV EA type"
 	$LFS getdirstripe -v $DIR/$tdir/${tdir}2 |
 		grep "lfm_flags:.*0x0000DA05" ||
@@ -5862,7 +5933,7 @@ test_39()
 	# - sizeof(lfm_type) - sizeof(lfm_flags)
 	$LFS getdirstripe -v $DIR/$tdir/${tdir}2 | grep "lfm_length:.*73" ||
 		error "$DIR/$tdir/${tdir}2: invalid LMV EA size"
-	$LFS getdirstripe -v $DIR/$tdir/${tdir}2 | grep "lfm_type:.*daos" ||
+	$LFS getdirstripe -v $DIR/$tdir/${tdir}2 | grep "lfm_type:.*none" ||
 		error "$DIR/$tdir/${tdir}2: invalid LMV EA type"
 	$LFS getdirstripe -v $DIR/$tdir/${tdir}2 |
 		grep "lfm_flags:.*0x0000DA05" ||
@@ -5917,6 +5988,35 @@ test_40a() {
 	[[ "$layout1" == "$layout2" ]] || error "layout lost after lfsck"
 }
 run_test 40a "LFSCK correctly fixes lmm_oi in composite layout"
+
+test_41()
+{
+	local old_debug=$(do_facet $SINGLEMDS $LCTL get_param -n debug)
+
+	do_facet $SINGLEMDS $LCTL set_param debug=+lfsck
+	$LFS setstripe -E 1G -z 64M -E -1 -z 128M $DIR/$tfile
+	do_facet $SINGLEMDS $LCTL dk > /dev/null
+
+	echo "trigger LFSCK for SEL layout"
+	do_facet $SINGLEMDS $LCTL lfsck_start -M ${MDT_DEV} -A -t all -r -n on
+	wait_update_facet $SINGLEMDS "$LCTL get_param -n \
+		mdd.${MDT_DEV}.lfsck_layout |
+		awk '/^status/ { print \\\$2 }'" "completed" 32 || {
+		$SHOW_LAYOUT
+		error "(2) unexpected status"
+	}
+
+	local errors=$(do_facet $SINGLEMDS $LCTL dk |
+		       grep "lfsck_layout_verify_header")
+
+	[[ "x$errors" == "x" ]] || {
+		echo "$errors"
+		error "lfsck failed"
+	}
+
+	do_facet $SINGLEMDS "$LCTL set_param debug='$old_debug'"
+}
+run_test 41 "SEL support in LFSCK"
 
 # restore MDS/OST size
 MDSSIZE=${SAVED_MDSSIZE}

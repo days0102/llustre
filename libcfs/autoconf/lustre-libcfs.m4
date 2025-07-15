@@ -1330,6 +1330,60 @@ EXTRA_KCFLAGS="$tmp_flags"
 ]) # LIBCFS_CACHE_DETAIL_WRITERS
 
 #
+# LIBCFS_KALLSYMS_LOOKUP
+#
+# kernel v5.6-11591-g0bd476e6c671
+# kallsyms: unexport kallsyms_lookup_name() and kallsyms_on_each_symbol()
+AC_DEFUN([LIBCFS_KALLSYMS_LOOKUP], [
+LB_CHECK_EXPORT([kallsyms_lookup_name], [kernel/kallsyms.c],
+	[AC_DEFINE(HAVE_KALLSYMS_LOOKUP_NAME, 1,
+		[kallsyms_lookup_name is exported by kernel])])
+]) # LIBCFS_KALLSYMS_LOOKUP
+
+#
+# LIBCFS_HAVE_PROC_OPS
+#
+# v5.5-8862-gd56c0d45f0e2
+# proc: decouple proc from VFS with "struct proc_ops"
+#
+AC_DEFUN([LIBCFS_SRC_HAVE_PROC_OPS], [
+	LB2_LINUX_TEST_SRC([proc_ops], [
+		#include <linux/proc_fs.h>
+
+		static struct proc_ops *my_proc;
+	],[
+		my_proc->proc_lseek = NULL;
+	],[-Werror])
+])
+AC_DEFUN([LIBCFS_HAVE_PROC_OPS], [
+	AC_MSG_CHECKING([if struct proc_ops exists])
+	LB2_LINUX_TEST_RESULT([proc_ops], [
+		AC_DEFINE(HAVE_PROC_OPS, 1,
+			[struct proc_ops exists])
+		AC_MSG_RESULT(yes)
+	],[
+		AC_MSG_RESULT(no)
+	])
+]) # LIBCFS_HAVE_PROC_OPS
+
+#
+# LIBCFS_VMALLOC_2ARGS
+#
+# kernel v5.8-rc1~201^2~19
+# mm: remove the pgprot argument to __vmalloc
+AC_DEFUN([LIBCFS_VMALLOC_2ARGS], [
+LB_CHECK_COMPILE([if __vmalloc has 2 args],
+vmalloc_2args, [
+	#include <linux/vmalloc.h>
+],[
+	__vmalloc(0, 0);
+],[
+	AC_DEFINE(HAVE_VMALLOC_2ARGS, 1,
+		[__vmalloc only takes 2 args.])
+])
+]) # LIBCFS_VMALLOC_2ARGS
+
+#
 # LIBCFS_HAVE_NR_UNSTABLE_NFS
 #
 # kernel v5.8-rc1~201^2~75
@@ -1352,8 +1406,92 @@ nr_unstable_nfs_exists, [
 EXTRA_KCFLAGS="$tmp_flags"
 ]) # LIBCFS_HAVE_NR_UNSTABLE_NFS
 
-AC_DEFUN([LIBCFS_PROG_LINUX_SRC], [] )
-AC_DEFUN([LIBCFS_PROG_LINUX_RESULTS], [])
+#
+# LIBCFS_HAVE_MMAP_LOCK
+#
+# kernel v5.8-rc1~83^2~24
+# mmap locking API: rename mmap_sem to mmap_lock
+#
+AC_DEFUN([LIBCFS_HAVE_MMAP_LOCK], [
+LB_CHECK_COMPILE([if mmap_lock API is available],
+mmap_write_lock, [
+	#include <linux/mm.h>
+],[
+	mmap_write_lock(NULL);
+],[
+	AC_DEFINE(HAVE_MMAP_LOCK, 1,
+		[mmap_lock API is available.])
+])
+]) # LIBCFS_HAVE_MMAP_LOCK
+
+#
+# LIBCFS_KERNEL_SETSOCKOPT
+#
+# kernel v5.8-rc1~165^2~59^2
+# net: remove kernel_setsockopt
+AC_DEFUN([LIBCFS_KERNEL_SETSOCKOPT], [
+tmp_flags="$EXTRA_KCFLAGS"
+EXTRA_KCFLAGS="-Werror"
+LB_CHECK_COMPILE([if kernel_setsockopt still in use],
+kernel_setsockopt_exists, [
+	#include <linux/net.h>
+],[
+	kernel_setsockopt(NULL, 0, 0, NULL, 0);
+],[
+	AC_DEFINE(HAVE_KERNEL_SETSOCKOPT, 1,
+		[kernel_setsockopt still in use])
+])
+EXTRA_KCFLAGS="$tmp_flags"
+]) # LIBCFS_KERNEL_SETSOCKOPT
+
+#
+# LIBCFS_SEC_RELEASE_SECCTX
+#
+# kernel linux-hwe-5.8 (5.8.0-22.23~20.04.1)
+# LSM: Use lsmcontext in security_release_secctx
+AC_DEFUN([LIBCFS_SEC_RELEASE_SECCTX], [
+LB_CHECK_COMPILE([if security_release_secctx has 1 arg],
+security_release_secctx_1arg, [
+	#include <linux/security.h>
+],[
+	security_release_secctx(NULL);
+],[
+	AC_DEFINE(HAVE_SEC_RELEASE_SECCTX_1ARG, 1,
+		[security_release_secctx has 1 arg.])
+])
+]) # LIBCFS_SEC_RELEASE_SECCTX
+
+#
+# LIBCFS_HAVE_KFREE_SENSITIVE
+#
+# kernel v5.10-rc1~3
+# mm: remove kzfree() compatibility definition
+#
+AC_DEFUN([LIBCFS_HAVE_KFREE_SENSITIVE], [
+LB_CHECK_COMPILE([if kfree_sensitive() is available],
+kfree_sensitive_exists, [
+	#include <linux/slab.h>
+
+],[
+	kfree_sensitive(NULL);
+],[
+	AC_DEFINE(HAVE_KFREE_SENSITIVE, 1,
+		[kfree_sensitive() is available.])
+])
+EXTRA_KCFLAGS="$tmp_flags"
+]) # LIBCFS_HAVE_NR_UNSTABLE_NFS
+
+AC_DEFUN([LIBCFS_PROG_LINUX_SRC], [
+	LIBCFS_SRC_HAVE_PROC_OPS
+
+	AC_MSG_CHECKING([for available kernel interfaces to libcfs])
+	LB2_LINUX_TEST_COMPILE_ALL([libcfs])
+	AC_MSG_RESULT([done])
+])
+AC_DEFUN([LIBCFS_PROG_LINUX_RESULTS], [
+	# 5.6
+	LIBCFS_HAVE_PROC_OPS
+])
 
 #
 # LIBCFS_PROG_LINUX
@@ -1463,6 +1601,15 @@ LIBCFS_LOOKUP_USER_KEY
 LIBCFS_FORCE_SIG_WITH_TASK
 LIBCFS_CACHE_DETAIL_WRITERS
 LIBCFS_HAVE_NR_UNSTABLE_NFS
+# 5.7
+LIBCFS_KALLSYMS_LOOKUP
+# 5.8
+LIBCFS_HAVE_MMAP_LOCK
+LIBCFS_KERNEL_SETSOCKOPT
+LIBCFS_VMALLOC_2ARGS
+LIBCFS_SEC_RELEASE_SECCTX
+# 5.10
+LIBCFS_HAVE_KFREE_SENSITIVE
 ]) # LIBCFS_PROG_LINUX
 
 #

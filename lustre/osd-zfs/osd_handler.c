@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/osd-zfs/osd_handler.c
  * Top-level entry points into osd module
@@ -699,16 +698,7 @@ static int osd_ro(const struct lu_env *env, struct dt_device *d)
 	RETURN(0);
 }
 
-static void osd_wait_quota_pending(struct dt_device *d)
-{
-	struct osd_device  *o = osd_dt_dev(d);
-
-	if (o->od_quota_slave_md != NULL ||
-	    o->od_quota_slave_dt != NULL)
-		txg_wait_callbacks(spa_get_dsl(dmu_objset_spa(o->od_os)));
-}
-
-static struct dt_device_operations osd_dt_ops = {
+static const struct dt_device_operations osd_dt_ops = {
 	.dt_root_get		= osd_root_get,
 	.dt_statfs		= osd_statfs,
 	.dt_trans_create	= osd_trans_create,
@@ -719,7 +709,6 @@ static struct dt_device_operations osd_dt_ops = {
 	.dt_sync		= osd_sync,
 	.dt_commit_async	= osd_commit_async,
 	.dt_ro			= osd_ro,
-	.dt_wait_quota_pending	= osd_wait_quota_pending,
 };
 
 /*
@@ -1080,12 +1069,14 @@ osd_unlinked_drain(const struct lu_env *env, struct osd_device *osd)
 static int osd_mount(const struct lu_env *env,
 		     struct osd_device *o, struct lustre_cfg *cfg)
 {
-	char			*mntdev = lustre_cfg_string(cfg, 1);
-	char			*str	= lustre_cfg_string(cfg, 2);
-	char			*svname = lustre_cfg_string(cfg, 4);
+	char *mntdev = lustre_cfg_string(cfg, 1);
+	char *str = lustre_cfg_string(cfg, 2);
+	char *svname = lustre_cfg_string(cfg, 4);
 	dnode_t *rootdn;
-	const char		*opts;
-	int			 rc;
+	const char *opts;
+	bool resetoi = false;
+	int rc;
+
 	ENTRY;
 
 	if (o->od_os != NULL)
@@ -1101,6 +1092,8 @@ static int osd_mount(const struct lu_env *env,
 	rc = strlcpy(o->od_svname, svname, sizeof(o->od_svname));
 	if (rc >= sizeof(o->od_svname))
 		RETURN(-E2BIG);
+
+	opts = lustre_cfg_string(cfg, 3);
 
 	o->od_index_backup_stop = 0;
 	o->od_index = -1; /* -1 means index is invalid */
@@ -1172,8 +1165,11 @@ static int osd_mount(const struct lu_env *env,
 	if (rc)
 		GOTO(err, rc);
 
+	if (opts && strstr(opts, "resetoi"))
+		resetoi = true;
+
 	o->od_in_init = 1;
-	rc = osd_scrub_setup(env, o);
+	rc = osd_scrub_setup(env, o, resetoi);
 	o->od_in_init = 0;
 	if (rc)
 		GOTO(err, rc);
@@ -1216,7 +1212,6 @@ static int osd_mount(const struct lu_env *env,
 #endif
 
 	/* parse mount option "noacl", and enable ACL by default */
-	opts = lustre_cfg_string(cfg, 3);
 	if (opts == NULL || strstr(opts, "noacl") == NULL)
 		o->od_posix_acl = 1;
 
@@ -1591,7 +1586,7 @@ static int osd_fid_alloc(const struct lu_env *env, struct lu_device *d,
 	return seq_client_alloc_fid(env, osd->od_cl_seq, fid);
 }
 
-struct lu_device_operations osd_lu_ops = {
+const struct lu_device_operations osd_lu_ops = {
 	.ldo_object_alloc	= osd_object_alloc,
 	.ldo_process_config	= osd_process_config,
 	.ldo_recovery_complete	= osd_recovery_complete,
@@ -1607,7 +1602,7 @@ static void osd_type_stop(struct lu_device_type *t)
 {
 }
 
-static struct lu_device_type_operations osd_device_type_ops = {
+static const struct lu_device_type_operations osd_device_type_ops = {
 	.ldto_init		= osd_type_init,
 	.ldto_fini		= osd_type_fini,
 
@@ -1647,7 +1642,7 @@ static int __init osd_init(void)
 	if (rc)
 		return rc;
 
-	rc = class_register_type(&osd_obd_device_ops, NULL, true, NULL,
+	rc = class_register_type(&osd_obd_device_ops, NULL, true,
 				 LUSTRE_OSD_ZFS_NAME, &osd_device_type);
 	if (rc)
 		lu_kmem_fini(osd_caches);

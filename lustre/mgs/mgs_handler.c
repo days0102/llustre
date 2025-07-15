@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/mgs/mgs_handler.c
  *
@@ -211,7 +210,8 @@ static int mgs_completion_ast_barrier(struct ldlm_lock *lock, __u64 flags,
 	return mgs_completion_ast_generic(lock, flags, cbdata, AST_BARRIER);
 }
 
-void mgs_revoke_lock(struct mgs_device *mgs, struct fs_db *fsdb, int type)
+void mgs_revoke_lock(struct mgs_device *mgs, struct fs_db *fsdb,
+		     enum mgs_cfg_type type)
 {
 	ldlm_completion_callback cp = NULL;
 	struct lustre_handle     lockh = {
@@ -226,21 +226,21 @@ void mgs_revoke_lock(struct mgs_device *mgs, struct fs_db *fsdb, int type)
 	rc = mgc_fsname2resid(fsdb->fsdb_name, &res_id, type);
 	LASSERT(rc == 0);
 	switch (type) {
-	case CONFIG_T_CONFIG:
-	case CONFIG_T_NODEMAP:
+	case MGS_CFG_T_CONFIG:
+	case MGS_CFG_T_NODEMAP:
 		cp = mgs_completion_ast_config;
 		if (test_and_set_bit(FSDB_REVOKING_LOCK, &fsdb->fsdb_flags))
 			rc = -EALREADY;
 		break;
-	case CONFIG_T_PARAMS:
+	case MGS_CFG_T_PARAMS:
 		cp = mgs_completion_ast_params;
 		if (test_and_set_bit(FSDB_REVOKING_PARAMS, &fsdb->fsdb_flags))
 			rc = -EALREADY;
 		break;
-	case CONFIG_T_RECOVER:
+	case MGS_CFG_T_RECOVER:
 		cp = mgs_completion_ast_ir;
 		break;
-	case CONFIG_T_BARRIER:
+	case MGS_CFG_T_BARRIER:
 		cp = mgs_completion_ast_barrier;
 		break;
 	default:
@@ -260,11 +260,11 @@ void mgs_revoke_lock(struct mgs_device *mgs, struct fs_db *fsdb, int type)
 			       le64_to_cpu(res_id.name[0]),
 			       le64_to_cpu(res_id.name[1]), rc);
 
-			if (type == CONFIG_T_CONFIG)
+			if (type == MGS_CFG_T_CONFIG)
 				clear_bit(FSDB_REVOKING_LOCK,
 					  &fsdb->fsdb_flags);
 
-			if (type == CONFIG_T_PARAMS)
+			if (type == MGS_CFG_T_PARAMS)
 				clear_bit(FSDB_REVOKING_PARAMS,
 					  &fsdb->fsdb_flags);
 		}
@@ -510,7 +510,7 @@ static int mgs_target_reg(struct tgt_session_info *tsi)
         }
 
 out:
-	mgs_revoke_lock(mgs, c_fsdb, CONFIG_T_CONFIG);
+	mgs_revoke_lock(mgs, c_fsdb, MGS_CFG_T_CONFIG);
 
 out_norevoke:
 	if (!rc && mti->mti_flags & LDD_F_SV_TYPE_MDT && b_fsdb) {
@@ -575,13 +575,13 @@ static int mgs_config_read(struct tgt_session_info *tsi)
 	}
 
 	switch (body->mcb_type) {
-	case CONFIG_T_RECOVER:
+	case MGS_CFG_T_RECOVER:
 		rc = mgs_get_ir_logs(req);
 		break;
-	case CONFIG_T_NODEMAP:
+	case MGS_CFG_T_NODEMAP:
 		rc = nodemap_get_config_req(req->rq_export->exp_obd, req);
 		break;
-	case CONFIG_T_CONFIG:
+	case MGS_CFG_T_CONFIG:
 		rc = -EOPNOTSUPP;
 		break;
 	default:
@@ -878,7 +878,7 @@ static int mgs_iocontrol_nodemap(const struct lu_env *env,
 		CWARN("%s: cannot make nodemap fsdb: rc = %d\n",
 		      mgs->mgs_obd->obd_name, rc);
 	} else {
-		mgs_revoke_lock(mgs, fsdb, CONFIG_T_NODEMAP);
+		mgs_revoke_lock(mgs, fsdb, MGS_CFG_T_NODEMAP);
 		mgs_put_fsdb(mgs, fsdb);
 	}
 
@@ -1282,8 +1282,13 @@ static int mgs_init0(const struct lu_env *env, struct mgs_device *mgs,
 						LDLM_NAMESPACE_SERVER,
 						LDLM_NAMESPACE_MODEST,
 						LDLM_NS_TYPE_MGT);
-	if (obd->obd_namespace == NULL)
-		GOTO(err_ops, rc = -ENOMEM);
+	if (IS_ERR(obd->obd_namespace)) {
+		rc = PTR_ERR(obd->obd_namespace);
+		CERROR("%s: unable to create server namespace: rc = %d\n",
+		       obd->obd_name, rc);
+		obd->obd_namespace = NULL;
+		GOTO(err_ops, rc);
+	}
 
 	/* No recovery for MGCs */
 	obd->obd_replayable = 0;
@@ -1477,7 +1482,7 @@ static int mgs_object_print(const struct lu_env *env, void *cookie,
 	return (*p)(env, cookie, LUSTRE_MGS_NAME"-object@%p", o);
 }
 
-static struct lu_object_operations mgs_lu_obj_ops = {
+static const struct lu_object_operations mgs_lu_obj_ops = {
 	.loo_object_init	= mgs_object_init,
 	.loo_object_free	= mgs_object_free,
 	.loo_object_print	= mgs_object_print,
@@ -1597,7 +1602,7 @@ LU_TYPE_INIT_FINI(mgs, &mgs_thread_key);
 
 LU_CONTEXT_KEY_DEFINE(mgs, LCT_MG_THREAD);
 
-static struct lu_device_type_operations mgs_device_type_ops = {
+static const struct lu_device_type_operations mgs_device_type_ops = {
 	.ldto_init		= mgs_type_init,
 	.ldto_fini		= mgs_type_fini,
 
@@ -1722,7 +1727,7 @@ static const struct obd_ops mgs_obd_device_ops = {
 
 static int __init mgs_init(void)
 {
-	return class_register_type(&mgs_obd_device_ops, NULL, true, NULL,
+	return class_register_type(&mgs_obd_device_ops, NULL, true,
 				   LUSTRE_MGS_NAME, &mgs_device_type);
 }
 

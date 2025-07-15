@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  *   Author: Nikita Danilov <nikita.danilov@sun.com>
  */
@@ -163,8 +162,11 @@ int cl_file_inode_init(struct inode *inode, struct lustre_md *md)
 		 * there is no clob in cache with the given fid, so it is
 		 * unnecessary to perform lookup-alloc-lookup-insert, just
 		 * alloc and insert directly.
+		 * It is also fine for a WBC cached file under the protection of
+		 * WBC EX lock.
 		 */
-		if (!(inode->i_state & I_NEW)) {
+		if (!wbc_inode_has_protected(ll_i2wbci(inode)) &&
+		    !(inode->i_state & I_NEW)) {
 			result = -EIO;
 			CERROR("%s: unexpected not-NEW inode "DFID": rc = %d\n",
 			       ll_i2sbi(inode)->ll_fsname, PFID(fid), result);
@@ -181,6 +183,19 @@ int cl_file_inode_init(struct inode *inode, struct lustre_md *md)
 			 */
 			lli->lli_clob = clob;
 			lu_object_ref_add(&clob->co_lu, "inode", inode);
+
+			if (wbc_inode_has_protected(ll_i2wbci(inode))) {
+				struct cl_layout clt = {
+					.cl_layout_gen = 0,
+				};
+
+				result = cl_object_layout_get(env, clob, &clt);
+				if (result < 0)
+					goto out;
+
+				ll_layout_version_set(lli, clt.cl_layout_gen);
+				result = 0;
+			}
 		} else {
 			result = PTR_ERR(clob);
 		}

@@ -267,6 +267,7 @@ S:	Maintained
 F:	lustre/conf/lgssc.conf
 F:	lustre/conf/lsvcgss
 F:	lustre/doc/lgss_sk.8
+F:	lustre/doc/lfs-flushctx.1
 F:	lustre/llite/xattr_security.c
 F:	lustre/ptlrpc/gss
 F:	lustre/ptlrpc/sec*.c
@@ -451,6 +452,13 @@ F:	lustre/doc/llapi_pcc*.3
 F:	lustre/llite/pcc.[ch]
 F:	lustre/tests/sanity-pcc.sh
 F:	lustre/utils/liblustreapi_pcc.c
+
+Lustre Persistent Client Cache - PCC
+R:	Qian Yingjin <qian@ddn.com>
+S:	Supported
+F:	lustre/llite/wbc.[ch]
+F:	lustre/tests/sanity-wbc.sh
+F:	lustre/utils/liblustreapi_wbc.c
 
 Lustre /proc and /sys
 R:	James Simmons <jsimmons@infradead.org>

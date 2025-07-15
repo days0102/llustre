@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/ldlm/ldlm_lockd.c
  *
@@ -255,7 +254,7 @@ static int expired_lock_main(void *arg)
 
 				LDLM_ERROR(lock,
 					   "lock callback timer expired after %llds: evicting client at %s ",
-					   ktime_get_real_seconds() -
+					   ktime_get_seconds() -
 					   lock->l_blast_sent,
 					   obd_export_nid2str(export));
 				ldlm_lock_to_ns(lock)->ns_timeouts++;
@@ -377,10 +376,10 @@ static void waiting_locks_callback(TIMER_DATA_TYPE unused)
 static int __ldlm_add_waiting_lock(struct ldlm_lock *lock, timeout_t delay)
 {
 	unsigned long timeout_jiffies = jiffies;
-	time64_t now = ktime_get_seconds();
 	time64_t deadline;
 	timeout_t timeout;
 
+	lock->l_blast_sent = ktime_get_seconds();
 	if (!list_empty(&lock->l_pending_chain))
 		return 0;
 
@@ -388,11 +387,12 @@ static int __ldlm_add_waiting_lock(struct ldlm_lock *lock, timeout_t delay)
 	    OBD_FAIL_CHECK(OBD_FAIL_PTLRPC_HPREQ_TIMEOUT))
 		delay = 1;
 
-	deadline = now + delay;
+	deadline = lock->l_blast_sent + delay;
 	if (likely(deadline > lock->l_callback_timestamp))
 		lock->l_callback_timestamp = deadline;
 
-	timeout = clamp_t(timeout_t, lock->l_callback_timestamp - now,
+	timeout = clamp_t(timeout_t,
+			  lock->l_callback_timestamp - lock->l_blast_sent,
 			  0, delay);
 	timeout_jiffies += cfs_time_seconds(timeout);
 
@@ -468,7 +468,6 @@ static int ldlm_add_waiting_lock(struct ldlm_lock *lock, timeout_t timeout)
 	}
 
 	ldlm_set_waited(lock);
-	lock->l_blast_sent = ktime_get_real_seconds();
 	ret = __ldlm_add_waiting_lock(lock, timeout);
 	if (ret) {
 		/*
@@ -596,7 +595,7 @@ int ldlm_refresh_waiting_lock(struct ldlm_lock *lock, timeout_t timeout)
 	__ldlm_add_waiting_lock(lock, timeout);
 	spin_unlock_bh(&waiting_locks_spinlock);
 
-	LDLM_DEBUG(lock, "refreshed");
+	LDLM_DEBUG(lock, "refreshed to %ds", timeout);
 	return 1;
 }
 EXPORT_SYMBOL(ldlm_refresh_waiting_lock);
@@ -1116,6 +1115,7 @@ int ldlm_server_completion_ast(struct ldlm_lock *lock, __u64 flags, void *data)
 
 	RETURN(lvb_len < 0 ? lvb_len : rc);
 }
+EXPORT_SYMBOL(ldlm_server_completion_ast);
 
 /**
  * Server side ->l_glimpse_ast handler for client locks.
@@ -1227,10 +1227,10 @@ EXPORT_SYMBOL(ldlm_request_lock);
  * Main server-side entry point into LDLM for enqueue. This is called by ptlrpc
  * service threads to carry out client lock enqueueing requests.
  */
-int ldlm_handle_enqueue0(struct ldlm_namespace *ns,
-			 struct ptlrpc_request *req,
-			 const struct ldlm_request *dlm_req,
-			 const struct ldlm_callback_suite *cbs)
+int ldlm_handle_enqueue(struct ldlm_namespace *ns,
+			struct req_capsule *pill,
+			const struct ldlm_request *dlm_req,
+			const struct ldlm_callback_suite *cbs)
 {
 	struct ldlm_reply *dlm_rep;
 	__u64 flags;
@@ -1239,14 +1239,56 @@ int ldlm_handle_enqueue0(struct ldlm_namespace *ns,
 	void *cookie = NULL;
 	int rc = 0;
 	struct ldlm_resource *res = NULL;
+	struct ptlrpc_request *req = pill->rc_req;
 	const struct lu_env *env = req->rq_svc_thread->t_env;
+	int first = LDLM_ENQUEUE_CANCEL_OFF;
 
 	ENTRY;
 
 	LDLM_DEBUG_NOLOCK("server-side enqueue handler START");
 
-	ldlm_request_cancel(req, dlm_req, LDLM_ENQUEUE_CANCEL_OFF, LATF_SKIP);
 	flags = ldlm_flags_from_wire(dlm_req->lock_flags);
+
+	/* The root WBC EX lock is revoking. */
+	if (req_capsule_ptlreq(pill) &&
+	    flags & LDLM_FL_INTENT_PARENT_LOCKED &&
+	    flags & LDLM_FL_INTENT_EXLOCK_UPDATE) {
+		struct ldlm_lock *lock;
+
+		LASSERT(req_capsule_ptlreq(pill));
+
+		if (dlm_req->lock_count < 2)
+			GOTO(out, rc = err_serious(-EPROTO));
+
+		lock = ldlm_handle2lock(&dlm_req->lock_handle[1]);
+		if (!lock)
+			GOTO(out, rc = err_serious(-EPROTO));
+
+		/* TODO: check the export validity too. */
+		/* Granted WBC lock must be LCK_EX mode */
+		if (lock->l_granted_mode != LCK_EX) {
+			LDLM_DEBUG(lock,
+				   "Wrong grented WBC lock mode: %s\n",
+				   ldlm_lockname[lock->l_granted_mode]);
+			LDLM_LOCK_PUT(lock);
+			GOTO(out, rc = err_serious(-EPROTO));
+		}
+
+		/* XXX Check parent resource */
+		/* Prolong the lock in case it is blocked. */
+		if (lock->l_flags & LDLM_FL_AST_SENT) {
+			time64_t timeout;
+
+			timeout = obd_timeout / 2 + /* XXX! */
+				  (ldlm_bl_timeout(lock) >> 1);
+			ldlm_refresh_waiting_lock(lock, timeout);
+		}
+		LDLM_LOCK_PUT(lock);
+		first++;
+	}
+
+	if (req_capsule_ptlreq(pill))
+		ldlm_request_cancel(req, dlm_req, first, LATF_SKIP);
 
 	LASSERT(req->rq_export);
 
@@ -1255,7 +1297,7 @@ int ldlm_handle_enqueue0(struct ldlm_namespace *ns,
 	    !(dlm_req->lock_flags & LDLM_FL_HAS_INTENT))
 		ldlm_svc_get_eopc(dlm_req, ptlrpc_req2svc(req)->srv_stats);
 
-	if (req->rq_export && req->rq_export->exp_nid_stats &&
+	if (req->rq_export->exp_nid_stats &&
 	    req->rq_export->exp_nid_stats->nid_ldlm_stats)
 		lprocfs_counter_incr(req->rq_export->exp_nid_stats->nid_ldlm_stats,
 				     LDLM_ENQUEUE - LDLM_FIRST_OPC);
@@ -1372,17 +1414,17 @@ int ldlm_handle_enqueue0(struct ldlm_namespace *ns,
 
 existing_lock:
 	cookie = req;
-	if (!(flags & LDLM_FL_HAS_INTENT)) {
+	if (!(flags & LDLM_FL_HAS_INTENT) && req_capsule_ptlreq(pill)) {
 		/* based on the assumption that lvb size never changes during
 		 * resource life time otherwise it need resource->lr_lock's
 		 * protection */
-		req_capsule_set_size(&req->rq_pill, &RMF_DLM_LVB,
+		req_capsule_set_size(pill, &RMF_DLM_LVB,
 				     RCL_SERVER, ldlm_lvbo_size(lock));
 
 		if (OBD_FAIL_CHECK(OBD_FAIL_LDLM_ENQUEUE_EXTENT_ERR))
 			GOTO(out, rc = -ENOMEM);
 
-		rc = req_capsule_server_pack(&req->rq_pill);
+		rc = req_capsule_server_pack(pill);
 		if (rc)
 			GOTO(out, rc);
 	}
@@ -1394,12 +1436,12 @@ existing_lock:
 		GOTO(out, err);
 	}
 
-	dlm_rep = req_capsule_server_get(&req->rq_pill, &RMF_DLM_REP);
+	dlm_rep = req_capsule_server_get(pill, &RMF_DLM_REP);
 
 	ldlm_lock2desc(lock, &dlm_rep->lock_desc);
 	ldlm_lock2handle(lock, &dlm_rep->lock_handle);
 
-	if (lock && lock->l_resource->lr_type == LDLM_EXTENT)
+	if (lock->l_resource->lr_type == LDLM_EXTENT)
 		OBD_FAIL_TIMEOUT(OBD_FAIL_LDLM_BL_EVICT, 6);
 
 	/*
@@ -1465,11 +1507,13 @@ existing_lock:
 
 	EXIT;
 out:
-	req->rq_status = rc ?: err; /* return either error - b=11190 */
-	if (!req->rq_packed_final) {
-		err = lustre_pack_reply(req, 1, NULL, NULL);
-		if (rc == 0)
-			rc = err;
+	if (req_capsule_ptlreq(pill)) {
+		req->rq_status = rc ?: err; /* return either error - b=11190 */
+		if (!req->rq_packed_final) {
+			int rc1 = lustre_pack_reply(req, 1, NULL, NULL);
+			if (rc == 0)
+				rc = rc1;
+		}
 	}
 
 	/*
@@ -1482,18 +1526,17 @@ out:
 			   err, rc);
 
 		if (rc == 0 &&
-		    req_capsule_has_field(&req->rq_pill, &RMF_DLM_LVB,
+		    req_capsule_has_field(pill, &RMF_DLM_LVB,
 					  RCL_SERVER) &&
 		    ldlm_lvbo_size(lock) > 0) {
 			void *buf;
 			int buflen;
 
 retry:
-			buf = req_capsule_server_get(&req->rq_pill,
-						     &RMF_DLM_LVB);
+			buf = req_capsule_server_get(pill, &RMF_DLM_LVB);
 			LASSERTF(buf != NULL, "req %p, lock %p\n", req, lock);
-			buflen = req_capsule_get_size(&req->rq_pill,
-					&RMF_DLM_LVB, RCL_SERVER);
+			buflen = req_capsule_get_size(pill, &RMF_DLM_LVB,
+						      RCL_SERVER);
 			/*
 			 * non-replayed lock, delayed lvb init may
 			 * need to be occur now
@@ -1503,13 +1546,12 @@ retry:
 
 				rc2 = ldlm_lvbo_fill(lock, buf, &buflen);
 				if (rc2 >= 0) {
-					req_capsule_shrink(&req->rq_pill,
-							   &RMF_DLM_LVB,
+					req_capsule_shrink(pill, &RMF_DLM_LVB,
 							   rc2, RCL_SERVER);
 				} else if (rc2 == -ERANGE) {
 					rc2 = req_capsule_server_grow(
-							&req->rq_pill,
-							&RMF_DLM_LVB, buflen);
+							pill, &RMF_DLM_LVB,
+							buflen);
 					if (!rc2) {
 						goto retry;
 					} else {
@@ -1519,8 +1561,7 @@ retry:
 						 * to client.
 						 */
 						req_capsule_shrink(
-							&req->rq_pill,
-							&RMF_DLM_LVB, 0,
+							pill, &RMF_DLM_LVB, 0,
 							RCL_SERVER);
 					}
 				} else {
@@ -1529,8 +1570,7 @@ retry:
 			} else if (flags & LDLM_FL_REPLAY) {
 				/* no LVB resend upon replay */
 				if (buflen > 0)
-					req_capsule_shrink(&req->rq_pill,
-							   &RMF_DLM_LVB,
+					req_capsule_shrink(pill, &RMF_DLM_LVB,
 							   0, RCL_SERVER);
 				else
 					rc = buflen;
@@ -1547,8 +1587,8 @@ retry:
 				ldlm_resource_unlink_lock(lock);
 				ldlm_lock_destroy_nolock(lock);
 				unlock_res_and_lock(lock);
-
 			}
+			ldlm_reprocess_all(lock->l_resource, lock);
 		}
 
 		if (!err && !ldlm_is_cbpending(lock) &&
@@ -1563,6 +1603,7 @@ retry:
 
 	return rc;
 }
+EXPORT_SYMBOL(ldlm_handle_enqueue);
 
 /*
  * Clear the blocking lock, the race is possible between ldlm_handle_convert0()
@@ -1752,8 +1793,8 @@ int ldlm_request_cancel(struct ptlrpc_request *req,
 		    lock->l_blast_sent != 0) {
 			timeout_t delay = 0;
 
-			if (ktime_get_real_seconds() > lock->l_blast_sent)
-				delay = ktime_get_real_seconds() -
+			if (ktime_get_seconds() > lock->l_blast_sent)
+				delay = ktime_get_seconds() -
 					lock->l_blast_sent;
 			LDLM_DEBUG(lock,
 				   "server cancels blocked lock after %ds",
@@ -3463,6 +3504,7 @@ void ldlm_exit(void)
 {
 	if (ldlm_refcount)
 		CERROR("ldlm_refcount is %d in ldlm_exit!\n", ldlm_refcount);
+	synchronize_rcu();
 	kmem_cache_destroy(ldlm_resource_slab);
 	/*
 	 * ldlm_lock_put() use RCU to call ldlm_lock_free, so need call

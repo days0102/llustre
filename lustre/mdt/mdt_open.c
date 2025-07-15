@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/mdt/mdt_open.c
  *
@@ -106,7 +105,7 @@ void mdt_mfd_free(struct mdt_file_data *mfd)
 }
 
 static int mdt_create_data(struct mdt_thread_info *info,
-                           struct mdt_object *p, struct mdt_object *o)
+			   struct mdt_object *p, struct mdt_object *o)
 {
 	struct md_op_spec     *spec = &info->mti_spec;
 	struct md_attr        *ma   = &info->mti_attr;
@@ -303,9 +302,9 @@ void mdt_mfd_set_mode(struct mdt_file_data *mfd, u64 open_flags)
 /**
  * prep ma_lmm/ma_lmv for md_attr from reply
  */
-static void mdt_prep_ma_buf_from_rep(struct mdt_thread_info *info,
-				     struct mdt_object *obj,
-				     struct md_attr *ma)
+void mdt_prep_ma_buf_from_rep(struct mdt_thread_info *info,
+			      struct mdt_object *obj,
+			      struct md_attr *ma)
 {
 	if (ma->ma_lmv || ma->ma_lmm) {
 		CDEBUG(D_INFO, DFID " %s already set.\n",
@@ -324,6 +323,19 @@ static void mdt_prep_ma_buf_from_rep(struct mdt_thread_info *info,
 						       RCL_SERVER);
 		if (ma->ma_lmv_size > 0)
 			ma->ma_need |= MA_LMV;
+
+		if (req_capsule_has_field(info->mti_pill, &RMF_DEFAULT_MDT_MD,
+					  RCL_SERVER)) {
+			ma->ma_default_lmv =
+				req_capsule_server_get(info->mti_pill,
+						       &RMF_DEFAULT_MDT_MD);
+			ma->ma_default_lmv_size =
+				req_capsule_get_size(info->mti_pill,
+						     &RMF_DEFAULT_MDT_MD,
+						     RCL_SERVER);
+			if (ma->ma_default_lmv_size > 0)
+				ma->ma_need |= MA_LMV_DEF;
+		}
 	} else {
 		ma->ma_lmm = req_capsule_server_get(info->mti_pill,
 						    &RMF_MDT_MD);
@@ -1039,6 +1051,8 @@ static void mdt_object_open_unlock(struct mdt_thread_info *info,
 	if (rc != 0 || !lustre_handle_is_used(&lhc->mlh_reg_lh)) {
 		struct ldlm_reply       *ldlm_rep;
 
+		LASSERT(!info->mti_parent_locked);
+
 		ldlm_rep = req_capsule_server_get(info->mti_pill, &RMF_DLM_REP);
 		mdt_clear_disposition(info, ldlm_rep, DISP_OPEN_LOCK);
 		if (lustre_handle_is_used(&lhc->mlh_reg_lh))
@@ -1326,7 +1340,8 @@ int mdt_reint_open(struct mdt_thread_info *info, struct mdt_lock_handle *lhc)
 	ma->ma_need = MA_INODE;
 	ma->ma_valid = 0;
 
-	LASSERT(info->mti_pill->rc_fmt == &RQF_LDLM_INTENT_OPEN);
+	LASSERT(info->mti_pill->rc_fmt == &RQF_LDLM_INTENT_OPEN &&
+		!info->mti_parent_locked);
 	ldlm_rep = req_capsule_server_get(info->mti_pill, &RMF_DLM_REP);
 
 	if (unlikely(open_flags & MDS_OPEN_JOIN_FILE)) {
@@ -1370,7 +1385,7 @@ int mdt_reint_open(struct mdt_thread_info *info, struct mdt_lock_handle *lhc)
 			GOTO(out, result = -EFAULT);
 		}
 		CDEBUG(D_INFO, "No object(1), continue as regular open.\n");
-	} else if (open_flags & MDS_OPEN_BY_FID) {
+	} else if ((open_flags & MDS_OPEN_BY_FID)) {
 		result = mdt_open_by_fid_lock(info, ldlm_rep, lhc);
 		if (result < 0)
 			CDEBUG(D_INFO, "no object for "DFID": %d\n",
@@ -1695,7 +1710,7 @@ static struct mdt_object *mdt_orphan_open(struct mdt_thread_info *info,
 
 	uc = lu_ucred(env);
 	uc_cap_save = uc->uc_cap;
-	uc->uc_cap |= BIT(CFS_CAP_DAC_OVERRIDE);
+	uc->uc_cap |= BIT(CAP_DAC_OVERRIDE);
 	rc = mdo_create(env, mdt_object_child(local_root), &lname,
 			mdt_object_child(obj), spec, attr);
 	uc->uc_cap = uc_cap_save;
@@ -1967,7 +1982,7 @@ static int mdt_hsm_release(struct mdt_thread_info *info, struct mdt_object *o,
 	/* The orphan has root ownership so we need to raise
 	 * CAP_FOWNER to set the HSM attributes. */
 	cap = uc->uc_cap;
-	uc->uc_cap |= MD_CAP_TO_MASK(CFS_CAP_FOWNER);
+	uc->uc_cap |= MD_CAP_TO_MASK(CAP_FOWNER);
 	rc = mo_xattr_set(info->mti_env, mdt_object_child(orphan), buf,
 			  XATTR_NAME_HSM, 0);
 	uc->uc_cap = cap;
@@ -2036,9 +2051,9 @@ int mdt_close_handle_layouts(struct mdt_thread_info *info,
 	struct mdt_lock_handle	*lh2 = &info->mti_lh[MDT_LH_OLD];
 	struct close_data	*data;
 	struct ldlm_lock	*lease;
-	struct mdt_object	*o1 = o, *o2;
+	struct mdt_object	*o1 = o, *o2 = NULL;
 	bool			 lease_broken;
-	bool			 swap_objects;
+	bool			 swap_objects = false;
 	int			 rc;
 	ENTRY;
 
@@ -2056,37 +2071,52 @@ int mdt_close_handle_layouts(struct mdt_thread_info *info,
 		RETURN(-EINVAL);
 
 	rc = lu_fid_cmp(&data->cd_fid, mdt_object_fid(o));
-	if (unlikely(rc == 0))
-		RETURN(-EINVAL);
+	if (rc == 0) {
+		/**
+		 * only MDS_CLOSE_LAYOUT_SPLIT use the same fid to indicate
+		 * mirror deletion, so we'd zero cd_fid, and keeps o2 be NULL.
+		 */
+		if (!(ma->ma_attr_flags & MDS_CLOSE_LAYOUT_SPLIT))
+			RETURN(-EINVAL);
 
-	/* Exchange o1 and o2, to enforce locking order */
-	swap_objects = (rc < 0);
+		/* zero cd_fid to keeps o2 be NULL */
+		fid_zero(&data->cd_fid);
+	} else if (rc < 0) {
+		/* Exchange o1 and o2, to enforce locking order */
+		swap_objects = true;
+	}
 
 	lease = ldlm_handle2lock(&data->cd_handle);
 	if (lease == NULL)
 		RETURN(-ESTALE);
 
-	o2 = mdt_object_find(info->mti_env, info->mti_mdt, &data->cd_fid);
-	if (IS_ERR(o2))
-		GOTO(out_lease, rc = PTR_ERR(o2));
+	if (!fid_is_zero(&data->cd_fid)) {
+		o2 = mdt_object_find(info->mti_env, info->mti_mdt,
+				     &data->cd_fid);
+		if (IS_ERR(o2))
+			GOTO(out_lease, rc = PTR_ERR(o2));
 
-	if (!S_ISREG(lu_object_attr(&o2->mot_obj))) {
-		swap_objects = false; /* not swapped yet */
-		GOTO(out_obj, rc = -EINVAL);
+		if (!mdt_object_exists(o2))
+			GOTO(out_obj, rc = -ENOENT);
+
+		if (!S_ISREG(lu_object_attr(&o2->mot_obj)))
+			GOTO(out_obj, rc = -EINVAL);
+
+		if (swap_objects)
+			swap(o1, o2);
 	}
-
-	if (swap_objects)
-		swap(o1, o2);
 
 	rc = mo_permission(info->mti_env, NULL, mdt_object_child(o1), NULL,
 			   MAY_WRITE);
 	if (rc < 0)
 		GOTO(out_obj, rc);
 
-	rc = mo_permission(info->mti_env, NULL, mdt_object_child(o2), NULL,
-			   MAY_WRITE);
-	if (rc < 0)
-		GOTO(out_obj, rc);
+	if (o2) {
+		rc = mo_permission(info->mti_env, NULL, mdt_object_child(o2),
+				   NULL, MAY_WRITE);
+		if (rc < 0)
+			GOTO(out_obj, rc);
+	}
 
 	/* try to hold open_sem so that nobody else can open the file */
 	if (!down_write_trylock(&o->mot_open_sem)) {
@@ -2116,11 +2146,13 @@ int mdt_close_handle_layouts(struct mdt_thread_info *info,
 	if (rc < 0)
 		GOTO(out_unlock_sem, rc);
 
-	mdt_lock_reg_init(lh2, LCK_EX);
-	rc = mdt_object_lock(info, o2, lh2, MDS_INODELOCK_LAYOUT |
-			     MDS_INODELOCK_XATTR);
-	if (rc < 0)
-		GOTO(out_unlock1, rc);
+	if (o2) {
+		mdt_lock_reg_init(lh2, LCK_EX);
+		rc = mdt_object_lock(info, o2, lh2, MDS_INODELOCK_LAYOUT |
+				     MDS_INODELOCK_XATTR);
+		if (rc < 0)
+			GOTO(out_unlock1, rc);
+	}
 
 	/* Swap layout with orphan object */
 	if (ma->ma_attr_flags & MDS_CLOSE_LAYOUT_SWAP) {
@@ -2131,9 +2163,26 @@ int mdt_close_handle_layouts(struct mdt_thread_info *info,
 		struct lu_buf *buf = &info->mti_buf;
 		struct md_rejig_data mrd;
 
-		mrd.mrd_obj = mdt_object_child(o == o1 ? o2 : o1);
-		if (ma->ma_attr_flags & MDS_CLOSE_LAYOUT_SPLIT)
+		if (o2) {
+			mrd.mrd_obj = mdt_object_child(o == o1 ? o2 : o1);
+		} else {
+			if (!(ma->ma_attr_flags & MDS_CLOSE_LAYOUT_SPLIT)) {
+				/* paranoid check again */
+				CERROR(DFID
+				  ":only mirror split support NULL o2 object\n",
+					PFID(mdt_object_fid(o)));
+				GOTO(out_unlock1, rc = -EINVAL);
+			}
+
+			/* set NULL mrd_obj for deleting mirror objects */
+			mrd.mrd_obj = NULL;
+		}
+
+		if (ma->ma_attr_flags & MDS_CLOSE_LAYOUT_SPLIT) {
 			mrd.mrd_mirror_id = data->cd_mirror_id;
+			/* set a small enough blocks in the SoM */
+			ma->ma_attr.la_blocks >>= 1;
+		}
 
 		buf->lb_len = sizeof(mrd);
 		buf->lb_buf = &mrd;
@@ -2141,11 +2190,18 @@ int mdt_close_handle_layouts(struct mdt_thread_info *info,
 				  XATTR_LUSTRE_LOV,
 				  ma->ma_attr_flags & MDS_CLOSE_LAYOUT_SPLIT ?
 				  LU_XATTR_SPLIT : LU_XATTR_MERGE);
-		if (rc == 0 && ma->ma_attr.la_valid & (LA_SIZE | LA_BLOCKS)) {
+		if (rc == 0 && ma->ma_attr.la_valid & (LA_SIZE | LA_BLOCKS |
+						       LA_LSIZE | LA_LBLOCKS)) {
 			int rc2;
+			enum lustre_som_flags lsf;
+
+			if (ma->ma_attr.la_valid & (LA_SIZE | LA_BLOCKS))
+				lsf = SOM_FL_STRICT;
+			else
+				lsf = SOM_FL_LAZY;
 
 			mutex_lock(&o->mot_som_mutex);
-			rc2 = mdt_set_som(info, o, SOM_FL_STRICT,
+			rc2 = mdt_set_som(info, o, lsf,
 					  ma->ma_attr.la_size,
 					  ma->ma_attr.la_blocks);
 			mutex_unlock(&o->mot_som_mutex);
@@ -2163,7 +2219,8 @@ int mdt_close_handle_layouts(struct mdt_thread_info *info,
 
 out_unlock2:
 	/* Release exclusive LL */
-	mdt_object_unlock(info, o2, lh2, 1);
+	if (o2)
+		mdt_object_unlock(info, o2, lh2, 1);
 
 out_unlock1:
 	mdt_object_unlock(info, o1, lh1, 1);
@@ -2181,7 +2238,12 @@ out_unlock_sem:
 	}
 
 out_obj:
-	mdt_object_put(info->mti_env, swap_objects ? o1 : o2);
+	if (o1 != o)
+		/* the 2nd object has been used, and swapped to o1 */
+		mdt_object_put(info->mti_env, o1);
+	else if (o2)
+		/* the 2nd object has been used, and not swapped */
+		mdt_object_put(info->mti_env, o2);
 
 	ldlm_reprocess_all(lease->l_resource, lease);
 
@@ -2220,7 +2282,7 @@ static int mdt_close_resync_done(struct mdt_thread_info *info,
 	if (data == NULL)
 		RETURN(-EPROTO);
 
-	if (ptlrpc_req_need_swab(mdt_info_req(info)))
+	if (req_capsule_req_need_swab(info->mti_pill))
 		lustre_swab_close_data_resync_done(&data->cd_resync);
 
 	if (!fid_is_zero(&data->cd_fid))

@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * Client IO.
  *
@@ -584,6 +583,35 @@ int cl_io_read_ahead(const struct lu_env *env, struct cl_io *io,
 EXPORT_SYMBOL(cl_io_read_ahead);
 
 /**
+ * Called before io start, to reserve enough LRU slots to avoid
+ * deadlock.
+ *
+ * \see cl_io_operations::cio_lru_reserve()
+ */
+int cl_io_lru_reserve(const struct lu_env *env, struct cl_io *io,
+		      loff_t pos, size_t bytes)
+{
+	const struct cl_io_slice *scan;
+	int result = 0;
+
+	LINVRNT(io->ci_type == CIT_READ || io->ci_type == CIT_WRITE);
+	LINVRNT(cl_io_invariant(io));
+	ENTRY;
+
+	list_for_each_entry(scan, &io->ci_layers, cis_linkage) {
+		if (scan->cis_iop->cio_lru_reserve) {
+			result = scan->cis_iop->cio_lru_reserve(env, scan,
+								pos, bytes);
+			if (result)
+				break;
+		}
+	}
+
+	RETURN(result);
+}
+EXPORT_SYMBOL(cl_io_lru_reserve);
+
+/**
  * Commit a list of contiguous pages into writeback cache.
  *
  * \returns 0 if all pages committed, or errcode if error occurred.
@@ -608,6 +636,20 @@ int cl_io_commit_async(const struct lu_env *env, struct cl_io *io,
 	RETURN(result);
 }
 EXPORT_SYMBOL(cl_io_commit_async);
+
+void cl_io_extent_release(const struct lu_env *env, struct cl_io *io)
+{
+	const struct cl_io_slice *scan;
+	ENTRY;
+
+	list_for_each_entry(scan, &io->ci_layers, cis_linkage) {
+		if (scan->cis_iop->cio_extent_release == NULL)
+			continue;
+		scan->cis_iop->cio_extent_release(env, scan);
+	}
+	EXIT;
+}
+EXPORT_SYMBOL(cl_io_extent_release);
 
 /**
  * Submits a list of pages for immediate io.
@@ -749,7 +791,7 @@ int cl_io_loop(const struct lu_env *env, struct cl_io *io)
 	if (rc && !result)
 		result = rc;
 
-	if (result == -EWOULDBLOCK && io->ci_ndelay) {
+	if (result == -EAGAIN && io->ci_ndelay) {
 		io->ci_need_restart = 1;
 		result = 0;
 	}
@@ -1238,7 +1280,7 @@ void cl_sync_io_note(const struct lu_env *env, struct cl_sync_io *anchor,
 		 * to immediately reclaim anchor when cl_sync_io_wait()
 		 * completes.
 		 */
-		wake_up_all_locked(&anchor->csi_waitq);
+		wake_up_locked(&anchor->csi_waitq);
 		if (end_io)
 			end_io(env, anchor);
 		if (anchor->csi_aio)

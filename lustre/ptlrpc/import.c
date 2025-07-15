@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/ptlrpc/import.c
  *
@@ -278,15 +277,12 @@ static time64_t ptlrpc_inflight_deadline(struct ptlrpc_request *req,
 static time64_t ptlrpc_inflight_timeout(struct obd_import *imp)
 {
 	time64_t now = ktime_get_real_seconds();
-	struct list_head *tmp, *n;
 	struct ptlrpc_request *req;
 	time64_t timeout = 0;
 
 	spin_lock(&imp->imp_lock);
-	list_for_each_safe(tmp, n, &imp->imp_sending_list) {
-		req = list_entry(tmp, struct ptlrpc_request, rq_list);
+	list_for_each_entry(req, &imp->imp_sending_list, rq_list)
 		timeout = max(ptlrpc_inflight_deadline(req, now), timeout);
-	}
 	spin_unlock(&imp->imp_lock);
 	return timeout;
 }
@@ -299,7 +295,6 @@ static time64_t ptlrpc_inflight_timeout(struct obd_import *imp)
  */
 void ptlrpc_invalidate_import(struct obd_import *imp)
 {
-	struct list_head *tmp, *n;
 	struct ptlrpc_request *req;
 	time64_t timeout;
 	int rc;
@@ -376,19 +371,13 @@ void ptlrpc_invalidate_import(struct obd_import *imp)
 				 * this point. */
 				rc = 1;
 			} else {
-				list_for_each_safe(tmp, n,
-						   &imp->imp_sending_list) {
-					req = list_entry(tmp,
-							 struct ptlrpc_request,
-							 rq_list);
+				list_for_each_entry(req, &imp->imp_sending_list,
+						    rq_list) {
 					DEBUG_REQ(D_ERROR, req,
 						  "still on sending list");
 				}
-				list_for_each_safe(tmp, n,
-						   &imp->imp_delayed_list) {
-					req = list_entry(tmp,
-							 struct ptlrpc_request,
-							 rq_list);
+				list_for_each_entry(req, &imp->imp_delayed_list,
+						    rq_list) {
 					DEBUG_REQ(D_ERROR, req,
 						  "still on delayed list");
 				}
@@ -634,14 +623,13 @@ out_unlock:
  */
 static int ptlrpc_first_transno(struct obd_import *imp, __u64 *transno)
 {
-	struct ptlrpc_request	*req;
-	struct list_head	*tmp;
+	struct ptlrpc_request *req;
 
 	/* The requests in committed_list always have smaller transnos than
 	 * the requests in replay_list */
 	if (!list_empty(&imp->imp_committed_list)) {
-		tmp = imp->imp_committed_list.next;
-		req = list_entry(tmp, struct ptlrpc_request, rq_replay_list);
+		req = list_first_entry(&imp->imp_committed_list,
+				       struct ptlrpc_request, rq_replay_list);
 		*transno = req->rq_transno;
 		if (req->rq_transno == 0) {
 			DEBUG_REQ(D_ERROR, req,
@@ -651,8 +639,8 @@ static int ptlrpc_first_transno(struct obd_import *imp, __u64 *transno)
 		return 1;
 	}
 	if (!list_empty(&imp->imp_replay_list)) {
-		tmp = imp->imp_replay_list.next;
-		req = list_entry(tmp, struct ptlrpc_request, rq_replay_list);
+		req = list_first_entry(&imp->imp_committed_list,
+				       struct ptlrpc_request, rq_replay_list);
 		*transno = req->rq_transno;
 		if (req->rq_transno == 0) {
 			DEBUG_REQ(D_ERROR, req, "zero transno in replay_list");
@@ -1224,7 +1212,7 @@ static int ptlrpc_connect_interpret(const struct lu_env *env,
 			 * with server again
 			 */
 			if ((MSG_CONNECT_RECOVERING & msg_flags)) {
-				CDEBUG(level,
+				CDEBUG_LIMIT(level,
 				       "%s@%s changed server handle from "
 				       "%#llx to %#llx"
 				       " but is still in recovery\n",
@@ -1707,7 +1695,6 @@ static struct ptlrpc_request *ptlrpc_disconnect_prep_req(struct obd_import *imp)
 	req->rq_timeout = min_t(timeout_t, req->rq_timeout,
 				INITIAL_CONNECT_TIMEOUT);
 
-	import_set_state(imp, LUSTRE_IMP_CONNECTING);
 	req->rq_send_state =  LUSTRE_IMP_CONNECTING;
 	ptlrpc_request_set_replen(req);
 
@@ -1756,14 +1743,18 @@ int ptlrpc_disconnect_import(struct obd_import *imp, int noclose)
 			rc = -EINTR;
 	}
 
-	spin_lock(&imp->imp_lock);
-	if (imp->imp_state != LUSTRE_IMP_FULL)
-		GOTO(out, rc);
-	spin_unlock(&imp->imp_lock);
-
 	req = ptlrpc_disconnect_prep_req(imp);
 	if (IS_ERR(req))
 		GOTO(set_state, rc = PTR_ERR(req));
+
+	spin_lock(&imp->imp_lock);
+	if (imp->imp_state != LUSTRE_IMP_FULL) {
+		ptlrpc_req_finished_with_imp_lock(req);
+		GOTO(out, rc);
+	}
+	import_set_state_nolock(imp, LUSTRE_IMP_CONNECTING);
+	spin_unlock(&imp->imp_lock);
+
 	rc = ptlrpc_queue_wait(req);
 	ptlrpc_req_finished(req);
 
@@ -1844,6 +1835,21 @@ static int ptlrpc_disconnect_idle_interpret(const struct lu_env *env,
 	return 0;
 }
 
+static bool ptlrpc_can_idle(struct obd_import *imp)
+{
+	struct ldlm_namespace *ns = imp->imp_obd->obd_namespace;
+
+	/* one request for disconnect rpc */
+	if (atomic_read(&imp->imp_reqs) > 1)
+		return false;
+
+	/* any lock increases ns_bref being a resource holder */
+	if (ns && atomic_read(&ns->ns_bref) > 0)
+		return false;
+
+	return true;
+}
+
 int ptlrpc_disconnect_and_idle_import(struct obd_import *imp)
 {
 	struct ptlrpc_request *req;
@@ -1855,30 +1861,38 @@ int ptlrpc_disconnect_and_idle_import(struct obd_import *imp)
 	if (ptlrpc_import_in_recovery(imp))
 		RETURN(0);
 
-	spin_lock(&imp->imp_lock);
-	if (imp->imp_state != LUSTRE_IMP_FULL) {
-		spin_unlock(&imp->imp_lock);
-		RETURN(0);
-	}
-	spin_unlock(&imp->imp_lock);
-
 	req = ptlrpc_disconnect_prep_req(imp);
 	if (IS_ERR(req))
 		RETURN(PTR_ERR(req));
+
+	req->rq_interpret_reply = ptlrpc_disconnect_idle_interpret;
+
+	if (OBD_FAIL_PRECHECK(OBD_FAIL_PTLRPC_IDLE_RACE)) {
+		__u32 idx;
+
+		server_name2index(imp->imp_obd->obd_name, &idx, NULL);
+		if (idx == 0)
+			OBD_RACE(OBD_FAIL_PTLRPC_IDLE_RACE);
+	}
+
+	spin_lock(&imp->imp_lock);
+	if (imp->imp_state != LUSTRE_IMP_FULL || !ptlrpc_can_idle(imp)) {
+		ptlrpc_req_finished_with_imp_lock(req);
+		spin_unlock(&imp->imp_lock);
+		RETURN(0);
+	}
+	import_set_state_nolock(imp, LUSTRE_IMP_CONNECTING);
+	/* don't make noise at reconnection */
+	imp->imp_was_idle = 1;
+	spin_unlock(&imp->imp_lock);
 
 	CDEBUG_LIMIT(imp->imp_idle_debug, "%s: disconnect after %llus idle\n",
 		     imp->imp_obd->obd_name,
 		     ktime_get_real_seconds() - imp->imp_last_reply_time);
 
-	/* don't make noise at reconnection */
-	spin_lock(&imp->imp_lock);
-	imp->imp_was_idle = 1;
-	spin_unlock(&imp->imp_lock);
-
-	req->rq_interpret_reply = ptlrpc_disconnect_idle_interpret;
 	ptlrpcd_add_req(req);
 
-	RETURN(0);
+	RETURN(1);
 }
 EXPORT_SYMBOL(ptlrpc_disconnect_and_idle_import);
 

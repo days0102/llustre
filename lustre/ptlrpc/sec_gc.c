@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/ptlrpc/sec_gc.c
  *
@@ -75,8 +74,6 @@ void sptlrpc_gc_del_sec(struct ptlrpc_sec *sec)
 {
 	if (list_empty(&sec->ps_gc_list))
 		return;
-
-	might_sleep();
 
 	/* signal before list_del to make iteration in gc thread safe */
 	atomic_inc(&sec_gc_wait_del);

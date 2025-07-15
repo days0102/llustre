@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * libcfs/include/libcfs/libcfs_debug.h
  *
@@ -54,7 +53,7 @@ extern unsigned int libcfs_console_max_delay;
 extern unsigned int libcfs_console_min_delay;
 extern unsigned int libcfs_console_backoff;
 extern unsigned int libcfs_debug_binary;
-extern char libcfs_debug_file_path_arr[PATH_MAX];
+extern char *libcfs_debug_file_path;
 
 struct task_struct;
 
@@ -291,11 +290,11 @@ int libcfs_debug_msg(struct libcfs_debug_msg_data *msgdata,
 	__printf(2, 3);
 
 /* other external symbols that tracefile provides: */
-int cfs_trace_copyin_string(char *knl_buffer, int knl_buffer_nob,
-			    const char __user *usr_buffer, int usr_buffer_nob);
 int cfs_trace_copyout_string(char __user *usr_buffer, int usr_buffer_nob,
 			     const char *knl_buffer, char *append);
 
 #define LIBCFS_DEBUG_FILE_PATH_DEFAULT "/tmp/lustre-log"
+
+void cfs_debug_init(void);
 
 #endif	/* __LIBCFS_DEBUG_H__ */

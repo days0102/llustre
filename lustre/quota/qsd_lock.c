@@ -154,7 +154,7 @@ static int qsd_common_glimpse_ast(struct ptlrpc_request *req,
 	if (!*desc)
 		RETURN(-EFAULT);
 
-	if (ptlrpc_req_need_swab(req))
+	if (req_capsule_req_need_swab(&req->rq_pill))
 		lustre_swab_gl_lquota_desc(*desc);
 
 	/* prepare reply */
@@ -514,7 +514,7 @@ static int qsd_id_glimpse_ast(struct ldlm_lock *lock, void *data)
 	lqe_write_unlock(lqe);
 
 	if (wakeup)
-		wake_up_all(&lqe->lqe_waiters);
+		wake_up(&lqe->lqe_waiters);
 	lqe_putref(lqe);
 out:
 	req->rq_status = rc;

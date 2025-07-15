@@ -508,6 +508,11 @@ test_16d() {
 run_test 16d "Verify DIO and buffer IO with two clients"
 
 test_16e() { # LU-13227
+	# issue:	LU-14314
+
+	(( "$MDS1_VERSION" >= $(version_code 2.13.53) )) ||
+		skip "Need MDS version at least 2.13.53"
+
 	local file1=$DIR1/$tfile
 	local file2=$DIR2/$tfile
 
@@ -5561,6 +5566,114 @@ test_108a() {
 	[[ $offset == 8388608 ]] || error "offset $offset != 8388608"
 }
 run_test 108a "lseek: parallel updates"
+
+# LU-14110
+test_109() {
+	local i
+	local pid1 pid2
+
+	! local_mode ||
+		skip "Clients need to be on different nodes than the servers"
+
+	umount_client $MOUNT
+	umount_client $MOUNT2
+
+	echo "Starting race between client mount instances (50 iterations):"
+	for i in {1..50}; do
+		log "Iteration $i"
+
+#define OBD_FAIL_ONCE|OBD_FAIL_LLITE_RACE_MOUNT        0x80001417
+		$LCTL set_param -n fail_loc=0x80001417
+
+		mount_client $MOUNT  & pid1=$!
+		mount_client $MOUNT2 & pid2=$!
+		wait $pid1 || error "Mount $MOUNT fails with $?"
+		wait $pid2 || error "Mount $MOUNT2 fails with $?"
+
+		umount_client $MOUNT  & pid1=$!
+		umount_client $MOUNT2 & pid2=$!
+		wait $pid1 || error "Umount $MOUNT fails with $?"
+		wait $pid2 || error "Umount $MOUNT2 fails with $?"
+
+		$LUSTRE_RMMOD || error "Fail to remove lustre modules"
+		load_modules
+		echo
+	done
+
+	mount_client $MOUNT
+	mount_client $MOUNT2
+}
+
+run_test 109 "Race with several mount instances on 1 node"
+
+test_110() {
+	local before=$(date +%s)
+	local evict
+
+	mkdir -p $DIR/$tdir
+	touch $DIR/$tdir/f1
+	touch $DIR/$tfile
+
+	#define OBD_FAIL_PTLRPC_RESEND_RACE	 0x525
+	do_facet mds1 lctl set_param fail_loc=0x525 fail_val=3
+
+	# disable last_xid logic by dropping link reply
+	ln $DIR/$tdir/f1 $DIR/$tdir/f2 &
+	sleep 1
+
+	#define OBD_FAIL_PTLRPC_ENQ_RESEND	0x534
+	do_facet mds1 lctl set_param fail_loc=0x534
+
+	# RPC will race with its Resend and the Resend will sleep to let
+	# the original lock to get granted & cancelled.
+	#
+	# AST_SENT is set artificially, so an explicit conflict is not needed
+	#
+	# The woken up Resend gets a new lock, but client does not wait for it
+	stat $DIR/$tfile
+	sleep $TIMEOUT
+	do_facet mds1 lctl set_param fail_loc=0 fail_val=0
+
+	# Take a conflict to wait long enough to see the eviction
+	touch $DIR2/$tfile
+
+	# let the client reconnect
+	client_reconnect
+	evict=$(do_facet client $LCTL get_param mdc.$FSNAME-MDT*.state |
+	  awk -F"[ [,]" '/EVICTED ]$/ { if (mx<$5) {mx=$5;} } END { print mx }')
+
+	[ -z "$evict" ] || [[ $evict -le $before ]] ||
+		(do_facet client $LCTL get_param mdc.$FSNAME-MDT*.state;
+		    error "eviction happened: $evict before:$before")
+}
+run_test 110 "do not grant another lock on resend"
+
+test_111() {
+	[ $MDSCOUNT -lt 2 ] && skip "needs >= 2 MDTs" && return 0
+	[[ "$MDS1_VERSION" -ge $(version_code 2.14.51) ]] ||
+		skip "Need MDS version at least 2.14.51"
+
+	local mdt_idx
+
+	$LFS mkdir -c$MDSCOUNT -i0 $DIR/$tdir ||
+		error "$LFS mkdir $DIR/$tdir failed"
+	echo "MD layout $DIR/$tdir:"
+	$LFS getdirstripe $DIR/$tdir
+	echo "mkdir $DIR/$tdir/tdir0"
+	mkdir $DIR/$tdir/tdir0 || error "mkdir tdir0 failed"
+	echo "setdirstripe -D -i1 $DIR2/$tdir/tdir0"
+	$LFS setdirstripe -D -i1 $DIR2/$tdir/tdir0 ||
+		error "$LFS setdirstripe $DIR2/$tdir/tdir0 failed"
+	echo "mkdir $DIR/$tdir/tdir0/tdir11"
+	mkdir $DIR/$tdir/tdir0/tdir11 || error "mkdir tdir0/tdir11 failed"
+	$LFS getdirstripe $DIR/$tdir/tdir0
+	$LFS getdirstripe $DIR/$tdir/tdir0/tdir11
+
+	mdt_idx=$($LFS getstripe -m $DIR/$tdir/tdir0/tdir11)
+	[ $mdt_idx == 1 ] ||
+		error "$DIR/$tdir/tdir0/tdir11 on wrong MDT $mdt_idx"
+}
+run_test 111 "DNE: Set default LMV layout from a remote client"
 
 log "cleanup: ======================================================"
 

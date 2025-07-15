@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/ost/ost_handler.c
  *
@@ -426,7 +425,7 @@ static int __init ost_init(void)
 
 	ENTRY;
 
-	rc = class_register_type(&ost_obd_ops, NULL, false, NULL,
+	rc = class_register_type(&ost_obd_ops, NULL, false,
 				 LUSTRE_OSS_NAME, NULL);
 
 	RETURN(rc);

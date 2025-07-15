@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/mdt/mdt_fs.c
  *
@@ -36,6 +35,8 @@
 
 #define DEBUG_SUBSYSTEM S_MDS
 
+#include <linux/fs.h>
+#include <libcfs/linux/linux-fs.h>
 #include "mdt_internal.h"
 
 static const struct file_operations mdt_open_files_seq_fops = {

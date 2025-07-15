@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 /*
  * lustre/obdclass/llog_osd.c
@@ -412,6 +411,9 @@ static int llog_osd_write_rec(const struct lu_env *env,
 		LASSERT(llh->llh_size == reclen);
 	}
 
+	/* return error if osp object is stale */
+	if (idx != LLOG_HEADER_IDX && dt_object_stale(o))
+		RETURN(-ESTALE);
 	rc = dt_attr_get(env, o, &lgi->lgi_attr);
 	if (rc)
 		RETURN(rc);
@@ -968,9 +970,25 @@ static int llog_osd_next_block(const struct lu_env *env,
 		rec = buf;
 		if (LLOG_REC_HDR_NEEDS_SWABBING(rec))
 			lustre_swab_llog_rec(rec);
-
 		tail = (struct llog_rec_tail *)((char *)buf + rc -
 						sizeof(struct llog_rec_tail));
+
+		if (llog_verify_record(loghandle, rec)) {
+			/*
+			 * the block seems corrupted. make a pad record so the
+			 * caller can skip the block and try with the next one
+			 */
+			rec->lrh_len = rc;
+			rec->lrh_index = next_idx;
+			rec->lrh_type = LLOG_PAD_MAGIC;
+
+			tail = rec_tail(rec);
+			tail->lrt_len = rc;
+			tail->lrt_index = next_idx;
+
+			GOTO(out, rc = 0);
+		}
+
 		/* get the last record in block */
 		last_rec = (struct llog_rec_hdr *)((char *)buf + rc -
 						   tail->lrt_len);
@@ -1007,7 +1025,7 @@ static int llog_osd_next_block(const struct lu_env *env,
 
 		/* sanity check that the start of the new buffer is no farther
 		 * than the record that we wanted.  This shouldn't happen. */
-		if (rec->lrh_index > next_idx) {
+		if (next_idx && rec->lrh_index > next_idx) {
 			if (!force_mini_rec && next_idx > last_idx)
 				goto retry;
 
@@ -1930,7 +1948,7 @@ static int llog_osd_cleanup(const struct lu_env *env, struct llog_ctxt *ctxt)
 	return 0;
 }
 
-struct llog_operations llog_osd_ops = {
+const struct llog_operations llog_osd_ops = {
 	.lop_next_block		= llog_osd_next_block,
 	.lop_prev_block		= llog_osd_prev_block,
 	.lop_read_header	= llog_osd_read_header,
@@ -1948,7 +1966,7 @@ struct llog_operations llog_osd_ops = {
 };
 EXPORT_SYMBOL(llog_osd_ops);
 
-struct llog_operations llog_common_cat_ops = {
+const struct llog_operations llog_common_cat_ops = {
 	.lop_next_block		= llog_osd_next_block,
 	.lop_prev_block		= llog_osd_prev_block,
 	.lop_read_header	= llog_osd_read_header,

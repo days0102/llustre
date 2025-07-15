@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #define DEBUG_SUBSYSTEM S_OSC
@@ -36,7 +35,6 @@
 #include <libcfs/libcfs.h>
 #include <linux/falloc.h>
 #include <lprocfs_status.h>
-#include <lustre_debug.h>
 #include <lustre_dlm.h>
 #include <lustre_fid.h>
 #include <lustre_ha.h>
@@ -450,14 +448,7 @@ int osc_fallocate_base(struct obd_export *exp, struct obdo *oa,
 	int rc;
 	ENTRY;
 
-	/*
-	 * Only mode == 0 (which is standard prealloc) is supported now.
-	 * Punch is not supported yet.
-	 */
-	if (mode & ~FALLOC_FL_KEEP_SIZE)
-		RETURN(-EOPNOTSUPP);
 	oa->o_falloc_mode = mode;
-
 	req = ptlrpc_request_alloc(class_exp2cliimp(exp),
 				   &RQF_OST_FALLOCATE);
 	if (req == NULL)
@@ -1783,9 +1774,8 @@ static void dump_all_bulk_pages(struct obdo *oa, __u32 page_count,
 	 * file/fid, not during the resends/retries. */
 	snprintf(dbgcksum_file_name, sizeof(dbgcksum_file_name),
 		 "%s-checksum_dump-osc-"DFID":[%llu-%llu]-%x-%x",
-		 (strncmp(libcfs_debug_file_path_arr, "NONE", 4) != 0 ?
-		  libcfs_debug_file_path_arr :
-		  LIBCFS_DEBUG_FILE_PATH_DEFAULT),
+		 (strncmp(libcfs_debug_file_path, "NONE", 4) != 0 ?
+		  libcfs_debug_file_path : LIBCFS_DEBUG_FILE_PATH_DEFAULT),
 		 oa->o_valid & OBD_MD_FLFID ? oa->o_parent_seq : 0ULL,
 		 oa->o_valid & OBD_MD_FLFID ? oa->o_parent_oid : 0,
 		 oa->o_valid & OBD_MD_FLFID ? oa->o_parent_ver : 0,
@@ -2303,7 +2293,7 @@ static void sort_brw_pages(struct brw_page **array, int num)
 static void osc_release_ppga(struct brw_page **ppga, size_t count)
 {
 	LASSERT(ppga != NULL);
-	OBD_FREE_PTR_ARRAY(ppga, count);
+	OBD_FREE_PTR_ARRAY_LARGE(ppga, count);
 }
 
 static int brw_interpret(const struct lu_env *env,
@@ -2410,7 +2400,7 @@ static int brw_interpret(const struct lu_env *env,
 	list_for_each_entry_safe(ext, tmp, &aa->aa_exts, oe_link) {
 		list_del_init(&ext->oe_link);
 		osc_extent_finish(env, ext, 1,
-				  rc && req->rq_no_delay ? -EWOULDBLOCK : rc);
+				  rc && req->rq_no_delay ? -EAGAIN : rc);
 	}
 	LASSERT(list_empty(&aa->aa_exts));
 	LASSERT(list_empty(&aa->aa_oaps));
@@ -2503,7 +2493,7 @@ int osc_build_rpc(const struct lu_env *env, struct client_obd *cli,
 	if (mem_tight)
 		mpflag = memalloc_noreclaim_save();
 
-	OBD_ALLOC_PTR_ARRAY(pga, page_count);
+	OBD_ALLOC_PTR_ARRAY_LARGE(pga, page_count);
 	if (pga == NULL)
 		GOTO(out, rc = -ENOMEM);
 
@@ -2746,8 +2736,8 @@ int osc_enqueue_interpret(const struct lu_env *env, struct ptlrpc_request *req,
 	}
 
 	/* Complete obtaining the lock procedure. */
-	rc = ldlm_cli_enqueue_fini(aa->oa_exp, req, &einfo, 1, aa->oa_flags,
-				   lvb, lvb_len, lockh, rc);
+	rc = ldlm_cli_enqueue_fini(aa->oa_exp, &req->rq_pill, &einfo, 1,
+				   aa->oa_flags, lvb, lvb_len, lockh, rc);
 	/* Complete osc stuff. */
 	rc = osc_enqueue_fini(req, aa->oa_upcall, aa->oa_cookie, lockh, mode,
 			      aa->oa_flags, aa->oa_speculative, rc);
@@ -3036,19 +3026,17 @@ static int osc_statfs(const struct lu_env *env, struct obd_export *exp,
 	struct obd_device     *obd = class_exp2obd(exp);
 	struct obd_statfs     *msfs;
 	struct ptlrpc_request *req;
-	struct obd_import     *imp = NULL;
+	struct obd_import     *imp, *imp0;
 	int rc;
 	ENTRY;
 
-
-        /*Since the request might also come from lprocfs, so we need
-         *sync this with client_disconnect_export Bug15684*/
-	down_read(&obd->u.cli.cl_sem);
-        if (obd->u.cli.cl_import)
-                imp = class_import_get(obd->u.cli.cl_import);
-	up_read(&obd->u.cli.cl_sem);
-        if (!imp)
-                RETURN(-ENODEV);
+	/*Since the request might also come from lprocfs, so we need
+	 *sync this with client_disconnect_export Bug15684
+	 */
+	with_imp_locked(obd, imp0, rc)
+		imp = class_import_get(imp0);
+	if (rc)
+		RETURN(rc);
 
 	/* We could possibly pass max_age in the request (as an absolute
 	 * timestamp or a "seconds.usec ago") so the target can avoid doing
@@ -3618,21 +3606,28 @@ static const struct obd_ops osc_obd_ops = {
         .o_quotactl             = osc_quotactl,
 };
 
-static struct shrinker *osc_cache_shrinker;
 LIST_HEAD(osc_shrink_list);
 DEFINE_SPINLOCK(osc_shrink_lock);
 
-#ifndef HAVE_SHRINKER_COUNT
-static int osc_cache_shrink(SHRINKER_ARGS(sc, nr_to_scan, gfp_mask))
+#ifdef HAVE_SHRINKER_COUNT
+static struct shrinker osc_cache_shrinker = {
+	.count_objects	= osc_cache_shrink_count,
+	.scan_objects	= osc_cache_shrink_scan,
+	.seeks		= DEFAULT_SEEKS,
+};
+#else
+static int osc_cache_shrink(struct shrinker *shrinker,
+			    struct shrink_control *sc)
 {
-	struct shrink_control scv = {
-		.nr_to_scan = shrink_param(sc, nr_to_scan),
-		.gfp_mask   = shrink_param(sc, gfp_mask)
-	};
-	(void)osc_cache_shrink_scan(shrinker, &scv);
+	(void)osc_cache_shrink_scan(shrinker, sc);
 
-	return osc_cache_shrink_count(shrinker, &scv);
+	return osc_cache_shrink_count(shrinker, sc);
 }
+
+static struct shrinker osc_cache_shrinker = {
+	.shrink   = osc_cache_shrink,
+	.seeks    = DEFAULT_SEEKS,
+};
 #endif
 
 static int __init osc_init(void)
@@ -3640,8 +3635,6 @@ static int __init osc_init(void)
 	unsigned int reqpool_size;
 	unsigned int reqsize;
 	int rc;
-	DEF_SHRINKER_VAR(osc_shvar, osc_cache_shrink,
-			 osc_cache_shrink_count, osc_cache_shrink_scan);
 	ENTRY;
 
 	/* print an address of _any_ initialized kernel symbol from this
@@ -3653,16 +3646,18 @@ static int __init osc_init(void)
 	if (rc)
 		RETURN(rc);
 
-	rc = class_register_type(&osc_obd_ops, NULL, true, NULL,
+	rc = class_register_type(&osc_obd_ops, NULL, true,
 				 LUSTRE_OSC_NAME, &osc_device_type);
 	if (rc)
 		GOTO(out_kmem, rc);
 
-	osc_cache_shrinker = set_shrinker(DEFAULT_SEEKS, &osc_shvar);
+	rc = register_shrinker(&osc_cache_shrinker);
+	if (rc)
+		GOTO(out_type, rc);
 
 	/* This is obviously too much memory, only prevent overflow here */
 	if (osc_reqpool_mem_max >= 1 << 12 || osc_reqpool_mem_max == 0)
-		GOTO(out_type, rc = -EINVAL);
+		GOTO(out_shrinker, rc = -EINVAL);
 
 	reqpool_size = osc_reqpool_mem_max << 20;
 
@@ -3683,7 +3678,7 @@ static int __init osc_init(void)
 					  ptlrpc_add_rqs_to_pool);
 
 	if (osc_rq_pool == NULL)
-		GOTO(out_type, rc = -ENOMEM);
+		GOTO(out_shrinker, rc = -ENOMEM);
 
 	rc = osc_start_grant_work();
 	if (rc != 0)
@@ -3693,6 +3688,8 @@ static int __init osc_init(void)
 
 out_req_pool:
 	ptlrpc_free_rq_pool(osc_rq_pool);
+out_shrinker:
+	unregister_shrinker(&osc_cache_shrinker);
 out_type:
 	class_unregister_type(LUSTRE_OSC_NAME);
 out_kmem:
@@ -3704,7 +3701,7 @@ out_kmem:
 static void __exit osc_exit(void)
 {
 	osc_stop_grant_work();
-	remove_shrinker(osc_cache_shrinker);
+	unregister_shrinker(&osc_cache_shrinker);
 	class_unregister_type(LUSTRE_OSC_NAME);
 	lu_kmem_fini(osc_caches);
 	ptlrpc_free_rq_pool(osc_rq_pool);

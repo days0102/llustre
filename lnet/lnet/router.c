@@ -309,7 +309,7 @@ bool lnet_is_route_alive(struct lnet_route *route)
 	 * enabled.
 	 */
 	if (lnet_is_discovery_disabled(gw))
-		return route->lr_alive;
+		return atomic_read(&route->lr_alive) == 1;
 
 	/*
 	 * check the gateway's interfaces on the local network
@@ -326,7 +326,8 @@ bool lnet_is_route_alive(struct lnet_route *route)
 	 * that the remote net must exist on the gateway. For multi-hop
 	 * routes the next-hop will not have the remote net.
 	 */
-	if (avoid_asym_router_failure && route->lr_single_hop) {
+	if (avoid_asym_router_failure &&
+	    (route->lr_hops == 1 || route->lr_hops == LNET_UNDEFINED_HOPS)) {
 		rlpn = lnet_peer_get_net_locked(gw, route->lr_net);
 		if (!rlpn)
 			return false;
@@ -377,7 +378,8 @@ lnet_consolidate_routes_locked(struct lnet_peer *orig_lp,
 static inline void
 lnet_check_route_inconsistency(struct lnet_route *route)
 {
-	if (!route->lr_single_hop && (int)route->lr_hops <= 1) {
+	if (!route->lr_single_hop &&
+	    (route->lr_hops == 1 || route->lr_hops == LNET_UNDEFINED_HOPS)) {
 		CWARN("route %s->%s is detected to be multi-hop but hop count is set to %d\n",
 			libcfs_net2str(route->lr_net),
 			libcfs_nid2str(route->lr_gateway->lp_primary_nid),
@@ -401,20 +403,7 @@ lnet_set_route_hop_type(struct lnet_peer *gw, struct lnet_route *route)
 	lnet_check_route_inconsistency(route);
 }
 
-static inline void
-lnet_set_route_aliveness(struct lnet_route *route, bool alive)
-{
-	/* Log when there's a state change */
-	if (route->lr_alive != alive) {
-		CERROR("route to %s through %s has gone from %s to %s\n",
-		       libcfs_net2str(route->lr_net),
-		       libcfs_nid2str(route->lr_gateway->lp_primary_nid),
-		       (route->lr_alive) ? "up" : "down",
-		       alive ? "up" : "down");
-		route->lr_alive = alive;
-	}
-}
-
+/* Must hold net_lock/EX */
 void
 lnet_router_discovery_ping_reply(struct lnet_peer *lp)
 {
@@ -491,7 +480,9 @@ lnet_router_discovery_ping_reply(struct lnet_peer *lp)
 		}
 
 		route->lr_single_hop = single_hop;
-		if (avoid_asym_router_failure && single_hop)
+		if (avoid_asym_router_failure &&
+		    (route->lr_hops == 1 ||
+		     route->lr_hops == LNET_UNDEFINED_HOPS))
 			lnet_set_route_aliveness(route, net_up);
 		else
 			lnet_set_route_aliveness(route, true);
@@ -516,11 +507,11 @@ lnet_router_discovery_complete(struct lnet_peer *lp)
 	lp->lp_alive = lp->lp_dc_error == 0;
 	spin_unlock(&lp->lp_lock);
 
-	/* ping replies are being handled when discovery is disabled */
-	if (lnet_is_discovery_disabled_locked(lp))
-		return;
-
 	if (!lp->lp_dc_error) {
+		/* ping replies are being handled when discovery is disabled */
+		if (lnet_is_discovery_disabled_locked(lp))
+			return;
+
 		/*
 		* mark single-hop routes.  If the remote net is not configured on
 		* the gateway we assume this is intentional and we mark the
@@ -628,6 +619,7 @@ lnet_add_route_to_rnet(struct lnet_remotenet *rnet, struct lnet_route *route)
 	unsigned int offset = 0;
 	unsigned int len = 0;
 	struct list_head *e;
+	time64_t now;
 
 	lnet_shuffle_seed();
 
@@ -650,9 +642,10 @@ lnet_add_route_to_rnet(struct lnet_remotenet *rnet, struct lnet_route *route)
 	 * force a router check on the gateway to make sure the route is
 	 * alive
 	 */
+	now = ktime_get_real_seconds();
 	list_for_each_entry(lpn, &route->lr_gateway->lp_peer_nets,
 			    lpn_peer_nets) {
-		lpn->lpn_rtrcheck_timestamp = 0;
+		lpn->lpn_next_ping = now;
 	}
 
 	the_lnet.ln_remote_nets_version++;
@@ -720,6 +713,10 @@ lnet_add_route(__u32 net, __u32 hops, lnet_nid_t gateway,
 	route->lr_nid = gateway;
 	route->lr_priority = priority;
 	route->lr_hops = hops;
+	if (lnet_peers_start_down())
+		atomic_set(&route->lr_alive, 0);
+	else
+		atomic_set(&route->lr_alive, 1);
 
 	lnet_net_lock(LNET_LOCK_EX);
 
@@ -1128,8 +1125,7 @@ void lnet_wait_router_start(void)
  * This function is called from the monitor thread to check if there are
  * any active routers that need to be checked.
  */
-inline bool
-lnet_router_checker_active(void)
+bool lnet_router_checker_active(void)
 {
 	/* Router Checker thread needs to run when routing is enabled in
 	 * order to call lnet_update_ni_status_locked() */
@@ -1143,12 +1139,13 @@ lnet_router_checker_active(void)
 void
 lnet_check_routers(void)
 {
-	struct lnet_peer_net *first_lpn = NULL;
+	struct lnet_peer_net *first_lpn;
 	struct lnet_peer_net *lpn;
 	struct lnet_peer_ni *lpni;
 	struct list_head *entry;
 	struct lnet_peer *rtr;
 	bool push = false;
+	bool needs_ping;
 	bool found_lpn;
 	__u64 version;
 	__u32 net_id;
@@ -1164,15 +1161,18 @@ rescan:
 		rtr = list_entry(entry, struct lnet_peer,
 				 lp_rtr_list);
 
+		/* If we're currently discovering the peer then don't
+		 * issue another discovery
+		 */
+		if (rtr->lp_state & LNET_PEER_RTR_DISCOVERY)
+			continue;
+
 		now = ktime_get_real_seconds();
 
-		/*
-		 * only discover the router if we've passed
-		 * alive_router_check_interval seconds. Some of the router
-		 * interfaces could be down and in that case they would be
-		 * undergoing recovery separately from this discovery.
-		 */
-		/* find next peer net which is also local */
+		/* find the next local peer net which needs to be ping'd */
+		needs_ping = false;
+		first_lpn = NULL;
+		found_lpn = false;
 		net_id = rtr->lp_disc_net_id;
 		do {
 			lpn = lnet_get_next_peer_net_locked(rtr, net_id);
@@ -1181,13 +1181,27 @@ rescan:
 				libcfs_nid2str(rtr->lp_primary_nid));
 				break;
 			}
+
+			/* We looped back to the first peer net */
 			if (first_lpn == lpn)
 				break;
 			if (!first_lpn)
 				first_lpn = lpn;
-			found_lpn = lnet_islocalnet_locked(lpn->lpn_net_id);
+
 			net_id = lpn->lpn_net_id;
-		} while (!found_lpn);
+			if (!lnet_islocalnet_locked(net_id))
+				continue;
+
+			found_lpn = true;
+
+			CDEBUG(D_NET, "rtr %s(%p) %s(%p) next ping %lld\n",
+			       libcfs_nid2str(rtr->lp_primary_nid), rtr,
+			       libcfs_net2str(net_id), lpn,
+			       lpn->lpn_next_ping);
+
+			needs_ping = now >= lpn->lpn_next_ping;
+
+		} while (!needs_ping);
 
 		if (!found_lpn || !lpn) {
 			CERROR("no local network found for gateway %s\n",
@@ -1195,19 +1209,10 @@ rescan:
 			continue;
 		}
 
-		if (now - lpn->lpn_rtrcheck_timestamp <
-		    alive_router_check_interval / lnet_current_net_count)
-		       continue;
-
-		/*
-		 * If we're currently discovering the peer then don't
-		 * issue another discovery
-		 */
-		spin_lock(&rtr->lp_lock);
-		if (rtr->lp_state & LNET_PEER_RTR_DISCOVERY) {
-			spin_unlock(&rtr->lp_lock);
+		if (!needs_ping)
 			continue;
-		}
+
+		spin_lock(&rtr->lp_lock);
 		/* make sure we fully discover the router */
 		rtr->lp_state &= ~LNET_PEER_NIDS_UPTODATE;
 		rtr->lp_state |= LNET_PEER_FORCE_PING | LNET_PEER_FORCE_PUSH |
@@ -1231,16 +1236,16 @@ rescan:
 		       libcfs_nid2str(lpni->lpni_nid), cpt);
 		rc = lnet_discover_peer_locked(lpni, cpt, false);
 
-		/* decrement ref count acquired by find_peer_ni_locked() */
+		/* drop ref taken above */
 		lnet_peer_ni_decref_locked(lpni);
 
 		if (!rc)
-			lpn->lpn_rtrcheck_timestamp = now;
+			lpn->lpn_next_ping = now + alive_router_check_interval;
 		else
 			CERROR("Failed to discover router %s\n",
 			       libcfs_nid2str(rtr->lp_primary_nid));
 
-		/* NB dropped lock */
+		/* NB cpt lock was dropped in lnet_discover_peer_locked() */
 		if (version != the_lnet.ln_routers_version) {
 			/* the routers list has changed */
 			goto rescan;
@@ -1771,6 +1776,31 @@ lnet_notify(struct lnet_ni *ni, lnet_nid_t nid, bool alive, bool reset,
 
 	/* recalculate aliveness */
 	alive = lnet_is_peer_ni_alive(lpni);
+
+	lp = lpni->lpni_peer_net->lpn_peer;
+	/* If this is an LNet router then update route aliveness */
+	if (lp->lp_rtr_refcount) {
+		if (reset)
+			/* reset flag indicates gateway peer went up or down */
+			lp->lp_alive = alive;
+
+		/* If discovery is disabled, locally or on the gateway, then
+		 * any routes using lpni as next-hop need to be updated
+		 *
+		 * NB: We can get many notifications while a route is down, so
+		 * we try and avoid the expensive net_lock/EX here for the
+		 * common case of receiving duplicate lnet_notify() calls (i.e.
+		 * only grab EX lock when we actually need to update the route
+		 * aliveness).
+		 */
+		if (lnet_is_discovery_disabled(lp)) {
+			list_for_each_entry(route, &lp->lp_routes, lr_gwlist) {
+				if (route->lr_nid == lpni->lpni_nid)
+					lnet_set_route_aliveness(route, alive);
+			}
+		}
+	}
+
 	lnet_net_unlock(0);
 
 	if (ni != NULL && !alive)
@@ -1779,12 +1809,6 @@ lnet_notify(struct lnet_ni *ni, lnet_nid_t nid, bool alive, bool reset,
 	cpt = lpni->lpni_cpt;
 	lnet_net_lock(cpt);
 	lnet_peer_ni_decref_locked(lpni);
-	if (lpni && lpni->lpni_peer_net && lpni->lpni_peer_net->lpn_peer) {
-		lp = lpni->lpni_peer_net->lpn_peer;
-		lp->lp_alive = alive;
-		list_for_each_entry(route, &lp->lp_routes, lr_gwlist)
-			lnet_set_route_aliveness(route, alive);
-	}
 	lnet_net_unlock(cpt);
 
 	return 0;

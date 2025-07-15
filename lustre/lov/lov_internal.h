@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #ifndef LOV_INTERNAL_H
@@ -182,27 +181,7 @@ struct lsm_operations {
 	struct lov_stripe_md *(*lsm_unpackmd)(struct lov_obd *, void *, size_t);
 };
 
-extern const struct lsm_operations lsm_v1_ops;
-extern const struct lsm_operations lsm_v3_ops;
-extern const struct lsm_operations lsm_comp_md_v1_ops;
-extern const struct lsm_operations lsm_foreign_ops;
-static inline const struct lsm_operations *lsm_op_find(int magic)
-{
-	switch (magic) {
-	case LOV_MAGIC_V1:
-		return &lsm_v1_ops;
-	case LOV_MAGIC_V3:
-		return &lsm_v3_ops;
-	case LOV_MAGIC_COMP_V1:
-		return &lsm_comp_md_v1_ops;
-	case LOV_MAGIC_FOREIGN:
-		return &lsm_foreign_ops;
-	default:
-		CERROR("unrecognized lsm_magic %08x\n", magic);
-		return NULL;
-	}
-}
-
+const struct lsm_operations *lsm_op_find(int magic);
 void lsm_free(struct lov_stripe_md *lsm);
 
 /* lov_do_div64(a, b) returns a % b, and a = a / b.
@@ -345,19 +324,11 @@ extern struct lu_device_type lov_device_type;
 
 #define LOV_MDC_TGT_MAX 256
 
-/* lu_tgt_pool methods */
-int lov_ost_pool_init(struct lu_tgt_pool *op, unsigned int count);
-int lov_ost_pool_extend(struct lu_tgt_pool *op, unsigned int min_count);
-int lov_ost_pool_add(struct lu_tgt_pool *op, __u32 idx, unsigned int min_count);
-int lov_ost_pool_remove(struct lu_tgt_pool *op, __u32 idx);
-int lov_ost_pool_free(struct lu_tgt_pool *op);
-
 /* high level pool methods */
 int lov_pool_new(struct obd_device *obd, char *poolname);
 int lov_pool_del(struct obd_device *obd, char *poolname);
 int lov_pool_add(struct obd_device *obd, char *poolname, char *ostname);
 int lov_pool_remove(struct obd_device *obd, char *poolname, char *ostname);
-void lov_dump_pool(int level, struct pool_desc *pool);
 
 static inline struct lov_stripe_md *lsm_addref(struct lov_stripe_md *lsm)
 {

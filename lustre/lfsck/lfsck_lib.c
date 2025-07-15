@@ -68,7 +68,7 @@ static LIST_HEAD(lfsck_ost_orphan_list);
 static LIST_HEAD(lfsck_mdt_orphan_list);
 static DEFINE_SPINLOCK(lfsck_instance_lock);
 
-const char *lfsck_flags_names[] = {
+const char *const lfsck_flags_names[] = {
 	"scanned-once",
 	"inconsistent",
 	"upgrade",
@@ -77,7 +77,7 @@ const char *lfsck_flags_names[] = {
 	NULL
 };
 
-const char *lfsck_param_names[] = {
+const char *const lfsck_param_names[] = {
 	NULL,
 	"failout",
 	"dryrun",
@@ -158,7 +158,7 @@ static void lfsck_tgt_descs_fini(struct lfsck_tgt_descs *ltds)
 	LASSERTF(ltds->ltd_tgtnr == 0, "tgt count unmatched: %d\n",
 		 ltds->ltd_tgtnr);
 
-	for (idx = 0; idx < TGT_PTRS; idx++) {
+	for (idx = 0; idx < ARRAY_SIZE(ltds->ltd_tgts_idx); idx++) {
 		if (ltds->ltd_tgts_idx[idx] != NULL) {
 			OBD_FREE_PTR(ltds->ltd_tgts_idx[idx]);
 			ltds->ltd_tgts_idx[idx] = NULL;
@@ -1056,8 +1056,7 @@ static int lfsck_create_lpf(const struct lu_env *env,
 		 * created the .lustre/lost+found/MDTxxxx but failed to update
 		 * the lfsck_bookmark::lb_lpf_fid successfully. So need lookup
 		 * it from MDT0 firstly. */
-		rc = dt_lookup(env, parent, (struct dt_rec *)cfid,
-			       (const struct dt_key *)name);
+		rc = dt_lookup_dir(env, parent, name, cfid);
 		if (rc != 0 && rc != -ENOENT)
 			GOTO(unlock, rc);
 
@@ -1265,8 +1264,7 @@ static int lfsck_verify_lpf_pairs(const struct lu_env *env,
 	ENTRY;
 
 	fid_zero(fid);
-	rc = dt_lookup(env, child, (struct dt_rec *)fid,
-		       (const struct dt_key *)dotdot);
+	rc = dt_lookup_dir(env, child, dotdot, fid);
 	if (rc != 0)
 		GOTO(linkea, rc);
 
@@ -1351,8 +1349,7 @@ linkea:
 		GOTO(out_done, rc = 1);
 	}
 
-	rc = dt_lookup(env, parent2, (struct dt_rec *)fid,
-		       (const struct dt_key *)name2);
+	rc = dt_lookup_dir(env, parent2, name2, fid);
 	dt_read_unlock(env, child);
 	lfsck_ibits_unlock(&lh, LCK_PR);
 	if (rc != 0 && rc != -ENOENT)
@@ -1469,8 +1466,7 @@ int lfsck_verify_lpf(const struct lu_env *env, struct lfsck_instance *lfsck)
 
 	/* child2 */
 	snprintf(name, 8, "MDT%04x", node);
-	rc = dt_lookup(env, parent, (struct dt_rec *)cfid,
-		       (const struct dt_key *)name);
+	rc = dt_lookup_dir(env, parent, name, cfid);
 	if (rc == -ENOENT) {
 		rc = 0;
 		goto find_child1;
@@ -1778,7 +1774,7 @@ static inline int lfsck_instance_add(struct lfsck_instance *lfsck)
 	return 0;
 }
 
-void lfsck_bits_dump(struct seq_file *m, int bits, const char *names[],
+void lfsck_bits_dump(struct seq_file *m, int bits, const char *const names[],
 		     const char *prefix)
 {
 	int flag;
@@ -1957,7 +1953,7 @@ void lfsck_thread_args_fini(struct lfsck_thread_args *lta)
 }
 
 struct lfsck_assistant_data *
-lfsck_assistant_data_init(struct lfsck_assistant_operations *lao,
+lfsck_assistant_data_init(const struct lfsck_assistant_operations *lao,
 			  const char *name)
 {
 	struct lfsck_assistant_data *lad;
@@ -2596,7 +2592,7 @@ void lfsck_post_generic(const struct lu_env *env,
 	CDEBUG(D_LFSCK, "%s: waiting for assistant to do %s post, rc = %d\n",
 	       lfsck_lfsck2name(com->lc_lfsck), lad->lad_name, *result);
 
-	wake_up_all(&athread->t_ctl_waitq);
+	wake_up(&athread->t_ctl_waitq);
 	wait_event_idle(mthread->t_ctl_waitq,
 			(*result > 0 && list_empty(&lad->lad_req_list)) ||
 			thread_is_stopped(athread));
@@ -2624,7 +2620,7 @@ int lfsck_double_scan_generic(const struct lu_env *env,
 	       "status %d\n",
 	       lfsck_lfsck2name(com->lc_lfsck), lad->lad_name, status);
 
-	wake_up_all(&athread->t_ctl_waitq);
+	wake_up(&athread->t_ctl_waitq);
 	wait_event_idle(mthread->t_ctl_waitq,
 			test_bit(LAD_IN_DOUBLE_SCAN, &lad->lad_flags) ||
 			thread_is_stopped(athread));
@@ -2647,7 +2643,7 @@ void lfsck_quit_generic(const struct lu_env *env,
 	struct ptlrpc_thread		*athread = &lad->lad_thread;
 
 	set_bit(LAD_EXIT, &lad->lad_flags);
-	wake_up_all(&athread->t_ctl_waitq);
+	wake_up(&athread->t_ctl_waitq);
 	wait_event_idle(mthread->t_ctl_waitq,
 			thread_is_init(athread) ||
 			thread_is_stopped(athread));
@@ -3327,7 +3323,7 @@ trigger:
 			thread_is_stopped(thread));
 	if (start == NULL || !(start->ls_flags & LPF_BROADCAST)) {
 		lfsck->li_start_unplug = 1;
-		wake_up_all(&thread->t_ctl_waitq);
+		wake_up(&thread->t_ctl_waitq);
 
 		GOTO(out, rc = 0);
 	}
@@ -3346,13 +3342,13 @@ trigger:
 			spin_unlock(&lfsck->li_lock);
 
 			lfsck->li_start_unplug = 1;
-			wake_up_all(&thread->t_ctl_waitq);
+			wake_up(&thread->t_ctl_waitq);
 			wait_event_idle(thread->t_ctl_waitq,
 					thread_is_stopped(thread));
 		}
 	} else {
 		lfsck->li_start_unplug = 1;
-		wake_up_all(&thread->t_ctl_waitq);
+		wake_up(&thread->t_ctl_waitq);
 	}
 
 	GOTO(put, rc);
@@ -3434,7 +3430,7 @@ int lfsck_stop(const struct lu_env *env, struct dt_device *key,
 		}
 	}
 
-	wake_up_all(&thread->t_ctl_waitq);
+	wake_up(&thread->t_ctl_waitq);
 	spin_unlock(&lfsck->li_lock);
 	if (stop && stop->ls_flags & LPF_BROADCAST)
 		rc1 = lfsck_stop_all(env, lfsck, stop);
@@ -3712,9 +3708,6 @@ int lfsck_register(const struct lu_env *env, struct dt_device *key,
 	if (IS_ERR(root))
 		GOTO(out, rc = PTR_ERR(root));
 
-	if (unlikely(!dt_try_as_dir(env, root)))
-		GOTO(out, rc = -ENOTDIR);
-
 	lfsck->li_local_root_fid = *fid;
 	if (master) {
 		lfsck->li_master = 1;
@@ -3722,9 +3715,8 @@ int lfsck_register(const struct lu_env *env, struct dt_device *key,
 			struct lu_fid *pfid = &lfsck_env_info(env)->lti_fid2;
 			const struct lu_name *cname;
 
-			rc = dt_lookup(env, root,
-				(struct dt_rec *)(&lfsck->li_global_root_fid),
-				(const struct dt_key *)"ROOT");
+			rc = dt_lookup_dir(env, root, "ROOT",
+					   &lfsck->li_global_root_fid);
 			if (rc != 0)
 				GOTO(out, rc);
 
@@ -3732,11 +3724,7 @@ int lfsck_register(const struct lu_env *env, struct dt_device *key,
 			if (IS_ERR(obj))
 				GOTO(out, rc = PTR_ERR(obj));
 
-			if (unlikely(!dt_try_as_dir(env, obj)))
-				GOTO(out, rc = -ENOTDIR);
-
-			rc = dt_lookup(env, obj, (struct dt_rec *)fid,
-				(const struct dt_key *)dotlustre);
+			rc = dt_lookup_dir(env, obj, dotlustre, fid);
 			if (rc != 0)
 				GOTO(out, rc);
 
@@ -3756,8 +3744,7 @@ int lfsck_register(const struct lu_env *env, struct dt_device *key,
 				GOTO(out, rc = -ENOTDIR);
 
 			*pfid = *fid;
-			rc = dt_lookup(env, obj, (struct dt_rec *)fid,
-				       (const struct dt_key *)lostfound);
+			rc = dt_lookup_dir(env, obj, lostfound, fid);
 			if (rc != 0)
 				GOTO(out, rc);
 

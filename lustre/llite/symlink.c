@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #include <linux/fs.h>
@@ -38,6 +37,7 @@
 
 #include "llite_internal.h"
 
+/* Must be called with lli_size_mutex locked */
 static int ll_readlink_internal(struct inode *inode,
 				struct ptlrpc_request **request, char **symname)
 {
@@ -228,7 +228,7 @@ static const char *ll_follow_link(struct dentry *dentry, void **cookie)
 # endif /* HAVE_IOP_GET_LINK */
 #endif /* HAVE_SYMLINK_OPS_USE_NAMEIDATA */
 
-struct inode_operations ll_fast_symlink_inode_operations = {
+const struct inode_operations ll_fast_symlink_inode_operations = {
 #ifdef HAVE_IOP_GENERIC_READLINK
 	.readlink	= generic_readlink,
 #endif

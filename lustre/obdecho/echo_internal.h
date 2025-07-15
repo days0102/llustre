@@ -28,7 +28,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/obdecho/echo_internal.h
  */
@@ -52,5 +51,9 @@ void echo_persistent_pages_fini(void);
 
 /* mapping value to tell page is not encrypted */
 #define ECHO_MAPPING_UNENCRYPTED ((void *)1)
+
+/* debug.c */
+int block_debug_setup(void *addr, int len, u64 off, u64 id);
+int block_debug_check(char *who, void *addr, int len, u64 off, u64 id);
 
 #endif

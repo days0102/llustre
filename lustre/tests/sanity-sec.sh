@@ -52,10 +52,17 @@ ID1=${ID1:-501}
 USER0=$(getent passwd | grep :$ID0:$ID0: | cut -d: -f1)
 USER1=$(getent passwd | grep :$ID1:$ID1: | cut -d: -f1)
 
-NODEMAP_COUNT=16
-NODEMAP_RANGE_COUNT=3
-NODEMAP_IPADDR_LIST="1 10 64 128 200 250"
-NODEMAP_ID_COUNT=10
+if [ "$SLOW" == "yes" ]; then
+	NODEMAP_COUNT=16
+	NODEMAP_RANGE_COUNT=3
+	NODEMAP_IPADDR_LIST="1 10 64 128 200 250"
+	NODEMAP_ID_COUNT=10
+else
+	NODEMAP_COUNT=3
+	NODEMAP_RANGE_COUNT=2
+	NODEMAP_IPADDR_LIST="1 250"
+	NODEMAP_ID_COUNT=3
+fi
 NODEMAP_MAX_ID=$((ID0 + NODEMAP_ID_COUNT))
 
 [ -z "$USER0" ] &&
@@ -1441,18 +1448,26 @@ test_fops_chmod_dir() {
 test_fops() {
 	local mapmode="$1"
 	local single_client="$2"
-	local client_user_list=([0]="0 $((IDBASE+3)) $((IDBASE+4))"
-				[1]="0 $((IDBASE+5)) $((IDBASE+6))")
+	local client_user_list=([0]="0 $((IDBASE+3))"
+				[1]="0 $((IDBASE+5))")
+	local mds_users="-1 0"
 	local mds_i
 	local rc=0
-	local perm_bit_list="0 3 $((0300)) $((0303))"
+	local perm_bit_list="3 $((0300))"
 	# SLOW tests 000-007, 010-070, 100-700 (octal modes)
-	[ "$SLOW" == "yes" ] &&
+	if [ "$SLOW" == "yes" ]; then
 		perm_bit_list="0 $(seq 1 7) $(seq 8 8 63) $(seq 64 64 511) \
 			       $((0303))"
+		client_user_list=([0]="0 $((IDBASE+3)) $((IDBASE+4))"
+				  [1]="0 $((IDBASE+5)) $((IDBASE+6))")
+		mds_users="-1 0 1 2"
+	fi
 
+	# force single_client to speed up test
+	[ "$SLOW" == "yes" ] ||
+		single_client=1
 	# step through mds users. -1 means root
-	for mds_i in -1 0 1 2; do
+	for mds_i in $mds_users; do
 		local user=$((mds_i + IDBASE))
 		local client
 		local x
@@ -3220,7 +3235,7 @@ test_44() {
 	dd if=$tmpfile of=$testfile bs=$pagesz count=2 oflag=direct ||
 		error "could not write to file with O_DIRECT (1)"
 
-	respage=$(vmtouch $testfile | awk '/Resident\ Pages:/ {print $3}')
+	respage=$(vmtouch $testfile | awk '/Resident Pages:/ {print $3}')
 	[ "$respage" == "0/2" ] ||
 		error "write to enc file fell back to buffered IO"
 
@@ -3229,7 +3244,7 @@ test_44() {
 	dd if=$testfile of=$resfile bs=$pagesz count=2 iflag=direct ||
 		error "could not read from file with O_DIRECT (1)"
 
-	respage=$(vmtouch $testfile | awk '/Resident\ Pages:/ {print $3}')
+	respage=$(vmtouch $testfile | awk '/Resident Pages:/ {print $3}')
 	[ "$respage" == "0/2" ] ||
 		error "read from enc file fell back to buffered IO"
 
@@ -3575,12 +3590,13 @@ trace_cmd() {
 	local cmd="$@"
 	local xattr_name="security.c"
 
-	cancel_lru_locks osc ; cancel_lru_locks mdc
+	cancel_lru_locks
 	$LCTL set_param debug=+info
 	$LCTL clear
 
 	echo $cmd
 	eval $cmd
+	[ $? -eq 0 ] || error "$cmd failed"
 
 	$LCTL dk | grep -E "get xattr '${xattr_name}'|get xattrs"
 	[ $? -ne 0 ] || error "get xattr event was triggered"
@@ -3608,21 +3624,29 @@ test_49() {
 	trace_cmd $TRUNCATE $dirname/f1 10240
 	trace_cmd $LFS setstripe -E -1 -S 4M $dirname/f2
 	trace_cmd $LFS migrate -E -1 -S 256K $dirname/f2
-	trace_cmd $LFS setdirstripe -i 1 $dirname/d2
-	trace_cmd $LFS migrate -m 0 $dirname/d2
 
-	$LFS setdirstripe -i 1 -c 1 $dirname/d3
-	dirname=$dirname/d3/subdir
-	mkdir $dirname
+	if [[ $MDSCOUNT -gt 1 ]]; then
+		trace_cmd $LFS setdirstripe -i 1 $dirname/d2
+		trace_cmd $LFS migrate -m 0 $dirname/d2
+		touch $dirname/d2/subf
+		# migrate a non-empty encrypted dir
+		trace_cmd $LFS migrate -m 1 $dirname/d2
 
-	trace_cmd stat $dirname
-	trace_cmd touch $dirname/f1
-	trace_cmd stat $dirname/f1
-	trace_cmd cat $dirname/f1
-	dd if=/dev/zero of=$dirname/f1 bs=1M count=10 conv=fsync
-	trace_cmd $TRUNCATE $dirname/f1 10240
-	trace_cmd $LFS setstripe -E -1 -S 4M $dirname/f2
-	trace_cmd $LFS migrate -E -1 -S 256K $dirname/f2
+		$LFS setdirstripe -i 1 -c 1 $dirname/d3
+		dirname=$dirname/d3/subdir
+		mkdir $dirname
+
+		trace_cmd stat $dirname
+		trace_cmd touch $dirname/f1
+		trace_cmd stat $dirname/f1
+		trace_cmd cat $dirname/f1
+		dd if=/dev/zero of=$dirname/f1 bs=1M count=10 conv=fsync
+		trace_cmd $TRUNCATE $dirname/f1 10240
+		trace_cmd $LFS setstripe -E -1 -S 4M $dirname/f2
+		trace_cmd $LFS migrate -E -1 -S 256K $dirname/f2
+	else
+		skip_noexit "2nd part needs >= 2 MDTs"
+	fi
 }
 run_test 49 "Avoid getxattr for encryption context"
 
@@ -4169,6 +4193,41 @@ test_56() {
 		error "filefrag $testfile does not show encoded flag"
 }
 run_test 56 "FIEMAP on encrypted file"
+
+test_57() {
+	local testdir=$DIR/$tdir/mytestdir
+	local testfile=$DIR/$tdir/$tfile
+
+	[[ $(facet_fstype ost1) == zfs ]] && skip "skip ZFS backend"
+
+	$LCTL get_param mdc.*.import | grep -q client_encryption ||
+		skip "client encryption not supported"
+
+	mount.lustre --help |& grep -q "test_dummy_encryption:" ||
+		skip "need dummy encryption support"
+
+	mkdir $DIR/$tdir
+	mkdir $testdir
+	setfattr -n security.c -v myval $testdir &&
+		error "setting xattr on $testdir should have failed (1)"
+	touch $testfile
+	setfattr -n security.c -v myval $testfile &&
+		error "setting xattr on $testfile should have failed (1)"
+
+	rm -rf $DIR/$tdir
+
+	stack_trap cleanup_for_enc_tests EXIT
+	setup_for_enc_tests
+
+	mkdir $testdir
+	setfattr -n security.c -v myval $testdir &&
+		error "setting xattr on $testdir should have failed (2)"
+	touch $testfile
+	setfattr -n security.c -v myval $testfile &&
+		error "setting xattr on $testfile should have failed (2)"
+	return 0
+}
+run_test 57 "security.c xattr protection"
 
 log "cleanup: ======================================================"
 

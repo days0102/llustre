@@ -596,8 +596,7 @@ int lfsck_namespace_check_exist(const struct lu_env *env,
 	if (unlikely(lfsck_is_dead_obj(obj)))
 		RETURN(LFSCK_NAMEENTRY_DEAD);
 
-	rc = dt_lookup(env, dir, (struct dt_rec *)fid,
-		       (const struct dt_key *)name);
+	rc = dt_lookup_dir(env, dir, name, fid);
 	if (rc == -ENOENT)
 		RETURN(LFSCK_NAMEENTRY_REMOVED);
 
@@ -946,8 +945,7 @@ again:
 	do {
 		namelen = snprintf(info->lti_key, NAME_MAX, DFID"%s-%s-%d",
 				   PFID(cfid), infix, type, idx++);
-		rc = dt_lookup(env, parent, (struct dt_rec *)&tfid,
-			       (const struct dt_key *)info->lti_key);
+		rc = dt_lookup_dir(env, parent, info->lti_key, &tfid);
 		if (rc != 0 && rc != -ENOENT)
 			GOTO(log, rc);
 
@@ -962,8 +960,7 @@ again:
 
 	/* Re-check whether the name conflict with othrs after taken
 	 * the ldlm lock. */
-	rc = dt_lookup(env, parent, (struct dt_rec *)&tfid,
-		       (const struct dt_key *)info->lti_key);
+	rc = dt_lookup_dir(env, parent, info->lti_key, &tfid);
 	if (rc == 0) {
 		if (!lu_fid_eq(cfid, &tfid)) {
 			exist = false;
@@ -1474,9 +1471,7 @@ static int lfsck_namespace_create_orphan_dir(const struct lu_env *env,
 			GOTO(log, rc = idx);
 
 		snprintf(name, 8, "MDT%04x", idx);
-		rc = dt_lookup(env, lfsck->li_lpf_root_obj,
-			       (struct dt_rec *)&tfid,
-			       (const struct dt_key *)name);
+		rc = dt_lookup_dir(env, lfsck->li_lpf_root_obj, name, &tfid);
 		if (rc != 0)
 			GOTO(log, rc = (rc == -ENOENT ? -ENXIO : rc));
 
@@ -1503,8 +1498,7 @@ again:
 	do {
 		namelen = snprintf(name, 31, DFID"-P-%d",
 				   PFID(cfid), idx++);
-		rc = dt_lookup(env, parent, (struct dt_rec *)&tfid,
-			       (const struct dt_key *)name);
+		rc = dt_lookup_dir(env, parent, name, &tfid);
 		if (rc != 0 && rc != -ENOENT)
 			GOTO(log, rc);
 	} while (rc == 0);
@@ -1516,8 +1510,7 @@ again:
 
 	/* Re-check whether the name conflict with othrs after taken
 	 * the ldlm lock. */
-	rc = dt_lookup(env, parent, (struct dt_rec *)&tfid,
-		       (const struct dt_key *)name);
+	rc = dt_lookup_dir(env, parent, name, &tfid);
 	if (unlikely(rc == 0)) {
 		lfsck_unlock(llh);
 		goto again;
@@ -1989,8 +1982,7 @@ static int lfsck_namespace_replace_cond(const struct lu_env *env,
 		goto replace;
 	}
 
-	rc = dt_lookup(env, parent, (struct dt_rec *)&tfid,
-		       (const struct dt_key *)name);
+	rc = dt_lookup_dir(env, parent, name, &tfid);
 	if (rc == -ENOENT) {
 		exist = false;
 		goto replace;
@@ -2276,8 +2268,7 @@ int lfsck_namespace_repair_dirent(const struct lu_env *env,
 
 
 	dt_write_lock(env, parent, 0);
-	rc = dt_lookup(env, dt_object_child(parent), (struct dt_rec *)&tfid,
-		       (const struct dt_key *)name);
+	rc = dt_lookup_dir(env, dt_object_child(parent), name, &tfid);
 	/* Someone has removed the bad name entry by race. */
 	if (rc == -ENOENT)
 		GOTO(unlock2, rc = 0);
@@ -2675,8 +2666,7 @@ lost_parent:
 		GOTO(out, rc);
 	}
 
-	rc = dt_lookup(env, parent, (struct dt_rec *)&tfid,
-		       (const struct dt_key *)cname->ln_name);
+	rc = dt_lookup_dir(env, parent, cname->ln_name, &tfid);
 	if (rc == -ENOENT) {
 		/* If the LFSCK is marked as LF_INCOMPLETE, then means some MDT
 		 * has ever tried to verify some remote MDT-object that resides
@@ -2892,8 +2882,20 @@ again:
 		}
 
 		parent = lfsck_object_find_bottom(env, lfsck, &tfid);
-		if (IS_ERR(parent))
-			RETURN(PTR_ERR(parent));
+		if (IS_ERR(parent)) {
+			rc = PTR_ERR(parent);
+			/* if @pfid doesn't have a valid OI mapping, it will
+			 * trigger OI scrub, and -ENONET is is returned if it's
+			 * remote, -EINPROGRESS if local.
+			 */
+			if ((rc == -ENOENT || rc == -EINPROGRESS) &&
+			    ldata->ld_leh->leh_reccount > 1) {
+				lfsck_linkea_del_buf(ldata, cname);
+				continue;
+			}
+
+			RETURN(rc);
+		}
 
 		if (!dt_object_exists(parent)) {
 			lfsck_object_put(env, parent);
@@ -2916,8 +2918,7 @@ again:
 			continue;
 		}
 
-		rc = dt_lookup(env, parent, (struct dt_rec *)&tfid,
-			       (const struct dt_key *)cname->ln_name);
+		rc = dt_lookup_dir(env, parent, cname->ln_name, &tfid);
 		*pfid2 = *lfsck_dto2fid(parent);
 		if (rc == -ENOENT) {
 			lfsck_object_put(env, parent);
@@ -3276,8 +3277,7 @@ lock:
 		GOTO(out, rc = 0);
 	}
 
-	rc = dt_lookup(env, child, (struct dt_rec *)pfid,
-		       (const struct dt_key *)dotdot);
+	rc = dt_lookup_dir(env, child, dotdot, pfid);
 	if (rc != 0) {
 		if (rc != -ENOENT && rc != -ENODATA && rc != -EINVAL) {
 			dt_read_unlock(env, child);
@@ -3782,8 +3782,18 @@ static int lfsck_namespace_double_scan_one(const struct lu_env *env,
 		}
 
 		parent = lfsck_object_find_bottom(env, lfsck, pfid);
-		if (IS_ERR(parent))
-			GOTO(out, rc = PTR_ERR(parent));
+		if (IS_ERR(parent)) {
+			rc = PTR_ERR(parent);
+			/* if @pfid doesn't have a valid OI mapping, it will
+			 * trigger OI scrub, and -ENONET is is returned if it's
+			 * remote, -EINPROGRESS if local.
+			 */
+			if ((rc == -ENOENT || rc == -EINPROGRESS) &&
+			    ldata.ld_leh->leh_reccount > 1)
+				rc = lfsck_namespace_shrink_linkea(env, com,
+					child, &ldata, cname, pfid, true);
+			GOTO(out, rc);
+		}
 
 		if (!dt_object_exists(parent)) {
 
@@ -3867,8 +3877,7 @@ lost_parent:
 			continue;
 		}
 
-		rc = dt_lookup(env, parent, (struct dt_rec *)cfid,
-			       (const struct dt_key *)cname->ln_name);
+		rc = dt_lookup_dir(env, parent, cname->ln_name, cfid);
 		if (rc != 0 && rc != -ENOENT) {
 			lfsck_object_put(env, parent);
 
@@ -4357,7 +4366,7 @@ static void lfsck_namespace_close_dir(const struct lu_env *env,
 	lad->lad_prefetched++;
 	spin_unlock(&lad->lad_lock);
 	if (wakeup)
-		wake_up_all(&lad->lad_thread.t_ctl_waitq);
+		wake_up(&lad->lad_thread.t_ctl_waitq);
 
 	EXIT;
 }
@@ -4702,7 +4711,7 @@ static int lfsck_namespace_exec_dir(const struct lu_env *env,
 	lad->lad_prefetched++;
 	spin_unlock(&lad->lad_lock);
 	if (wakeup)
-		wake_up_all(&lad->lad_thread.t_ctl_waitq);
+		wake_up(&lad->lad_thread.t_ctl_waitq);
 
 	down_write(&com->lc_sem);
 	com->lc_new_checked++;
@@ -5144,7 +5153,7 @@ static int lfsck_namespace_in_notify(const struct lu_env *env,
 		stop->ls_flags = lr->lr_param & ~LPF_BROADCAST;
 		lfsck_stop(env, lfsck->li_bottom, stop);
 	} else if (lfsck_phase2_next_ready(lad)) {
-		wake_up_all(&lad->lad_thread.t_ctl_waitq);
+		wake_up(&lad->lad_thread.t_ctl_waitq);
 	}
 
 	RETURN(0);
@@ -5227,7 +5236,7 @@ static int lfsck_namespace_query(const struct lu_env *env,
 	return rc;
 }
 
-static struct lfsck_operations lfsck_namespace_ops = {
+static const struct lfsck_operations lfsck_namespace_ops = {
 	.lfsck_reset		= lfsck_namespace_reset,
 	.lfsck_fail		= lfsck_namespace_fail,
 	.lfsck_close_dir	= lfsck_namespace_close_dir,
@@ -5575,8 +5584,8 @@ static int lfsck_namespace_assistant_handler_p1(const struct lu_env *env,
 	struct lustre_handle	    lh       = { 0 };
 	bool			    repaired = false;
 	bool			    dtlocked = false;
-	bool			    remove;
-	bool			    newdata;
+	bool			    remove = false;
+	bool			    newdata = false;
 	bool			    log      = false;
 	bool			    bad_hash = false;
 	bool			    bad_linkea = false;
@@ -5961,6 +5970,17 @@ out:
 		if (obj != NULL && count == 1 &&
 		    S_ISREG(lfsck_object_type(obj)))
 			dt_attr_get(env, obj, la);
+
+		/* if new linkea entry is added, the old entry may be stale,
+		 * check it in phase 2. Sigh, linkea check can only be done
+		 * locally.
+		 */
+		if (bad_linkea && !remove && !newdata &&
+		    !dt_object_remote(obj) && count > 1)
+			rc = lfsck_namespace_trace_update(env, com,
+							  &lnr->lnr_fid,
+							  LNTF_CHECK_LINKEA,
+							  true);
 	}
 
 trace:
@@ -6828,7 +6848,7 @@ out:
 	EXIT;
 }
 
-struct lfsck_assistant_operations lfsck_namespace_assistant_ops = {
+const struct lfsck_assistant_operations lfsck_namespace_assistant_ops = {
 	.la_handler_p1		= lfsck_namespace_assistant_handler_p1,
 	.la_handler_p2		= lfsck_namespace_assistant_handler_p2,
 	.la_fill_pos		= lfsck_namespace_assistant_fill_pos,

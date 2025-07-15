@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/mdd/mdd_internal.h
  *
@@ -39,7 +38,6 @@
 
 #include <lustre_acl.h>
 #include <lustre_compat.h>
-#include <lustre_eacl.h>
 #include <md_object.h>
 #include <dt_object.h>
 #include <lustre_lfsck.h>
@@ -80,6 +78,8 @@
 #define CLM_FINI  0x20000
 /** some changelog records purged */
 #define CLM_PURGE 0x40000
+/** changelog cleanup done, to prevent double cleanup */
+#define CLM_CLEANUP_DONE 0x80000
 
 #define LLOG_CHANGELOG_HDR_SZ (sizeof(struct llog_changelog_rec) - \
 			       sizeof(struct changelog_rec))
@@ -130,6 +130,15 @@ struct mdd_generic_thread {
 	bool			mgt_init;
 };
 
+struct mdd_dir_remover {
+	struct lu_env		 mrm_env;
+	struct task_struct	*mrm_task;
+	spinlock_t		 mrm_lock;
+	struct list_head	 mrm_list;
+	/* Use orphan dir "PENDING" as the root of removed directories. */
+	struct mdd_object	*mrm_root;
+};
+
 struct mdd_device {
         struct md_device                 mdd_md_dev;
 	struct obd_export               *mdd_child_exp;
@@ -149,6 +158,7 @@ struct mdd_device {
         struct mdd_object               *mdd_dot_lustre;
         struct mdd_dot_lustre_objs       mdd_dot_lustre_objs;
 	unsigned int			 mdd_sync_permission;
+	unsigned int			 mdd_async_tree_remove;
 	int				 mdd_connects;
 	int				 mdd_append_stripe_count;
 	char				 mdd_append_pool[LOV_MAXPOOLNAME + 1];
@@ -157,6 +167,7 @@ struct mdd_device {
 	struct kobject			 mdd_kobj;
 	struct kobj_type		 mdd_ktype;
 	struct completion		 mdd_kobj_unregister;
+	struct mdd_dir_remover		 mdd_remover;
 };
 
 enum mod_flags {
@@ -164,6 +175,8 @@ enum mod_flags {
 	DEAD_OBJ	= BIT(0),
 	ORPHAN_OBJ	= BIT(1),
 	VOLATILE_OBJ	= BIT(4),
+	/* The root object for a subtree had been removed by a WBC client. */
+	REMOVED_OBJ	= BIT(5),
 };
 
 struct mdd_object {
@@ -174,6 +187,7 @@ struct mdd_object {
 	ktime_t			mod_cltime;
 	unsigned long		mod_flags;
 	struct list_head	mod_users;  /**< unique user opens */
+	struct list_head	mod_remove_item;
 };
 
 #define	MTI_KEEP_KEY	0x01
@@ -198,8 +212,11 @@ struct mdd_thread_info {
 	char			  mti_key[NAME_MAX + 16];
 	int			  mti_flags;
 	char			  mti_name[NAME_MAX + 1];
+	char			  mti_fidname[FID_LEN + 2];
 	struct lu_buf             mti_buf[4];
-	struct lu_buf             mti_big_buf; /* biggish persistent buf */
+	/* persistent buffers, must be handled with lu_buf_alloc/free */
+	struct lu_buf		  mti_big_buf;
+	struct lu_buf		  mti_chlg_buf;
 	struct lu_buf		  mti_link_buf; /* buf for link ea */
 	struct lu_buf		  mti_xattr_buf;
 	struct obdo               mti_oa;
@@ -243,6 +260,13 @@ void mdd_write_unlock(const struct lu_env *env, struct mdd_object *obj);
 void mdd_read_unlock(const struct lu_env *env, struct mdd_object *obj);
 int mdd_write_locked(const struct lu_env *env, struct mdd_object *obj);
 
+/* mdd_remove.c */
+int mdd_remover_init(const struct lu_env *env, struct mdd_device *mdd);
+void mdd_remover_fini(const struct lu_env *env, struct mdd_device *mdd);
+void mdd_remove_item_add(struct mdd_object *obj);
+int mdd_tree_remove(const struct lu_env *env, struct mdd_object *pobj,
+		    struct mdd_object *cobj, const char *name);
+
 /* mdd_dir.c */
 int mdd_may_create(const struct lu_env *env, struct mdd_object *pobj,
 		   const struct lu_attr *pattr, struct mdd_object *cobj,
@@ -256,7 +280,8 @@ int mdd_may_delete(const struct lu_env *env, struct mdd_object *tpobj,
 int mdd_unlink_sanity_check(const struct lu_env *env, struct mdd_object *pobj,
 			    const struct lu_attr *pattr,
 			    struct mdd_object *cobj,
-			    const struct lu_attr *cattr);
+			    const struct lu_attr *cattr,
+			    int check_empty);
 int mdd_finish_unlink(const struct lu_env *env, struct mdd_object *obj,
 		      struct md_attr *ma, struct mdd_object *pobj,
 		      const struct lu_name *lname, struct thandle *th);
@@ -270,6 +295,11 @@ int mdd_links_write(const struct lu_env *env, struct mdd_object *mdd_obj,
 int mdd_links_read(const struct lu_env *env,
 		   struct mdd_object *mdd_obj,
 		   struct linkea_data *ldata);
+int mdd_links_read_with_rec(const struct lu_env *env,
+			    struct mdd_object *mdd_obj,
+			    struct linkea_data *ldata);
+int __mdd_index_delete(const struct lu_env *env, struct mdd_object *pobj,
+		       const char *name, int is_dir, struct thandle *handle);
 struct lu_buf *mdd_links_get(const struct lu_env *env,
                              struct mdd_object *mdd_obj);
 int mdd_links_rename(const struct lu_env *env,
@@ -414,7 +444,8 @@ struct lu_object *mdd_object_alloc(const struct lu_env *env,
 int mdd_local_file_create(const struct lu_env *env, struct mdd_device *mdd,
 			  const struct lu_fid *pfid, const char *name,
 			  __u32 mode, struct lu_fid *fid);
-
+struct md_object *mdo_locate(const struct lu_env *env, struct md_device *md,
+			     const struct lu_fid *fid);
 int mdd_acl_chmod(const struct lu_env *env, struct mdd_object *o, __u32 mode,
                   struct thandle *handle);
 int mdd_acl_set(const struct lu_env *env, struct mdd_object *obj,
@@ -422,9 +453,11 @@ int mdd_acl_set(const struct lu_env *env, struct mdd_object *obj,
 int __mdd_fix_mode_acl(const struct lu_env *env, struct lu_buf *buf,
 		       __u32 *mode);
 int __mdd_permission_internal(const struct lu_env *env, struct mdd_object *obj,
-			      const struct lu_attr *la, int mask, int role);
+			      const struct lu_attr *la, unsigned int may_mask,
+			      int role);
 int mdd_permission(const struct lu_env *env, struct md_object *pobj,
-		   struct md_object *cobj, struct md_attr *ma, int mask);
+		   struct md_object *cobj, struct md_attr *ma,
+		   unsigned int may_mask);
 int mdd_generic_thread_start(struct mdd_generic_thread *thread,
 			     int (*func)(void *), void *data, char *name);
 void mdd_generic_thread_stop(struct mdd_generic_thread *thread);
@@ -433,6 +466,19 @@ int mdd_changelog_user_purge(const struct lu_env *env, struct mdd_device *mdd,
 
 /* mdd_prepare.c */
 int mdd_compat_fixes(const struct lu_env *env, struct mdd_device *mdd);
+
+/* acl.c */
+extern int lustre_posix_acl_permission(struct lu_ucred *mu,
+				       const struct lu_attr *la,
+				       unsigned int may_mask,
+				       posix_acl_xattr_entry *entry,
+				       int count);
+extern int lustre_posix_acl_chmod_masq(posix_acl_xattr_entry *entry,
+				       __u32 mode, int count);
+extern int lustre_posix_acl_create_masq(posix_acl_xattr_entry *entry,
+					__u32 *pmode, int count);
+extern int lustre_posix_acl_equiv_mode(posix_acl_xattr_entry *entry,
+				       mode_t *mode_p, int count);
 
 /* inline functions */
 static inline int lu_device_is_mdd(struct lu_device *d)
@@ -544,18 +590,19 @@ static inline const char *mdd_obj_dev_name(const struct mdd_object *mdd_obj)
 
 static inline int mdd_permission_internal(const struct lu_env *env,
 					  struct mdd_object *obj,
-					  const struct lu_attr *la, int mask)
+					  const struct lu_attr *la,
+					  unsigned int may_mask)
 {
-	return __mdd_permission_internal(env, obj, la, mask, -1);
+	return __mdd_permission_internal(env, obj, la, may_mask, -1);
 }
 
 static inline int mdd_permission_internal_locked(const struct lu_env *env,
 						struct mdd_object *obj,
 						const struct lu_attr *la,
-						int mask,
+						unsigned int may_mask,
 						enum dt_object_role role)
 {
-	return __mdd_permission_internal(env, obj, la, mask, role);
+	return __mdd_permission_internal(env, obj, la, may_mask, role);
 }
 
 /* mdd inline func for calling osd_dt_object ops */
@@ -625,8 +672,19 @@ static inline int mdo_xattr_set(const struct lu_env *env,struct mdd_object *obj,
 	if (!mdd_object_exists(obj))
 		return -ENOENT;
 
+	/* If we are about to set the LL_XATTR_NAME_ENCRYPTION_CONTEXT
+	 * xattr, it means the file/dir is encrypted. In that case we want
+	 * to set the LUSTRE_ENCRYPT_FL flag as well: it will be stored
+	 * into the LMA, making it more efficient to recognise we are
+	 * dealing with an encrypted file/dir, as LMA info is cached upon
+	 * object init.
+	 * However, marking a dir as encrypted is only possible if it is
+	 * being created or migrated (LU_XATTR_CREATE flag not set), or
+	 * if it is empty.
+	 */
 	if ((strcmp(name, LL_XATTR_NAME_ENCRYPTION_CONTEXT) == 0) &&
 	    (!S_ISDIR(mdd_object_type(obj)) ||
+	     !(fl & LU_XATTR_CREATE) ||
 	     (rc = mdd_dir_is_empty(env, obj)) == 0)) {
 		struct lu_attr la = { 0 };
 

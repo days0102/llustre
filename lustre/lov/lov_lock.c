@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * Implementation of cl_lock for LOV layer.
  *
@@ -201,6 +200,8 @@ init_sublock:
 			lls->sub_initialized = 1;
 			nr++;
 		}
+		if (result < 0)
+			break;
 	}
 	LASSERT(ergo(result == 0, nr == lovlck->lls_nr));
 

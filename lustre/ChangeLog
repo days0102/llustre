@@ -1,18 +1,18 @@
 TBD Whamcloud
-       * version 2.14.1
+       * version 2.15.0
        * See https://wiki.whamcloud.com/display/PUB/Lustre+Support+Matrix
          for currently supported client and server kernel versions.
        * Server primary kernels built and tested during release cycle:
          3.10.0-1062.18.1.el7 (RHEL7.7)
          3.10.0-1127.19.1.el7 (RHEL7.8)
-         3.10.0-1160.6.1.el7  (RHEL7.9)
+         3.10.0-1160.25.1.el7 (RHEL7.9)
        * Other server kernels known to build and work at some point (others may also work):
          3.10.0-862.14.4.el7  (RHEL7.5)
          3.10.0-957.27.2.el7  (RHEL7.6)
          4.18.0-80.11.2.el8   (RHEL8.0)
          4.18.0-147.8.1.el8   (RHEL8.1)
          4.18.0-193.28.1.el8  (RHEL8.2)
-         4.18.0-240.1.1.el8   (RHEL8.3)
+         4.18.0-240.22.1.el8  (RHEL8.3)
          4.18.0-305.3.1.el8   (RHEL8.4)
          4.18.0-348.7.1.el8   (RHEL8.5)
          4.4.120-92.70        (SLES12 SP2)
@@ -25,11 +25,11 @@ TBD Whamcloud
        * Client primary kernels built and tested during release cycle:
          3.10.0-1062.18.1.el7 (RHEL7.7)
          3.10.0-1127.19.1.el7 (RHEL7.8)
-         3.10.0-1160.6.1.el7  (RHEL7.9)
+         3.10.0-1160.25.1.el7 (RHEL7.9)
          4.12.14-95.48        (SLES12 SP4)
-         4.12.14-122.20       (SLES12 SP5)
+         4.12.14-122.66       (SLES12 SP5)
          4.12.14-197.75       (SLES15 SP1)
-         5.3.18-24.24         (SLES15 SP2)
+         5.3.18-24.61         (SLES15 SP2)
          4.15.0-48            (Ubuntu 18.04)
        * Other clients known to build on these kernels at some point (others may also work):
          3.10.0-862.14.4.el7  (RHEL7.5)
@@ -39,7 +39,7 @@ TBD Whamcloud
          4.18.0-80.11.2.el8   (RHEL8.0)
          4.18.0-147.8.1.el8   (RHEL8.1)
          4.18.0-193.28.1.el8  (RHEL8.2)
-         4.18.0-240.1.1.el8   (RHEL8.3)
+         4.18.0-240.22.1.el8  (RHEL8.3)
          4.18.0-305.3.1.el8   (RHEL8.4)
          4.18.0-348.7.1.el8   (RHEL8.5)
          4.4.120-92.70        (SLES12 SP2)
@@ -54,8 +54,6 @@ TBD Whamcloud
          stack overflow. For more information, please refer to bugzilla 17630.
        * NFSv4 reexport to 32-bit NFS client nodes requires Lustre client on
          the re-exporting nodes to be mounted with "32bitapi" mount option
-
--
 
 --------------------------------------------------------------------------------
 

@@ -64,12 +64,12 @@ static inline int osd_scrub_has_window(struct lustre_scrub *scrub,
  * \retval   0, changed successfully
  * \retval -ve, on error
  */
-static int osd_scrub_refresh_mapping(struct osd_thread_info *info,
-				     struct osd_device *dev,
-				     const struct lu_fid *fid,
-				     const struct osd_inode_id *id,
-				     int ops, bool force,
-				     enum oi_check_flags flags, bool *exist)
+int osd_scrub_refresh_mapping(struct osd_thread_info *info,
+			      struct osd_device *dev,
+			      const struct lu_fid *fid,
+			      const struct osd_inode_id *id,
+			      int ops, bool force,
+			      enum oi_check_flags flags, bool *exist)
 {
 	handle_t *th;
 	int	  rc;
@@ -339,12 +339,6 @@ iget:
 				GOTO(out, rc = 0);
 		}
 
-		if (!scrub->os_partial_scan) {
-			spin_lock(&scrub->os_lock);
-			scrub->os_full_speed = 1;
-			spin_unlock(&scrub->os_lock);
-		}
-
 		switch (val) {
 		case SCRUB_NEXT_NOLMA:
 			sf->sf_flags |= SF_UPGRADE;
@@ -435,7 +429,7 @@ out:
 				OI_KNOWN_ON_OST : 0, NULL);
 	up_write(&scrub->os_rwsem);
 
-	if (inode != NULL && !IS_ERR(inode))
+	if (!IS_ERR(inode))
 		iput(inode);
 
 	if (oii != NULL) {
@@ -1935,7 +1929,7 @@ osd_ios_scan_one(struct osd_thread_info *info, struct osd_device *dev,
 		    osd_index_need_recreate(info->oti_env, dev, inode)) {
 			struct lu_fid *pfid = &info->oti_fid3;
 
-			if (parent == osd_sb(dev)->s_root->d_inode) {
+			if (is_root_inode(parent)) {
 				lu_local_obj_fid(pfid, OSD_FS_ROOT_OID);
 			} else {
 				rc = osd_scrub_get_fid(info, dev, parent, pfid,
@@ -2565,7 +2559,8 @@ void osd_scrub_stop(struct osd_device *dev)
 
 static const char osd_scrub_name[] = "OI_scrub";
 
-int osd_scrub_setup(const struct lu_env *env, struct osd_device *dev)
+int osd_scrub_setup(const struct lu_env *env, struct osd_device *dev,
+		    bool restored)
 {
 	struct osd_thread_info *info = osd_oti_get(env);
 	struct lustre_scrub *scrub = &dev->od_scrub.os_scrub;
@@ -2579,7 +2574,6 @@ int osd_scrub_setup(const struct lu_env *env, struct osd_device *dev)
 	struct osd_inode_id *id = &info->oti_id;
 	struct dt_object *obj;
 	bool dirty = false;
-	bool restored = false;
 	int rc = 0;
 	ENTRY;
 
@@ -2587,7 +2581,6 @@ int osd_scrub_setup(const struct lu_env *env, struct osd_device *dev)
 	OBD_SET_CTXT_MAGIC(ctxt);
 	ctxt->pwdmnt = dev->od_mnt;
 	ctxt->pwd = dev->od_mnt->mnt_root;
-	ctxt->fs = KERNEL_DS;
 
 	init_rwsem(&scrub->os_rwsem);
 	spin_lock_init(&scrub->os_lock);
@@ -3026,8 +3019,8 @@ const struct dt_index_operations osd_otable_ops = {
 
 #define SCRUB_BAD_OIMAP_DECAY_INTERVAL	60
 
-int osd_oii_insert(struct osd_device *dev, struct osd_idmap_cache *oic,
-		   int insert)
+int osd_oii_insert(struct osd_device *dev, const struct lu_fid *fid,
+		   struct osd_inode_id *id, int insert)
 {
 	struct osd_inconsistent_item *oii;
 	struct osd_scrub *oscrub = &dev->od_scrub;
@@ -3040,7 +3033,9 @@ int osd_oii_insert(struct osd_device *dev, struct osd_idmap_cache *oic,
 		RETURN(-ENOMEM);
 
 	INIT_LIST_HEAD(&oii->oii_list);
-	oii->oii_cache = *oic;
+	oii->oii_cache.oic_fid = *fid;
+	oii->oii_cache.oic_lid = *id;
+	oii->oii_cache.oic_dev = dev;
 	oii->oii_insert = insert;
 
 	spin_lock(&lscrub->os_lock);

@@ -66,6 +66,45 @@ AC_CHECK_FUNCS([copy_file_range],
 ]) # LC_GLIBC_SUPPORT_COPY_FILE_RANGE
 
 #
+# LC_FID2PATH_UNION
+#
+AC_DEFUN([LC_FID2PATH_ANON_UNION], [
+AC_MSG_CHECKING([if 'struct getinfo_fid2path' has anony•mous union])
+AC_COMPILE_IFELSE([AC_LANG_SOURCE([
+	#include <linux/lustre/lustre_idl.h>
+
+	int main(void) {
+		struct getinfo_fid2path gf;
+		struct lu_fid root_fid;
+
+		*gf.gf_root_fid = root_fid;
+		return 0;
+	}
+])],[
+	AC_DEFINE(HAVE_FID2PATH_ANON_UNIONS, 1, [union is unnamed])
+	AC_MSG_RESULT("yes")
+])
+]) # LC_FID2PATH_ANON_UNION
+
+#
+# LC_IOC_REMOVE_ENTRY
+#
+AC_DEFUN([LC_IOC_REMOVE_ENTRY], [
+AC_MSG_CHECKING([if ioctl IOC_REMOVE_ENTRY' is supported])
+AC_COMPILE_IFELSE([AC_LANG_SOURCE([
+	#include <sys/ioctl.h>
+	#include <linux/lustre/lustre_ioctl.h>
+
+	int main(void) {
+		return ioctl(0, LL_IOC_REMOVE_ENTRY, NULL);
+	}
+])],[
+	AC_DEFINE(HAVE_IOC_REMOVE_ENTRY, 1,
+		[IOC_REMOVE_ENTRY ioctl exists])
+])
+]) # LC_IOC_REMOVE_ENTRY
+
+#
 # LC_STACK_SIZE
 #
 # Ensure the stack size is at least 8k in Lustre server (all kernels)
@@ -619,6 +658,24 @@ kiocb_ki_left, [
 ]) # LC_KIOCB_KI_LEFT
 
 #
+# LC_REGISTER_SHRINKER_RET
+#
+# v3.11-8748-g1d3d4437eae1 register_shrinker returns a status
+#
+AC_DEFUN([LC_REGISTER_SHRINKER_RET], [
+LB_CHECK_COMPILE([if register_shrinker() returns status],
+register_shrinker_ret, [
+	#include <linux/mm.h>
+],[
+	if (register_shrinker(NULL))
+		unregister_shrinker(NULL);
+],[
+	AC_DEFINE(HAVE_REGISTER_SHRINKER_RET, 1,
+		[register_shrinker() returns status])
+])
+]) # LC_REGISTER_SHRINKER_RET
+
+#
 # LC_VFS_RENAME_5ARGS
 #
 # 3.13 has vfs_rename with 5 args
@@ -996,6 +1053,23 @@ aio_complete, [
 ]) # LC_HAVE_AIO_COMPLETE
 
 #
+# LC_HAVE_IS_ROOT_INODE
+#
+# 3.19 kernel adds is_root_inode()
+# Commit a7400222e3eb ("new helper: is_root_inode()")
+#
+AC_DEFUN([LC_HAVE_IS_ROOT_INODE], [
+LB_CHECK_COMPILE([if kernel has is_root_inode() ],
+is_root_inode, [
+	#include <linux/fs.h>
+],[
+	is_root_inode(NULL);
+],[
+	AC_DEFINE(HAVE_IS_ROOT_INODE, 1, [is_root_inode defined])
+])
+]) # LC_HAVE_IS_ROOT_INODE
+
+#
 # LC_BACKING_DEV_INFO_REMOVAL
 #
 # 3.20 kernel removed backing_dev_info from address_space
@@ -1085,6 +1159,24 @@ have___bi_cnt, [
 		[struct bio has __bi_cnt])
 ])
 ]) # LC_HAVE___BI_CNT
+
+#
+# LC_WB_HAS_DIRTY_IO
+#
+# Kernel version 4.1 commit d6c10f1fc8626dc55946f4768ae322b4c57b07dd
+# Implement WB_has_dirty_io wb_state flag
+#
+AC_DEFUN([LC_WB_HAS_DIRTY_IO], [
+LB_CHECK_COMPILE([if Linux kernel has WB_has_dirty_io wb_state flag],
+WB_has_dirty_io, [
+	#include <linux/backing-dev.h>
+],[
+	((struct bdi_writeback *)0)->state = WB_has_dirty_io;
+],[
+	AC_DEFINE(HAVE_WB_HAS_DIRTY_IO, 1,
+		[WB_has_dirty_io exist])
+])
+]) # LC_WB_HAS_DIRTY_IO
 
 #
 # LC_SYMLINK_OPS_USE_NAMEIDATA
@@ -1730,6 +1822,24 @@ posix_acl_update_mode, [
 ]) # LC_POSIX_ACL_UPDATE_MODE
 
 #
+# LC_SETATTR_PREPARE
+#
+# Kernel version 4.9 commit 31051c85b5e2aaaf6315f74c72a732673632a905
+# replace inode_change_ok with setattr_prepare
+#
+AC_DEFUN([LC_SETATTR_PREPARE], [
+LB_CHECK_COMPILE([if 'inode_change_ok' is replaced with 'setattr_prepare'],
+setattr_prepare, [
+	#include <linux/fs.h>
+],[
+	setattr_prepare(NULL, NULL);
+],[
+	AC_DEFINE(HAVE_SETATTR_PREPARE, 1,
+	['inode_change_ok' is replaces with 'setattr_prepare'])
+])
+]) # LC_SETATTR_PREPARE
+
+#
 # LC_IOP_GENERIC_READLINK
 #
 # Kernel version 4.10 commit dfeef68862edd7d4bafe68ef7aeb5f658ef24bb5
@@ -1904,6 +2014,24 @@ super_setup_bdi_name, [
 ]) # LC_SUPER_SETUP_BDI_NAME
 
 #
+# LC_PERCPU_COUNTER_ADD_BATCH
+#
+# Kernel version 4.12 commit 104b4e5139fe384431ac11c3b8a6cf4a529edf4a
+# Rename __percpu_counter_add to percpu_counter_add_batch
+#
+AC_DEFUN([LC_PERCPU_COUNTER_ADD_BATCH], [
+LB_CHECK_COMPILE([if 'percpu_counter_add_batch' exist],
+percpu_counter_add_batch, [
+	#include <linux/percpu_counter.h>
+],[
+	percpu_counter_add_batch(NULL, 0, 0);
+],[
+	AC_DEFINE(HAVE_PERCPU_COUNTER_ADD_BATCH, 1,
+		['percpu_counter_add_batch' is available])
+])
+]) # LC_PERCPU_COUNTER_ADD_BATCH
+
+#
 # LC_BI_STATUS
 #
 # 4.12 replace bi_error to bi_status
@@ -1955,6 +2083,23 @@ pagevec_init, [
 ]) # LC_PAGEVEC_INIT_ONE_PARAM
 
 #
+# LC_PAGEVEC_LOOKUP_THREE_PARAM
+#
+# 4.14 pagevec_lookup takes three parameters
+#
+AC_DEFUN([LC_PAGEVEC_LOOKUP_THREE_PARAM], [
+LB_CHECK_COMPILE([if 'pagevec_lookup' takes three parameter],
+pagevec_lookup, [
+	#include <linux/pagevec.h>
+],[
+	pagevec_lookup(NULL, NULL, NULL);
+],[
+	AC_DEFINE(HAVE_PAGEVEC_LOOKUP_THREE_PARAM, 1,
+		['pagevec_lookup' takes three parameters])
+])
+]) # LC_PAGEVEC_LOOKUP_THREE_PARAM
+
+#
 # LC_BI_BDEV
 #
 # 4.14 replaced bi_bdev to bi_disk
@@ -1970,6 +2115,33 @@ bi_bdev, [
 		['bi_bdev' is available])
 ])
 ]) # LC_BI_BDEV
+
+#
+# LC_INTERVAL_TREE_CACHED
+#
+# 4.14 f808c13fd3738948e10196496959871130612b61
+# switched INTERVAL_TREE_DEFINE to use cached RB_Trees.
+#
+AC_DEFUN([LC_INTERVAL_TREE_CACHED], [
+tmp_flags="$EXTRA_KCFLAGS"
+EXTRA_KCFLAGS="-Werror"
+LB_CHECK_COMPILE([if interval_trees use rb_tree_cached],
+itree_cached, [
+	#include <linux/interval_tree_generic.h>
+	struct foo { struct rb_node rb; int last; int a,b;};
+	#define START(n) ((n)->a)
+	#define LAST(n) ((n)->b)
+	struct rb_root_cached tree;
+	INTERVAL_TREE_DEFINE(struct foo, rb, int, last,
+		START, LAST, , foo);
+],[
+	foo_insert(NULL, &tree);
+],[
+	AC_DEFINE(HAVE_INTERVAL_TREE_CACHED, 1,
+		[interval trees use rb_tree_cached])
+])
+EXTRA_KCFLAGS="$tmp_flags"
+]) # LC_INTERVAL_TREE_CACHED
 
 #
 # LC_IS_ENCRYPTED
@@ -2315,11 +2487,6 @@ AC_DEFUN([LC_PROG_LINUX], [
 	LC_CONFIG_FHANDLE
 	LC_CONFIG_GSS
 
-	LC_GLIBC_SUPPORT_FHANDLES
-	LC_GLIBC_SUPPORT_COPY_FILE_RANGE
-	LC_OPENSSL_SSK
-	LC_OPENSSL_GETSEPOL
-
 	# 3.10
 	LC_HAVE_PROJECT_QUOTA
 
@@ -2336,6 +2503,7 @@ AC_DEFUN([LC_PROG_LINUX], [
 	LC_OLDSIZE_TRUNCATE_PAGECACHE
 	LC_PTR_ERR_OR_ZERO_MISSING
 	LC_KIOCB_KI_LEFT
+	LC_REGISTER_SHRINKER_RET
 
 	# 3.13
 	LC_VFS_RENAME_5ARGS
@@ -2369,6 +2537,7 @@ AC_DEFUN([LC_PROG_LINUX], [
 	LC_KIOCB_HAS_NBYTES
 	LC_HAVE_DQUOT_QC_DQBLK
 	LC_HAVE_AIO_COMPLETE
+	LC_HAVE_IS_ROOT_INODE
 
 	# 3.20
 	LC_BACKING_DEV_INFO_REMOVAL
@@ -2378,6 +2547,7 @@ AC_DEFUN([LC_PROG_LINUX], [
 	LC_IOV_ITER_RW
 	LC_HAVE_SYNC_READ_WRITE
 	LC_HAVE___BI_CNT
+	LC_WB_HAS_DIRTY_IO
 
 	# 4.2
 	LC_BIO_ENDIO_USES_ONE_ARG
@@ -2429,6 +2599,7 @@ AC_DEFUN([LC_PROG_LINUX], [
 	LC_GROUP_INFO_GID
 	LC_VFS_SETXATTR
 	LC_POSIX_ACL_UPDATE_MODE
+	LC_SETATTR_PREPARE
 
 	# 4.10
 	LC_IOP_GENERIC_READLINK
@@ -2444,6 +2615,7 @@ AC_DEFUN([LC_PROG_LINUX], [
 	LC_CURRENT_TIME
 	LC_SUPER_BLOCK_S_UUID
 	LC_SUPER_SETUP_BDI_NAME
+	LC_PERCPU_COUNTER_ADD_BATCH
 	LC_BI_STATUS
 
 	# 4.13
@@ -2451,7 +2623,9 @@ AC_DEFUN([LC_PROG_LINUX], [
 
 	# 4.14
 	LC_PAGEVEC_INIT_ONE_PARAM
+	LC_PAGEVEC_LOOKUP_THREE_PARAM
 	LC_BI_BDEV
+	LC_INTERVAL_TREE_CACHED
 
 	# 4.17
 	LC_VM_FAULT_T
@@ -2920,6 +3094,8 @@ lustre/scripts/Makefile
 lustre/scripts/systemd/Makefile
 lustre/tests/Makefile
 lustre/tests/mpi/Makefile
+lustre/tests/lutf/Makefile
+lustre/tests/lutf/src/Makefile
 lustre/tests/kernel/Makefile
 lustre/tests/kernel/autoMakefile
 lustre/utils/Makefile

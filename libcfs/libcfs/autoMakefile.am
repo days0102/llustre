@@ -29,7 +29,6 @@
 
 #
 # This file is part of Lustre, http://www.lustre.org/
-# Lustre is a trademark of Sun Microsystems, Inc.
 #
 
 SUBDIRS = linux util
@@ -60,5 +59,5 @@ endif # MODULES
 MOSTLYCLEANFILES := @MOSTLYCLEANFILES@ linux/*.o libcfs crypto/*.o
 EXTRA_DIST := $(libcfs-all-objs:%.o=%.c) tracefile.h \
 	      workitem.c fail.c libcfs_cpu.c \
-	      heap.c libcfs_mem.c libcfs_lock.c \
+	      libcfs_mem.c libcfs_lock.c \
 	      linux-crypto.h

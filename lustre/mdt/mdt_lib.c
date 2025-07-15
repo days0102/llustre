@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/mdt/mdt_lib.c
  *
@@ -480,8 +479,12 @@ static int old_init_ucred_common(struct mdt_thread_info *info,
 		identity = mdt_identity_get(mdt->mdt_identity_cache,
 					    uc->uc_fsuid);
 		if (IS_ERR(identity)) {
+			kernel_cap_t kcap = cap_combine(CAP_FS_SET,
+							CAP_NFSD_SET);
+			u32 cap_mask = kcap.cap[0];
+
 			if (unlikely(PTR_ERR(identity) == -EREMCHG ||
-				     uc->uc_cap & CFS_CAP_FS_MASK)) {
+				     uc->uc_cap & cap_mask)) {
 				identity = NULL;
 			} else {
 				CDEBUG(D_SEC, "Deny access without identity: "
@@ -607,8 +610,13 @@ int mdt_init_ucred_reint(struct mdt_thread_info *info)
 
 	/* LU-5564: for normal close request, skip permission check */
 	if (lustre_msg_get_opc(req->rq_reqmsg) == MDS_CLOSE &&
-	    !(ma->ma_attr_flags & (MDS_HSM_RELEASE | MDS_CLOSE_LAYOUT_SWAP)))
-		uc->uc_cap |= CFS_CAP_FS_MASK;
+	    !(ma->ma_attr_flags & (MDS_HSM_RELEASE | MDS_CLOSE_LAYOUT_SWAP))) {
+		kernel_cap_t kcap = { { uc->uc_cap, } };
+
+		kcap = cap_raise_nfsd_set(kcap, CAP_FULL_SET);
+		kcap = cap_raise_fs_set(kcap, CAP_FULL_SET);
+		uc->uc_cap = kcap.cap[0];
+	}
 
 	mdt_exit_ucred(info);
 
@@ -681,13 +689,16 @@ void mdt_dump_lmv(unsigned int level, const union lmv_mds_md *lmv)
 
 	lmm1 = &lmv->lmv_md_v1;
 	CDEBUG(level,
-	       "magic 0x%08X, master %#X stripe_count %#x hash_type %#x\n",
+	       "magic 0x%08X, master %#X stripe_count %d hash_type %#x\n",
 	       le32_to_cpu(lmm1->lmv_magic),
 	       le32_to_cpu(lmm1->lmv_master_mdt_index),
 	       le32_to_cpu(lmm1->lmv_stripe_count),
 	       le32_to_cpu(lmm1->lmv_hash_type));
 
 	if (le32_to_cpu(lmm1->lmv_magic) == LMV_MAGIC_STRIPE)
+		return;
+
+	if (le32_to_cpu(lmm1->lmv_stripe_count) > LMV_MAX_STRIPE_COUNT)
 		return;
 
 	for (i = 0; i < le32_to_cpu(lmm1->lmv_stripe_count); i++) {
@@ -793,6 +804,7 @@ int mdt_fix_reply(struct mdt_thread_info *info)
                 LASSERT(md_size > md_packed);
                 CDEBUG(D_INFO, "Enlarge reply buffer, need extra %d bytes\n",
                        md_size - md_packed);
+
                 rc = req_capsule_server_grow(pill, &RMF_MDT_MD, md_size);
                 if (rc) {
                         /* we can't answer with proper LOV EA, drop flags,
@@ -950,7 +962,8 @@ int mdt_handle_last_unlink(struct mdt_thread_info *info, struct mdt_object *mo,
         RETURN(0);
 }
 
-static __u64 mdt_attr_valid_xlate(__u64 in, struct mdt_reint_record *rr,
+static __u64 mdt_attr_valid_xlate(enum mds_attr_flags in,
+				  struct mdt_reint_record *rr,
                                   struct md_attr *ma)
 {
 	__u64 out;
@@ -1000,7 +1013,8 @@ static __u64 mdt_attr_valid_xlate(__u64 in, struct mdt_reint_record *rr,
 		MDS_ATTR_FROM_OPEN | MDS_ATTR_LSIZE | MDS_ATTR_LBLOCKS |
 		MDS_ATTR_OVERRIDE);
 	if (in != 0)
-		CDEBUG(D_INFO, "Unknown attr bits: %#llx\n", in);
+		CDEBUG(D_INFO, "Unknown attr bits: %#llx\n", (u64)in);
+
 	return out;
 }
 
@@ -1142,7 +1156,7 @@ static int mdt_setattr_unpack_rec(struct mdt_thread_info *info)
 
 	ma->ma_attr_flags |= rec->sa_bias & (MDS_CLOSE_INTENT |
 				MDS_DATA_MODIFIED | MDS_TRUNC_KEEP_LEASE |
-				MDS_PCC_ATTACH);
+				MDS_PCC_ATTACH | MDS_WBC_LOCKLESS);
 	RETURN(0);
 }
 
@@ -1166,15 +1180,19 @@ static int mdt_close_handle_unpack(struct mdt_thread_info *info)
 }
 
 static inline int mdt_dlmreq_unpack(struct mdt_thread_info *info) {
-        struct req_capsule      *pill = info->mti_pill;
+	struct req_capsule      *pill = info->mti_pill;
 
-        if (req_capsule_get_size(pill, &RMF_DLM_REQ, RCL_CLIENT)) {
-                info->mti_dlm_req = req_capsule_client_get(pill, &RMF_DLM_REQ);
-                if (info->mti_dlm_req == NULL)
-                        RETURN(-EFAULT);
-        }
+	if (info->mti_attr.ma_attr_flags & MDS_WBC_LOCKLESS)
+		RETURN(0);
 
-        RETURN(0);
+	if (!info->mti_intent_lock &&
+	    req_capsule_get_size(pill, &RMF_DLM_REQ, RCL_CLIENT)) {
+		info->mti_dlm_req = req_capsule_client_get(pill, &RMF_DLM_REQ);
+		if (info->mti_dlm_req == NULL)
+			RETURN(-EFAULT);
+	}
+
+	RETURN(0);
 }
 
 static int mdt_setattr_unpack(struct mdt_thread_info *info)
@@ -1292,31 +1310,51 @@ static int mdt_create_unpack(struct mdt_thread_info *info)
 			 LA_CTIME | LA_MTIME | LA_ATIME;
         memset(&sp->u, 0, sizeof(sp->u));
         sp->sp_cr_flags = get_mrc_cr_flags(rec);
+	info->mti_attr.ma_attr_flags |= rec->cr_bias & MDS_WBC_LOCKLESS;
 
 	rc = mdt_name_unpack(pill, &RMF_NAME, &rr->rr_name, 0);
 	if (rc < 0)
 		RETURN(rc);
 
 	if (S_ISLNK(attr->la_mode)) {
-                const char *tgt = NULL;
+		const char *tgt = NULL;
 
-                req_capsule_extend(pill, &RQF_MDS_REINT_CREATE_SYM);
-                if (req_capsule_get_size(pill, &RMF_SYMTGT, RCL_CLIENT)) {
-                        tgt = req_capsule_client_get(pill, &RMF_SYMTGT);
-                        sp->u.sp_symname = tgt;
-                }
-                if (tgt == NULL)
-                        RETURN(-EFAULT);
-        } else {
-		req_capsule_extend(pill, &RQF_MDS_REINT_CREATE_ACL);
-		if (S_ISDIR(attr->la_mode) &&
-		    req_capsule_get_size(pill, &RMF_EADATA, RCL_CLIENT) > 0) {
-			sp->u.sp_ea.eadata =
-				req_capsule_client_get(pill, &RMF_EADATA);
-			sp->u.sp_ea.eadatalen =
-				req_capsule_get_size(pill, &RMF_EADATA,
-						     RCL_CLIENT);
-			sp->sp_cr_flags |= MDS_OPEN_HAS_EA;
+		if (info->mti_intent_lock || req_capsule_subreq(pill)) {
+			/* Intent create or sub update request */
+			if (req_capsule_get_size(pill, &RMF_EADATA, RCL_CLIENT))
+				tgt = req_capsule_client_get(pill, &RMF_EADATA);
+		} else {
+			/* regular create */
+			req_capsule_extend(pill, &RQF_MDS_REINT_CREATE_SYM);
+			if (req_capsule_get_size(pill, &RMF_SYMTGT, RCL_CLIENT))
+				tgt = req_capsule_client_get(pill, &RMF_SYMTGT);
+		}
+		sp->u.sp_symname = tgt;
+		if (tgt == NULL)
+			RETURN(-EFAULT);
+	} else {
+		if (!(info->mti_intent_lock || req_capsule_subreq(pill))) {
+			if (sp->sp_cr_flags & MDS_FMODE_WRITE &&
+			    S_ISREG(attr->la_mode))
+				req_capsule_extend(pill,
+						   &RQF_MDS_REINT_CREATE_REG);
+			else
+				req_capsule_extend(pill,
+						   &RQF_MDS_REINT_CREATE_ACL);
+		}
+		rr->rr_eadatalen = req_capsule_get_size(pill, &RMF_EADATA,
+							RCL_CLIENT);
+		if (rr->rr_eadatalen > 0) {
+			sp->no_create = !!req_is_replay(mdt_info_req(info));
+			if (S_ISDIR(attr->la_mode) ||
+			    sp->sp_cr_flags & MDS_OPEN_PCC) {
+				sp->u.sp_ea.eadata =
+					req_capsule_client_get(pill,
+							       &RMF_EADATA);
+				sp->u.sp_ea.eadatalen = rr->rr_eadatalen;
+				sp->sp_cr_flags |= MDS_OPEN_HAS_EA;
+				sp->sp_archive_id = rec->cr_archive_id;
+			}
 		}
 	}
 
@@ -1414,6 +1452,7 @@ static int mdt_unlink_unpack(struct mdt_thread_info *info)
 	attr->la_mtime = rec->ul_time;
 	attr->la_mode  = rec->ul_mode;
 	attr->la_valid = LA_UID | LA_GID | LA_CTIME | LA_MTIME | LA_MODE;
+	info->mti_attr.ma_attr_flags |= rec->ul_bias & MDS_WBC_LOCKLESS;
 
 	rc = mdt_name_unpack(pill, &RMF_NAME, &rr->rr_name, 0);
 	if (rc < 0)
@@ -1762,7 +1801,7 @@ static int mdt_resync_unpack(struct mdt_thread_info *info)
 	/* cookie doesn't need to be swapped but it has been swapped
 	 * in lustre_swab_mdt_rec_reint() as rr_mtime, so here it needs
 	 * restoring. */
-	if (ptlrpc_req_need_swab(mdt_info_req(info)))
+	if (req_capsule_req_need_swab(pill))
 		__swab64s(&rec->rs_lease_handle.cookie);
 	rr->rr_lease_handle = &rec->rs_lease_handle;
 
@@ -1798,6 +1837,38 @@ int mdt_reint_unpack(struct mdt_thread_info *info, __u32 op)
                 rc = -EFAULT;
         }
         RETURN(rc);
+}
+
+int mdt_batch_unpack(struct mdt_thread_info *info, __u32 op)
+{
+	int rc = 0;
+
+	memset(&info->mti_rr, 0, sizeof(info->mti_rr));
+	switch (op) {
+	case BUT_GETATTR:
+	case BUT_EXLOCK_ONLY:
+		info->mti_dlm_req = req_capsule_client_get(info->mti_pill,
+							   &RMF_DLM_REQ);
+		if (info->mti_dlm_req == NULL)
+			RETURN(-EFAULT);
+		break;
+	case BUT_CREATE_EXLOCK:
+	case BUT_CREATE_LOCKLESS:
+		info->mti_rr.rr_opcode = REINT_CREATE;
+		rc = mdt_reint_unpackers[REINT_CREATE](info);
+		break;
+	case BUT_SETATTR_EXLOCK:
+	case BUT_SETATTR_LOCKLESS:
+		info->mti_rr.rr_opcode = REINT_SETATTR;
+		rc = mdt_reint_unpackers[REINT_SETATTR](info);
+		break;
+	default:
+		CERROR("Unexpected opcode %d\n", op);
+		rc = -EOPNOTSUPP;
+		break;
+	}
+
+	RETURN(rc);
 }
 
 int mdt_pack_secctx_in_reply(struct mdt_thread_info *info,

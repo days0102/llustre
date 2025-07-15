@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 /**
@@ -440,6 +439,7 @@ int client_obd_setup(struct obd_device *obd, struct lustre_cfg *lcfg)
 	spin_lock_init(&cli->cl_write_page_hist.oh_lock);
 	spin_lock_init(&cli->cl_read_offset_hist.oh_lock);
 	spin_lock_init(&cli->cl_write_offset_hist.oh_lock);
+	spin_lock_init(&cli->cl_batch_rpc_hist.oh_lock);
 
 	/* lru for osc. */
 	INIT_LIST_HEAD(&cli->cl_lru_osc);
@@ -578,10 +578,12 @@ int client_obd_setup(struct obd_device *obd, struct lustre_cfg *lcfg)
 						LDLM_NAMESPACE_CLIENT,
 						LDLM_NAMESPACE_GREEDY,
 						ns_type);
-	if (obd->obd_namespace == NULL) {
-		CERROR("Unable to create client namespace - %s\n",
-		       obd->obd_name);
-		GOTO(err_import, rc = -ENOMEM);
+	if (IS_ERR(obd->obd_namespace)) {
+		rc = PTR_ERR(obd->obd_namespace);
+		CERROR("%s: unable to create client namespace: rc = %d\n",
+		       obd->obd_name, rc);
+		obd->obd_namespace = NULL;
+		GOTO(err_import, rc);
 	}
 
 	RETURN(rc);
@@ -595,8 +597,8 @@ err:
 		OBD_FREE(cli->cl_mod_tag_bitmap,
 			 BITS_TO_LONGS(OBD_MAX_RIF_MAX) * sizeof(long));
 	cli->cl_mod_tag_bitmap = NULL;
-	RETURN(rc);
 
+	RETURN(rc);
 }
 EXPORT_SYMBOL(client_obd_setup);
 
@@ -981,6 +983,7 @@ static int rev_import_flags_update(struct obd_import *revimp,
 
 	revimp->imp_msghdr_flags |= MSGHDR_CKSUM_INCOMPAT18;
 
+	revimp->imp_connect_data = *data;
 	rc = sptlrpc_import_sec_adapt(revimp, req->rq_svc_ctx, &req->rq_flvr);
 	if (rc) {
 		CERROR("%s: cannot get reverse import %s security: rc = %d\n",
@@ -1095,6 +1098,7 @@ int target_handle_connect(struct ptlrpc_request *req)
 	struct obd_connect_data *data, *tmpdata;
 	int size, tmpsize;
 	lnet_nid_t *client_nid = NULL;
+	struct ptlrpc_connection *pcon = NULL;
 
 	ENTRY;
 
@@ -1341,7 +1345,7 @@ no_export:
 	} else if (lustre_msg_get_conn_cnt(req->rq_reqmsg) == 1 &&
 		   rc != EALREADY) {
 		if (!strstr(cluuid.uuid, "mdt"))
-			LCONSOLE_WARN("%s: Rejecting reconnect from the known client %s (at %s) because it is indicating it is a new client",
+			LCONSOLE_WARN("%s: Rejecting reconnect from the known client %s (at %s) because it is indicating it is a new client\n",
 				      target->obd_name, cluuid.uuid,
 				      libcfs_nid2str(req->rq_peer.nid));
 		GOTO(out, rc = -EALREADY);
@@ -1474,7 +1478,16 @@ dont_check_exports:
 	 */
 	ptlrpc_request_change_export(req, export);
 
+	pcon = ptlrpc_connection_get(req->rq_peer, req->rq_self, &cluuid);
+	if (pcon == NULL)
+		GOTO(out, rc = -ENOTCONN);
+
 	spin_lock(&export->exp_lock);
+
+	if (export->exp_disconnected) {
+		spin_unlock(&export->exp_lock);
+		GOTO(out, rc = -ENODEV);
+	}
 	if (export->exp_conn_cnt >= lustre_msg_get_conn_cnt(req->rq_reqmsg)) {
 		spin_unlock(&export->exp_lock);
 		CDEBUG(D_RPCTRACE,
@@ -1487,23 +1500,22 @@ dont_check_exports:
 	}
 	LASSERT(lustre_msg_get_conn_cnt(req->rq_reqmsg) > 0);
 	export->exp_conn_cnt = lustre_msg_get_conn_cnt(req->rq_reqmsg);
-	spin_unlock(&export->exp_lock);
 
-	if (export->exp_connection != NULL) {
-		/* Check to see if connection came from another NID. */
-		if (export->exp_connection->c_peer.nid != req->rq_peer.nid)
-			obd_nid_del(export->exp_obd, export);
-
+	/* Check to see if connection came from another NID. */
+	if (export->exp_connection != NULL &&
+	    export->exp_connection->c_peer.nid != req->rq_peer.nid) {
+		obd_nid_del(export->exp_obd, export);
 		ptlrpc_connection_put(export->exp_connection);
+		export->exp_connection = NULL;
 	}
 
-	export->exp_connection = ptlrpc_connection_get(req->rq_peer,
-						       req->rq_self,
-						       &cluuid);
-	if (!export->exp_connection)
-		GOTO(out, rc = -ENOTCONN);
-
+	if (export->exp_connection == NULL) {
+		export->exp_connection = pcon;
+		pcon = NULL;
+	}
 	obd_nid_add(export->exp_obd, export);
+
+	spin_unlock(&export->exp_lock);
 
 	lustre_msg_set_handle(req->rq_repmsg, &conn);
 
@@ -1580,6 +1592,8 @@ out:
 		spin_unlock(&target->obd_dev_lock);
 		class_decref(target, "find", current);
 	}
+	if (pcon)
+		ptlrpc_connection_put(pcon);
 	req->rq_status = rc;
 	RETURN(rc);
 }
@@ -2713,6 +2727,7 @@ static int target_recovery_thread(void *arg)
 
 	thread->t_env = env;
 	thread->t_id = -1; /* force filter_iobuf_get/put to use local buffers */
+	thread->t_task = current;
 	env->le_ctx.lc_thread = thread;
 	tgt_io_thread_init(thread); /* init thread_big_cache for IO requests */
 

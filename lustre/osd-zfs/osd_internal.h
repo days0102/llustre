@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/osd-zfs/osd_internal.h
  * Shared definitions and declarations for zfs/dmu osd
@@ -103,8 +102,8 @@
 #define zfs_refcount_add	refcount_add
 #endif
 
-extern struct dt_body_operations osd_body_scrub_ops;
-extern struct dt_body_operations osd_body_ops;
+extern const struct dt_body_operations osd_body_scrub_ops;
+extern const struct dt_body_operations osd_body_ops;
 extern struct kmem_cache *osd_object_kmem;
 
 /**
@@ -471,8 +470,8 @@ struct osd_object {
 int osd_statfs(const struct lu_env *, struct dt_device *, struct obd_statfs *,
 	       struct obd_statfs_info *);
 extern const struct dt_index_operations osd_acct_index_ops;
-extern struct lu_device_operations  osd_lu_ops;
-extern struct dt_index_operations osd_dir_ops;
+extern const struct lu_device_operations  osd_lu_ops;
+extern const struct dt_index_operations osd_dir_ops;
 int osd_declare_quota(const struct lu_env *env, struct osd_device *osd,
 		      qid_t uid, qid_t gid, qid_t projid, long long space,
 		      struct osd_thandle *oh,
@@ -633,7 +632,7 @@ int osd_find_new_dnode(const struct lu_env *env, dmu_tx_t *tx,
 		       uint64_t oid, dnode_t **dnp);
 
 /* osd_oi.c */
-int osd_oi_init(const struct lu_env *env, struct osd_device *o);
+int osd_oi_init(const struct lu_env *env, struct osd_device *o, bool reset);
 void osd_oi_fini(const struct lu_env *env, struct osd_device *o);
 int osd_fid_lookup(const struct lu_env *env,
 		   struct osd_device *, const struct lu_fid *, uint64_t *);
@@ -690,7 +689,8 @@ int __osd_xattr_load_by_oid(struct osd_device *osd, uint64_t oid,
 			    nvlist_t **sa);
 
 /* osd_scrub.c */
-int osd_scrub_setup(const struct lu_env *env, struct osd_device *dev);
+int osd_scrub_setup(const struct lu_env *env, struct osd_device *dev,
+		    bool resetoi);
 void osd_scrub_cleanup(const struct lu_env *env, struct osd_device *dev);
 int osd_scrub_start(const struct lu_env *env, struct osd_device *dev,
 		    __u32 flags);
@@ -699,6 +699,23 @@ int osd_oii_insert(const struct lu_env *env, struct osd_device *dev,
 		   const struct lu_fid *fid, uint64_t oid, bool insert);
 int osd_oii_lookup(struct osd_device *dev, const struct lu_fid *fid,
 		   uint64_t *oid);
+
+/**
+ * Basic transaction credit op
+ */
+enum dt_txn_op {
+	DTO_INDEX_INSERT,
+	DTO_INDEX_DELETE,
+	DTO_INDEX_UPDATE,
+	DTO_NR
+};
+
+int osd_scrub_refresh_mapping(const struct lu_env *env,
+			      struct osd_device *dev,
+			      const struct lu_fid *fid,
+			      uint64_t oid, enum dt_txn_op ops,
+			      bool force, const char *name);
+
 
 /* osd_xattr.c */
 int __osd_sa_xattr_schedule_update(const struct lu_env *env,

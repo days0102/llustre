@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * libcfs/include/libcfs/libcfs_string.h
  *
@@ -43,6 +42,7 @@
 #include <stdarg.h>
 
 #include <linux/types.h>
+#include <linux/lnet/lnet-types.h>
 #include <libcfs/util/list.h>
 
 static inline
@@ -75,6 +75,22 @@ static inline int scnprintf(char *buf, size_t bufsz, const char *format, ...)
 	return ret;
 }
 
+struct netstrfns {
+	__u32	nf_type;
+	char	*nf_name;
+	char	*nf_modname;
+	void	(*nf_addr2str)(__u32 addr, char *str, size_t size);
+	int	(*nf_str2addr)(const char *str, int nob, __u32 *addr);
+	int	(*nf_parse_addrlist)(char *str, int len,
+				     struct list_head *list);
+	int	(*nf_print_addrlist)(char *buffer, int count,
+				     struct list_head *list);
+	int	(*nf_match_addr)(__u32 addr, struct list_head *list);
+	int	(*nf_min_max)(struct list_head *nidlist, __u32 *min_nid,
+			      __u32 *max_nid);
+	int	(*nf_expand_addrrange)(struct list_head *addrranges,
+				       __u32 *addrs, int max_addrs);
+};
 
 /**
  * Structure to represent NULL-less strings.
@@ -106,6 +122,7 @@ int cfs_expr_list_values(struct cfs_expr_list *expr_list, int max, __u32 **valpp
 int cfs_gettok(struct cfs_lstr *next, char delim, struct cfs_lstr *res);
 int cfs_str2num_check(char *str, int nob, unsigned *num,
 		      unsigned min, unsigned max);
+int cfs_expr2str(struct list_head *list, char *str, size_t size);
 int cfs_expr_list_match(__u32 value, struct cfs_expr_list *expr_list);
 int cfs_expr_list_print(char *buffer, int count,
 			struct cfs_expr_list *expr_list);
@@ -117,6 +134,10 @@ int cfs_ip_addr_parse(char *str, int len, struct list_head *list);
 int cfs_ip_addr_range_gen(__u32 *ip_list, int count,
 			  struct list_head *ip_addr_expr);
 int cfs_ip_addr_match(__u32 addr, struct list_head *list);
+int cfs_expand_nidlist(struct list_head *nidlist, lnet_nid_t *lnet_nidlist,
+		       int max_nids);
+int cfs_parse_nid_parts(char *str, struct list_head *addr,
+			struct list_head *net_num, __u32 *net_type);
 int cfs_abs_path(const char *request_path, char **resolved_path);
 
 #endif

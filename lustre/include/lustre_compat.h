@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #ifndef _LUSTRE_COMPAT_H
@@ -43,6 +42,7 @@
 #include <linux/workqueue.h>
 #include <linux/blkdev.h>
 #include <linux/slab.h>
+#include <linux/security.h>
 
 #include <libcfs/linux/linux-fs.h>
 #include <obd_support.h>
@@ -502,10 +502,14 @@ static inline bool bdev_integrity_enabled(struct block_device *bdev, int rw)
 #define page_tree i_pages
 #define ll_xa_lock_irqsave(lockp, flags) xa_lock_irqsave(lockp, flags)
 #define ll_xa_unlock_irqrestore(lockp, flags) xa_unlock_irqrestore(lockp, flags)
+#define ll_xa_lock(lockp) xa_lock(lockp)
+#define ll_xa_unlock(lockp) xa_unlock(lockp)
 #else
 #define i_pages tree_lock
 #define ll_xa_lock_irqsave(lockp, flags) spin_lock_irqsave(lockp, flags)
 #define ll_xa_unlock_irqrestore(lockp, flags) spin_unlock_irqrestore(lockp, flags)
+#define ll_xa_lock(lockp) spin_lock(lockp)
+#define ll_xa_unlock(lockp) spin_unlock(lockp)
 #endif
 
 #ifndef HAVE_LOCK_PAGE_MEMCG
@@ -580,4 +584,54 @@ static inline int ll_vfs_removexattr(struct dentry *dentry, struct inode *inode,
 #define raw_cpu_ptr(p) __this_cpu_ptr(p)
 #endif
 
+#ifndef HAVE_IS_ROOT_INODE
+static inline bool is_root_inode(struct inode *inode)
+{
+	return inode == inode->i_sb->s_root->d_inode;
+}
+#endif
+
+#ifndef HAVE_REGISTER_SHRINKER_RET
+#define register_shrinker(_s) (register_shrinker(_s), 0)
+#endif
+
+static inline void ll_security_release_secctx(char *secdata, u32 seclen)
+{
+#ifdef HAVE_SEC_RELEASE_SECCTX_1ARG
+	struct lsmcontext context = { };
+
+	lsmcontext_init(&context, secdata, seclen, 0);
+	return security_release_secctx(&context);
+#else
+	return security_release_secctx(secdata, seclen);
+#endif
+}
+
+#ifndef HAVE_SETATTR_PREPARE
+#define setattr_prepare(de, attr)	inode_change_ok((de)->d_inode, attr)
+#endif
+
+static inline int simple_setattr_no_dirty(struct dentry *dentry,
+					  struct iattr *attr)
+{
+	struct inode *inode = d_inode(dentry);
+	int rc;
+
+	rc = setattr_prepare(dentry, attr);
+	if (rc)
+		return rc;
+
+	if (attr->ia_valid & ATTR_SIZE)
+		truncate_setsize(inode, attr->ia_size);
+	setattr_copy(inode, attr);
+	return 0;
+}
+
+#ifndef HAVE_PERCPU_COUNTER_ADD_BATCH
+static inline void percpu_counter_add_batch(struct percpu_counter *fbc,
+					    s64 amount, s32 batch)
+{
+	__percpu_counter_add(fbc, amount, batch);
+}
+#endif
 #endif /* _LUSTRE_COMPAT_H */

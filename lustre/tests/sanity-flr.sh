@@ -33,16 +33,16 @@ build_test_filter
 [[ "$MDS1_VERSION" -ge $(version_code 2.10.56) ]] ||
 	skip "Need MDS version at least 2.10.56"
 
-[ $UID -eq 0 -a $RUNAS_ID -eq 0 ] &&
-	error "\$RUNAS_ID set to 0, but \$UID is also 0!"
-check_runas_id $RUNAS_ID $RUNAS_GID $RUNAS
-
 check_and_setup_lustre
 DIR=${DIR:-$MOUNT}
 assert_DIR
-
-assert_DIR
 rm -rf $DIR/[Rdfs][0-9]*
+
+[ $UID -eq 0 -a $RUNAS_ID -eq 0 ] &&
+	error "\$RUNAS_ID set to 0, but \$UID is also 0!"
+
+check_runas_id $RUNAS_ID $RUNAS_GID $RUNAS
+
 
 # global array to store mirror IDs
 declare -a mirror_array
@@ -378,7 +378,6 @@ test_0b() {
 	verify_comp_attr stripe-size $tf ${ids[1]} 4194304
 	verify_comp_attr stripe-count $tf ${ids[1]} 2
 	verify_comp_attr stripe-index $tf ${ids[1]} 2
-	verify_comp_attr pool $tf ${ids[1]} flash
 
 	# verify component ${ids[2]}
 	verify_comp_attr stripe-size $tf ${ids[2]} 16777216
@@ -450,7 +449,6 @@ test_0c() {
 		verify_comp_attr_with_default stripe-size $tf ${ids[$i]}
 		verify_comp_attr stripe-count $tf ${ids[$i]} 2
 		verify_comp_attr stripe-index $tf ${ids[$i]} 1
-		verify_comp_attr pool $tf ${ids[$i]} flash
 		verify_comp_extent $tf ${ids[$i]} 0 4194304
 	done
 
@@ -566,13 +564,11 @@ test_0e() {
 	verify_comp_attr stripe-size $tf ${ids[0]} 33554432
 	verify_comp_attr stripe-count $tf ${ids[0]} 3
 	verify_comp_attr stripe-index $tf ${ids[0]} 1
-	verify_comp_attr pool $tf ${ids[0]} ssd
 
 	# verify component ${ids[1]}
 	verify_comp_attr stripe-size $tf ${ids[1]} 4194304
 	verify_comp_attr stripe-count $tf ${ids[1]} 2
 	verify_comp_attr stripe-index $tf ${ids[1]} 2
-	verify_comp_attr pool $tf ${ids[1]} flash
 
 	# verify component ${ids[2]}
 	verify_comp_attr stripe-size $tf ${ids[2]} 16777216
@@ -644,7 +640,6 @@ test_0f() {
 		verify_comp_attr_with_default stripe-size $tf ${ids[$i]}
 		verify_comp_attr stripe-count $tf ${ids[$i]} 2
 		verify_comp_attr stripe-index $tf ${ids[$i]} 1
-		verify_comp_attr pool $tf ${ids[$i]} flash
 		verify_comp_extent $tf ${ids[$i]} 0 4194304
 	done
 
@@ -682,6 +677,21 @@ run_test 0f "lfs mirror extend composite layout mirrors"
 
 test_0g() {
 	local tf=$DIR/$tfile
+
+	! $LFS mirror create --flags prefer $tf ||
+		error "creating $tf w/ --flags but w/o -N option should fail"
+
+	! $LFS mirror create -N --flags foo $tf ||
+		error "creating $tf with '--flags foo' should fail"
+
+	! $LFS mirror create -N --flags stale $tf ||
+		error "creating $tf with '--flags stale' should fail"
+
+	! $LFS mirror create -N --flags prefer,init $tf ||
+		error "creating $tf with '--flags prefer,init' should fail"
+
+	! $LFS mirror create -N --flags ^prefer $tf ||
+		error "creating $tf with '--flags ^prefer' should fail"
 
 	$LFS mirror create -N -E 1M -S 1M -o0 --flags=prefer -E eof -o1 \
 			   -N -o1 $tf || error "create mirrored file $tf failed"
@@ -730,6 +740,12 @@ test_0h() {
 	verify_comp_attr lcme_flags $tf 0x10002 prefer
 
 	# set flags to the first component
+	! $LFS setstripe --comp-set -I 0x10001 --comp-flags=^prefer,foo $tf ||
+		error "setting '^prefer,foo' flags should fail"
+
+	! $LFS getstripe --component-flags=prefer,foo $tf ||
+		error "getting component(s) with 'prefer,foo' flags should fail"
+
 	$LFS setstripe --comp-set -I 0x10001 --comp-flags=^prefer,stale $tf
 
 	verify_comp_attr lcme_flags $tf 0x10001 stale
@@ -1878,7 +1894,7 @@ write_file_43() {
 	[ $flags = wp ] || error "file mirror state $flags != wp"
 }
 
-test_43() {
+test_43a() {
 	[ $OSTCOUNT -lt 3 ] && skip "needs >= 3 OSTs" && return
 
 	local tf=$DIR/$tfile
@@ -1925,7 +1941,28 @@ test_43() {
 	verify_comp_attr lcme_flags $tf 0x20002 init,stale
 	verify_comp_attr lcme_flags $tf 0x30003 init,stale
 }
-run_test 43 "mirror pick on write"
+run_test 43a "mirror pick on write"
+
+test_43b() {
+	local tf=$DIR/$tdir/$tfile
+
+	test_mkdir $DIR/$tdir
+	rm -f $tf
+
+	# create 3 mirrors FLR file, the first 2 mirrors are preferred
+	$LFS setstripe -N -Eeof --flags=prefer -N -Eeof --flags=prefer \
+		-N -Eeof $tf || error "create 3 mirrors file $tf failed"
+	verify_flr_state $tf "ro"
+
+	echo " ** write to $tf"
+	dd if=/dev/zero of=$tf bs=1M count=1 || error "write $tf failed"
+	verify_flr_state $tf "wp"
+
+	echo " ** resync $tf"
+	$LFS mirror resync $tf || error "resync $tf failed"
+	verify_flr_state $tf "ro"
+}
+run_test 43b "allow writing to multiple preferred mirror file"
 
 test_44() {
 	[ $MDSCOUNT -lt 2 ] && skip "needs >= 2 MDTs" && return
@@ -2001,6 +2038,42 @@ test_44() {
 		error "splited file $tf.mirror~2 diffs from $tf"
 }
 run_test 44 "lfs mirror split check"
+
+test_44c() {
+	local tf=$DIR/$tdir/$tfile
+
+	stack_trap "rm -f $tf"
+
+	[ $MDS1_VERSION -ge $(version_code 2.14.52) ] ||
+		skip "Need MDS version at least 2.14.52"
+
+	[ "$FSTYPE" != "zfs" ] || skip "ZFS file's block number is not accurate"
+
+	mkdir -p $DIR/$tdir || error "create directroy failed"
+
+	dd if=/dev/zero of=$tf bs=1M count=10 || error "dd write $tfile failed"
+	sync
+	block1=$(( $(stat -c "%b*%B" $tf) ))
+	echo " ** before mirror ops, file blocks=$((block1/1024)) KiB"
+
+	$LFS mirror extend -N2 -c1 $tf || error "mirror extend $tfile failed"
+	sync
+	block2=$(( $(stat -c "%b*%B" $tf) ))
+	echo " ** after mirror extend, file blocks=$((block2/1024)) KiB"
+
+	$LFS mirror split -d --mirror-id=2 $tf ||
+		error "mirror split $tfile failed"
+	$LFS mirror split -d --mirror-id=3 $tf ||
+		error "mirror split $tfile failed"
+	sync
+	lfs getsom $tf
+	block3=$(( $(stat -c "%b*%B" $tf) ))
+	echo " ** after mirror split, file blocks=$((block3/1024)) KiB"
+
+	[[ $block1 -eq $block3 ]] ||
+		error "mirror split does not reduce block# $block3 != $block1"
+}
+run_test 44c "lfs mirror split reduces block size of a file"
 
 test_45() {
 	[ $OSTCOUNT -lt 2 ] && skip "needs >= 2 OSTs"
@@ -2322,6 +2395,330 @@ test_49a() {
 	echo "FIEMAP on $file succeeded"
 }
 run_test 49a "FIEMAP upon FLR file"
+
+test_50A() {	# EX-2179
+	mkdir -p $DIR/$tdir
+
+	local file=$DIR/$tdir/$tfile
+
+	$LFS setstripe -c1 -i0 $file || error "setstripe $file failed"
+
+	$LFS mirror extend -N -c1 -i1 $file ||
+		error "extending mirror for $file failed"
+
+	local olv=$($LFS getstripe $file | awk '/lcm_layout_gen/{print $2}')
+
+	fail mds1
+
+	$LFS mirror split -d --mirror-id=1 $file || error "split $file failed"
+
+	local flv=$($LFS getstripe $file | awk '/lcm_layout_gen/{print $2}')
+
+	echo "$file layout generation from $olv to $flv"
+	(( $flv != ($olv + 1) )) &&
+		error "split does not increase layout gen from $olv to $flv"
+
+	dd if=/dev/zero of=$file bs=1M count=1 || error "write $file failed"
+
+	$LFS getstripe -v $file || error "getstripe $file failed"
+}
+run_test 50A "mirror split update layout generation"
+
+test_50a() {
+	$LCTL get_param osc.*.import | grep -q 'connect_flags:.*seek' ||
+		skip "OST does not support SEEK_HOLE"
+
+	local file=$DIR/$tdir/$tfile
+	local offset
+	local sum1
+	local sum2
+	local blocks
+
+	mkdir -p $DIR/$tdir
+
+	echo " ** create striped file $file"
+	$LFS setstripe -E 1M -c1 -S 1M -E eof -c2 -S1M $file ||
+		error "cannot create file with PFL layout"
+	echo " ** write 1st data chunk at 1M boundary"
+	dd if=/dev/urandom of=$file bs=1k count=20 seek=1021 ||
+		error "cannot write data at 1M boundary"
+	echo " ** write 2nd data chunk at 2M boundary"
+	dd if=/dev/urandom of=$file bs=1k count=20 seek=2041 ||
+		error "cannot write data at 2M boundary"
+	echo " ** create hole at the file end"
+	$TRUNCATE $file 3700000 || error "truncate fails"
+
+	echo " ** verify sparseness"
+	offset=$(lseek_test -d 1000 $file)
+	echo "    first data offset: $offset"
+	[[ $offset == 1000 ]] &&
+		error "src: data is not expected at offset $offset"
+	offset=$(lseek_test -l 3500000 $file)
+	echo "    hole at the end: $offset"
+	[[ $offset == 3500000 ]] ||
+		error "src: hole is expected at offset $offset"
+
+	echo " ** extend the file with new mirror"
+	# migrate_copy_data() is used
+	$LFS mirror extend -N -E 2M -S 1M -E 1G -S 2M -E eof $file ||
+		error "cannot create mirror"
+	$LFS getstripe $file | grep lcme_flags | grep stale > /dev/null &&
+		error "$file still has stale component"
+
+	# check migrate_data_copy() was correct
+	sum_1=$($LFS mirror read -N 1 $file | md5sum)
+	sum_2=$($LFS mirror read -N 2 $file | md5sum)
+	[[ $sum_1 == $sum_2 ]] ||
+		error "data mismatch: \'$sum_1\' vs. \'$sum_2\'"
+
+	# stale first mirror
+	$LFS setstripe --comp-set -I0x10001 --comp-flags=stale $file
+	$LFS setstripe --comp-set -I0x10002 --comp-flags=stale $file
+
+	echo " ** verify mirror #2 sparseness"
+	offset=$(lseek_test -d 1000 $file)
+	echo "    first data offset: $offset"
+	[[ $offset == 1000 ]] &&
+		error "dst: data is not expected at offset $offset"
+	offset=$(lseek_test -l 3500000 $file)
+	echo "    hole at the end: $offset"
+	[[ $offset == 3500000 ]] ||
+		error "dst: hole is expected at offset $offset"
+
+	echo " ** copy mirror #2 to mirror #1"
+	$LFS mirror copy -i 2 -o 1 $file || error "mirror copy fails"
+	$LFS getstripe $file | grep lcme_flags | grep stale > /dev/null &&
+		error "$file still has stale component"
+
+	# check llapi_mirror_copy_many correctness
+	sum_1=$($LFS mirror read -N 1 $file | md5sum)
+	sum_2=$($LFS mirror read -N 2 $file | md5sum)
+	[[ $sum_1 == $sum_2 ]] ||
+		error "data mismatch: \'$sum_1\' vs. \'$sum_2\'"
+
+	# stale 1st component of mirror #2 before lseek call
+	$LFS setstripe --comp-set -I0x20001 --comp-flags=stale $file
+
+	echo " ** verify mirror #1 sparseness again"
+	offset=$(lseek_test -d 1000 $file)
+	echo "    first data offset: $offset"
+	[[ $offset == 1000 ]] &&
+		error "dst: data is not expected at offset $offset"
+	offset=$(lseek_test -l 3500000 $file)
+	echo "    hole at the end: $offset"
+	[[ $offset == 3500000 ]] ||
+		error "dst: hole is expected at offset $offset"
+
+	cancel_lru_locks osc
+
+	blocks=$(stat -c%b $file)
+	echo " ** final consumed blocks: $blocks"
+	# for 3.5Mb file consumes ~6000 blocks, use 1000 to check
+	# that file is still sparse
+	(( blocks < 1000 )) ||
+		error "Mirrored file consumes $blocks blocks"
+
+	rm $file
+}
+run_test 50a "mirror extend/copy preserves sparseness"
+
+test_50b() {
+	$LCTL get_param osc.*.import | grep -q 'connect_flags:.*seek' ||
+		skip "OST does not support SEEK_HOLE"
+
+	local file=$DIR/$tdir/$tfile
+	local offset
+	local sum1
+	local sum2
+	local blocks
+
+	mkdir -p $DIR/$tdir
+
+	echo " ** create mirrored file $file"
+	$LFS mirror create -N -E1M -c1 -S1M -E eof \
+		-N -E2M -S1M -E eof -S2M $file ||
+		error "cannot create mirrored file"
+	echo " ** write data chunk at 1M boundary"
+	dd if=/dev/urandom of=$file bs=1k count=20 seek=1021 ||
+		error "cannot write data at 1M boundary"
+	echo " ** create hole at the file end"
+	$TRUNCATE $file 3700000 || error "truncate fails"
+
+	echo " ** verify sparseness"
+	offset=$(lseek_test -d 1000 $file)
+	echo "    first data offset: $offset"
+	[[ $offset == 1000 ]] &&
+		error "src: data is not expected at offset $offset"
+	offset=$(lseek_test -l 3500000 $file)
+	echo "    hole at the end: $offset"
+	[[ $offset == 3500000 ]] ||
+		error "src: hole is expected at 3500000"
+
+	echo " ** resync mirror #2 to mirror #1"
+	$LFS mirror resync $file
+
+	# check llapi_mirror_copy_many correctness
+	sum_1=$($LFS mirror read -N 1 $file | md5sum)
+	sum_2=$($LFS mirror read -N 2 $file | md5sum)
+	[[ $sum_1 == $sum_2 ]] ||
+		error "data mismatch: \'$sum_1\' vs. \'$sum_2\'"
+
+	cancel_lru_locks osc
+
+	blocks=$(stat -c%b $file)
+	echo " ** consumed blocks: $blocks"
+	# without full punch() support the first component can be not sparse
+	# but the last one should be, so file should use far fewer blocks
+	(( blocks < 5000 )) ||
+		error "Mirrored file consumes $blocks blocks"
+
+	# stale first component in mirror #1
+	$LFS setstripe --comp-set -I0x10001 --comp-flags=stale,nosync $file
+	echo " ** truncate file down"
+	$TRUNCATE $file 0
+	echo " ** write data chunk at 2M boundary"
+	dd if=/dev/urandom of=$file bs=1k count=20 seek=2041 conv=notrunc ||
+		error "cannot write data at 2M boundary"
+	echo " ** resync mirror #2 to mirror #1 with nosync 1st component"
+	$LFS mirror resync $file || error "mirror rsync fails"
+	# first component is still stale
+	$LFS getstripe $file | grep 'lcme_flags:.*stale' > /dev/null ||
+		error "$file still has no stale component"
+	echo " ** resync mirror #2 to mirror #1 again"
+	$LFS setstripe --comp-set -I0x10001 --comp-flags=stale,^nosync $file
+	$LFS mirror resync $file || error "mirror rsync fails"
+	$LFS getstripe $file | grep 'lcme_flags:.*stale' > /dev/null &&
+		error "$file still has stale component"
+
+	# check llapi_mirror_copy_many correctness
+	sum_1=$($LFS mirror read -N 1 $file | md5sum)
+	sum_2=$($LFS mirror read -N 2 $file | md5sum)
+	[[ $sum_1 == $sum_2 ]] ||
+		error "data mismatch: \'$sum_1\' vs. \'$sum_2\'"
+
+	cancel_lru_locks osc
+
+	blocks=$(stat -c%b $file)
+	echo " ** final consumed blocks: $blocks"
+	# while the first component can lose sparseness, the last one should
+	# not, so whole file should still use far fewer blocks in total
+	(( blocks < 3000 )) ||
+		error "Mirrored file consumes $blocks blocks"
+	rm $file
+}
+run_test 50b "mirror rsync handles sparseness"
+
+test_50c() {
+	local tf=$DIR/$tdir/$tfile
+
+	test_mkdir $DIR/$tdir
+
+	$LFS setstripe -N2 -c-1 $tf || error "create FLR $tf failed"
+	verify_flr_state $tf "ro"
+
+	if [[ "$FSTYPE" == "ldiskfs" ]]; then
+		# ZFS does not support fallocate for now
+		fallocate -p -o 1MiB -l 1MiB $tf ||
+			error "punch hole in $tf failed"
+		verify_flr_state $tf "wp"
+	fi
+
+	dd if=/dev/zero of=$tf bs=4096 count=4 || error "write $tf failed"
+	$LFS mirror resync $tf || error "mirror resync $tf failed"
+	verify_flr_state $tf "ro"
+
+	$MULTIOP $tf OSMWUc || error "$MULTIOP $tf failed"
+	verify_flr_state $tf "wp"
+}
+run_test 50c "punch_hole/mmap_write stale other mirrors"
+
+test_60a() {
+	$LCTL get_param osc.*.import | grep -q 'connect_flags:.*seek' ||
+		skip "OST does not support SEEK_HOLE"
+
+	local file=$DIR/$tdir/$tfile
+	local old_size=2147483648 # 2GiB
+	local new_size
+
+	mkdir -p $DIR/$tdir
+	dd if=/dev/urandom of=$file bs=4096 count=1 seek=$((134217728 / 4096))
+	$TRUNCATE $file $old_size
+
+	$LFS mirror extend -N -c 1 $file
+	dd if=/dev/urandom of=$file bs=4096 count=1 seek=$((134217728 / 4096)) conv=notrunc
+	$LFS mirror resync $file
+
+	new_size=$(stat --format='%s' $file)
+	if ((new_size != old_size)); then
+		error "new_size ($new_size) is not equal to old_size ($old_size)"
+	fi
+
+	rm $file
+}
+run_test 60a "mirror extend sets correct size on sparse file"
+
+get_flr_layout_gen() {
+	getfattr -n lustre.lov --only-values $tf 2>/dev/null |
+		od -tx4 | awk '/000000/ { print "0x"$4; exit; }'
+}
+
+check_layout_gen() {
+	local tf=$1
+
+	local v1=$(get_flr_layout_gen $tf)
+	local v2=$($LFS getstripe -v $tf | awk '/lcm_layout_gen/ { print $2 }')
+
+	[[ $v1 -eq $v2 ]] ||
+		error "$tf in-memory layout gen $v1 != $v2 after $2"
+}
+
+test_60b() {
+	local tf=$DIR/$tdir/$tfile
+
+	test_mkdir $DIR/$tdir
+
+	$LFS setstripe -Eeof $tf || error "setstripe $tf failed"
+
+	for ((i = 0; i < 20; i++)); do
+		$LFS mirror extend -N $tf ||
+			error "extending mirror for $tf failed"
+		check_layout_gen $tf "extend"
+
+		$LFS mirror split -d --mirror-id=$((i+1)) $tf ||
+			error "split $tf failed"
+		check_layout_gen $tf "split"
+	done
+}
+run_test 60b "mirror merge/split cancel client's in-memory layout gen"
+
+test_70() {
+	local tf=$DIR/$tdir/$tfile
+
+	test_mkdir $DIR/$tdir
+
+	while true; do
+		rm -f $tf
+		$LFS mirror create -N -E 1M -c -1 -E eof -N $tf
+		echo xxxx > $tf
+	done &
+	c_pid=$!
+	echo "mirror create pid $c_pid"
+
+	while true; do
+		$LFS mirror split -d --mirror-id=1 $tf &> /dev/null
+	done &
+	s_pid=$!
+	echo "mirror split pid $s_pid"
+
+	echo "mirror create and split race for 60 seconds, should not crash"
+	sleep 60
+	kill -9 $c_pid &> /dev/null
+	kill -9 $s_pid &> /dev/null
+
+	rm -f $tf
+	true
+}
+run_test 70 "mirror create and split race"
 
 ctrl_file=$(mktemp /tmp/CTRL.XXXXXX)
 lock_file=$(mktemp /var/lock/FLR.XXXXXX)
@@ -2986,6 +3383,80 @@ function test_205() {
 		error "prefer flag was not set on the new mirror"
 }
 run_test 205 "lfs mirror extend to set prefer flag"
+
+function test_206() {
+	# create a new OST pool
+	local pool_name=$TESTNAME
+
+	create_pool $FSNAME.$pool_name ||
+		error "create OST pool $pool_name failed"
+	# add OSTs into the pool
+	pool_add_targets $pool_name 0 1 ||
+		error "add OSTs into pool $pool_name failed"
+
+	$LFS setstripe -c1 --pool=$pool_name $DIR/$tfile ||
+		error "can't setstripe"
+	$LFS mirror extend -N $DIR/$tfile ||
+		error "can't create replica"
+	if $LFS getstripe $DIR/$tfile | grep -q prefer ; then
+		$LFS getstripe $DIR/$tfile
+		error "prefer found"
+	fi
+	$LFS setstripe --comp-set --comp-flags=prefer -p $pool_name $DIR/$tfile || {
+		$LFS getstripe $DIR/$tfile
+		error "can't setstripe prefer"
+	}
+
+	if ! $LFS getstripe $DIR/$tfile | grep -q prefer ; then
+		$LFS getstripe $DIR/$tfile
+		error "no prefer found"
+	fi
+
+	# destroy OST pool
+	destroy_test_pools
+}
+run_test 206 "lfs setstripe -pool .. --comp-flags=.. "
+
+test_207() {
+       local file=$DIR/$tfile
+       local tmpfile=$DIR/$tfile-tt
+
+	[ $MDS1_VERSION -lt $(version_code 2.14.50) ] &&
+		skip "Need MDS version at least 2.14.50"
+
+	stack_trap "rm -f $tmpfile $file"
+
+	# generate data for verification
+	dd if=/dev/urandom of=$tmpfile bs=1M count=1 ||
+		error "can't generate file with random data"
+
+	# create a mirrored file with one stale replica
+	$LFS mirror create -N -S 4M -c 2 -N -S 1M -c -1 $file ||
+		error "create mirrored file $file failed"
+	get_mirror_ids $file
+	echo "mirror IDs: ${mirror_array[@]}"
+
+	dd if=$tmpfile of=$file bs=1M || error "can't copy"
+	get_mirror_ids $file
+	echo "mirror IDs: ${mirror_array[@]}"
+
+	drop_client_cache
+	cmp $tmpfile $file || error "files don't match"
+	get_mirror_ids $file
+	echo "mirror IDs: ${mirror_array[@]}"
+
+	# mirror creation should work fine
+	$LFS mirror extend -N -S 8M -c -1 $file ||
+		error "mirror extend $file failed"
+
+	get_mirror_ids $file
+	echo "mirror IDs: ${mirror_array[@]}"
+
+	drop_client_cache
+	$LFS mirror verify -v $file || error "verification failed"
+	cmp $tmpfile $file || error "files don't match"
+}
+run_test 207 "create another replica with existing out-of-sync one"
 
 complete $SECONDS
 check_and_cleanup_lustre

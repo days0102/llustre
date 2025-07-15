@@ -69,7 +69,7 @@ static void ls_object_free(const struct lu_env *env, struct lu_object *o)
 	kfree_rcu(obj, ls_header.loh_rcu);
 }
 
-static struct lu_object_operations ls_lu_obj_ops = {
+static const struct lu_object_operations ls_lu_obj_ops = {
 	.loo_object_init  = ls_object_init,
 	.loo_object_free  = ls_object_free,
 };
@@ -101,7 +101,7 @@ static struct lu_object *ls_object_alloc(const struct lu_env *env,
 	}
 }
 
-static struct lu_device_operations ls_lu_dev_ops = {
+static const struct lu_device_operations ls_lu_dev_ops = {
 	.ldo_object_alloc =	ls_object_alloc
 };
 
@@ -130,7 +130,7 @@ struct ls_device *ls_find_dev(struct dt_device *dev)
 	return ls;
 }
 
-static struct lu_device_type_operations ls_device_type_ops = {
+static const struct lu_device_type_operations ls_device_type_ops = {
 	.ldto_start = NULL,
 	.ldto_stop  = NULL,
 };
@@ -634,6 +634,12 @@ static int local_object_declare_unlink(const struct lu_env *env,
 	if (rc < 0)
 		return rc;
 
+	if (S_ISDIR(p->do_lu.lo_header->loh_attr)) {
+		rc = dt_declare_ref_del(env, p, th);
+		if (rc < 0)
+			return rc;
+	}
+
 	rc = dt_declare_ref_del(env, c, th);
 	if (rc < 0)
 		return rc;
@@ -672,6 +678,14 @@ int local_object_unlink(const struct lu_env *env, struct dt_device *dt,
 	rc = dt_trans_start_local(env, dt, th);
 	if (rc < 0)
 		GOTO(stop, rc);
+
+	if (S_ISDIR(dto->do_lu.lo_header->loh_attr)) {
+		dt_write_lock(env, parent, 0);
+		rc = dt_ref_del(env, parent, th);
+		dt_write_unlock(env, parent);
+		if (rc)
+			GOTO(stop, rc);
+	}
 
 	dt_write_lock(env, dto, 0);
 	rc = dt_delete(env, parent, (struct dt_key *)name, th);

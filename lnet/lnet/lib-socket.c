@@ -27,13 +27,14 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 #define DEBUG_SUBSYSTEM S_LNET
 
 #include <linux/if.h>
 #include <linux/in.h>
 #include <linux/net.h>
+#include <net/addrconf.h>
+#include <net/ipv6.h>
 #include <linux/file.h>
 #include <linux/pagemap.h>
 /* For sys_open & sys_close */
@@ -42,6 +43,7 @@
 #include <linux/inetdevice.h>
 
 #include <libcfs/linux/linux-time.h>
+#include <libcfs/linux/linux-net.h>
 #include <libcfs/libcfs.h>
 #include <lnet/lib-lnet.h>
 
@@ -184,48 +186,75 @@ static struct socket *
 lnet_sock_create(int interface, struct sockaddr *remaddr,
 		 int local_port, struct net *ns)
 {
-	struct socket	   *sock;
-	int		    rc;
-	int		    option;
+	struct socket *sock;
+	int rc;
+	int family;
 
+	family = AF_INET6;
+	if (remaddr)
+		family = remaddr->sa_family;
+retry:
 #ifdef HAVE_SOCK_CREATE_KERN_USE_NET
-	rc = sock_create_kern(ns, PF_INET, SOCK_STREAM, 0, &sock);
+	rc = sock_create_kern(ns, family, SOCK_STREAM, 0, &sock);
 #else
-	rc = sock_create_kern(PF_INET, SOCK_STREAM, 0, &sock);
+	rc = sock_create_kern(family, SOCK_STREAM, 0, &sock);
 #endif
+	if (rc == -EAFNOSUPPORT && family == AF_INET6 && !remaddr) {
+		family = AF_INET;
+		goto retry;
+	}
+
 	if (rc) {
 		CERROR("Can't create socket: %d\n", rc);
 		return ERR_PTR(rc);
 	}
 
-	option = 1;
-	rc = kernel_setsockopt(sock, SOL_SOCKET, SO_REUSEADDR,
-			       (char *)&option, sizeof(option));
-	if (rc) {
-		CERROR("Can't set SO_REUSEADDR for socket: %d\n", rc);
-		goto failed;
-	}
+	sock->sk->sk_reuseport = 1;
 
 	if (interface >= 0 || local_port != 0) {
-		struct sockaddr_in locaddr = {};
+		struct sockaddr_storage locaddr = {};
 
-		locaddr.sin_family = AF_INET;
-		locaddr.sin_addr.s_addr = INADDR_ANY;
-		if (interface >= 0) {
-			struct sockaddr_in *sin = (void *)remaddr;
-			__u32 ip;
+		switch (family) {
+		case AF_INET: {
+			struct sockaddr_in *sin = (void *)&locaddr;
 
-			rc = choose_ipv4_src(&ip,
-					     interface,
-					     ntohl(sin->sin_addr.s_addr),
-					     ns);
-			if (rc)
-				goto failed;
-			locaddr.sin_addr.s_addr = htonl(ip);
+			sin->sin_family = AF_INET;
+			sin->sin_addr.s_addr = INADDR_ANY;
+			if (interface >= 0 && remaddr) {
+				struct sockaddr_in *rem = (void *)remaddr;
+				__u32 ip;
+
+				rc = choose_ipv4_src(&ip,
+						     interface,
+						     ntohl(rem->sin_addr.s_addr),
+						     ns);
+				if (rc)
+					goto failed;
+				sin->sin_addr.s_addr = htonl(ip);
+			}
+			sin->sin_port = htons(local_port);
+			break;
 		}
+#if IS_ENABLED(CONFIG_IPV6)
+		case AF_INET6: {
+			struct sockaddr_in6 *sin6 = (void *)&locaddr;
 
-		locaddr.sin_port = htons(local_port);
+			sin6->sin6_family = AF_INET6;
+			sin6->sin6_addr = in6addr_any;
+			if (interface >= 0 && remaddr) {
+				struct sockaddr_in6 *rem = (void *)remaddr;
 
+				ipv6_dev_get_saddr(ns,
+						   dev_get_by_index(ns,
+								    interface),
+						   &rem->sin6_addr, 0,
+						   &sin6->sin6_addr);
+			}
+			sin6->sin6_port = htons(local_port);
+			break;
+		}
+#endif /* IS_ENABLED(CONFIG_IPV6) */
+		}
 		rc = kernel_bind(sock, (struct sockaddr *)&locaddr,
 				 sizeof(locaddr));
 		if (rc == -EADDRINUSE) {
@@ -245,78 +274,68 @@ failed:
 	return ERR_PTR(rc);
 }
 
-int
+void
 lnet_sock_setbuf(struct socket *sock, int txbufsize, int rxbufsize)
 {
-	int		    option;
-	int		    rc;
+	struct sock *sk = sock->sk;
 
 	if (txbufsize != 0) {
-		option = txbufsize;
-		rc = kernel_setsockopt(sock, SOL_SOCKET, SO_SNDBUF,
-				       (char *)&option, sizeof(option));
-		if (rc != 0) {
-			CERROR("Can't set send buffer %d: %d\n",
-				option, rc);
-			return rc;
-		}
+		sk->sk_userlocks |= SOCK_SNDBUF_LOCK;
+		sk->sk_sndbuf = txbufsize;
+		sk->sk_write_space(sk);
 	}
 
 	if (rxbufsize != 0) {
-		option = rxbufsize;
-		rc = kernel_setsockopt(sock, SOL_SOCKET, SO_RCVBUF,
-				       (char *)&option, sizeof(option));
-		if (rc != 0) {
-			CERROR("Can't set receive buffer %d: %d\n",
-				option, rc);
-			return rc;
-		}
+		sk->sk_userlocks |= SOCK_RCVBUF_LOCK;
+		sk->sk_sndbuf = rxbufsize;
 	}
-	return 0;
 }
 EXPORT_SYMBOL(lnet_sock_setbuf);
 
 int
-lnet_sock_getaddr(struct socket *sock, bool remote, __u32 *ip, int *port)
+lnet_sock_getaddr(struct socket *sock, bool remote,
+		  struct sockaddr_storage *peer)
 {
-	struct sockaddr_in sin;
 	int rc;
 #ifndef HAVE_KERN_SOCK_GETNAME_2ARGS
-	int len = sizeof(sin);
+	int len = sizeof(*peer);
 #endif
 
 	if (remote)
 		rc = lnet_kernel_getpeername(sock,
-					     (struct sockaddr *)&sin, &len);
+					     (struct sockaddr *)peer, &len);
 	else
 		rc = lnet_kernel_getsockname(sock,
-					     (struct sockaddr *)&sin, &len);
+					     (struct sockaddr *)peer, &len);
 	if (rc < 0) {
 		CERROR("Error %d getting sock %s IP/port\n",
 			rc, remote ? "peer" : "local");
 		return rc;
 	}
+	if (peer->ss_family == AF_INET6) {
+		struct sockaddr_in6 *in6 = (void *)peer;
+		struct sockaddr_in *in = (void *)peer;
+		short port = in6->sin6_port;
 
-	if (ip != NULL)
-		*ip = ntohl(sin.sin_addr.s_addr);
-
-	if (port != NULL)
-		*port = ntohs(sin.sin_port);
-
+		if (ipv6_addr_v4mapped(&in6->sin6_addr)) {
+			/* Pretend it is a v4 socket */
+			memset(in, 0, sizeof(*in));
+			in->sin_family = AF_INET;
+			in->sin_port = port;
+			memcpy(&in->sin_addr, &in6->sin6_addr.s6_addr32[3], 4);
+		}
+	}
 	return 0;
 }
 EXPORT_SYMBOL(lnet_sock_getaddr);
 
-int
-lnet_sock_getbuf(struct socket *sock, int *txbufsize, int *rxbufsize)
+void lnet_sock_getbuf(struct socket *sock, int *txbufsize, int *rxbufsize)
 {
 	if (txbufsize != NULL)
 		*txbufsize = sock->sk->sk_sndbuf;
 
 	if (rxbufsize != NULL)
 		*rxbufsize = sock->sk->sk_rcvbuf;
-
-	return 0;
 }
 EXPORT_SYMBOL(lnet_sock_getbuf);
 
@@ -324,6 +343,7 @@ struct socket *
 lnet_sock_listen(int local_port, int backlog, struct net *ns)
 {
 	struct socket *sock;
+	int val = 0;
 	int rc;
 
 	sock = lnet_sock_create(-1, NULL, local_port, ns);
@@ -334,6 +354,39 @@ lnet_sock_listen(int local_port, int backlog, struct net *ns)
 			       local_port);
 		return ERR_PTR(rc);
 	}
+
+	/* Make sure we get both IPv4 and IPv6 connections.
+	 * This is the default, but it can be overridden so
+	 * we force it back.
+	 */
+#ifdef HAVE_KERNEL_SETSOCKOPT
+	kernel_setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY,
+			  (char *) &val, sizeof(val));
+#elif defined(_LINUX_SOCKPTR_H)
+	/* sockptr_t was introduced around v5.8-rc4-1952-ga7b75c5a8c41
+	 * and allows a kernel address to be passed to ->setsockopt
+	 */
+	if (ipv6_only_sock(sock->sk)) {
+		sockptr_t optval = KERNEL_SOCKPTR(&val);
+		sock->ops->setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY,
+				      optval, sizeof(val));
+	}
+#else
+	/* From v5.7-rc6-2614-g5a892ff2facb when kernel_setsockopt()
+	 * was removed until sockptr_t (above) there is no clean
+	 * way to pass kernel address to setsockopt.  We could use
+	 * get_fs()/set_fs(), but in this particular situation there
+	 * is an easier way.
+	 * It depends on the fact that at least for these few kernels
+	 * a NULL address to ipv6_setsockopt() is treated like the address
+	 * of a zero.
+	 */
+	if (ipv6_only_sock(sock->sk) && !val) {
+		void *optval = NULL;
+		sock->ops->setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY,
+				optval, sizeof(val));
+	}
+#endif
 
 	rc = kernel_listen(sock, backlog);
 	if (rc == 0)
@@ -356,7 +409,7 @@ lnet_sock_connect(int interface, int local_port,
 	if (IS_ERR(sock))
 		return sock;
 
-	rc = kernel_connect(sock, peeraddr, sizeof(struct sockaddr_in), 0);
+	rc = kernel_connect(sock, peeraddr, sizeof(struct sockaddr_in6), 0);
 	if (rc == 0)
 		return sock;
 

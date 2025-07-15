@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/osd/osd_compat.c
  *
@@ -59,7 +58,6 @@ static void osd_push_ctxt(const struct osd_device *dev,
 	OBD_SET_CTXT_MAGIC(newctxt);
 	newctxt->pwdmnt = dev->od_mnt;
 	newctxt->pwd = dev->od_mnt->mnt_root;
-	newctxt->fs = KERNEL_DS;
 	newctxt->umask = current_umask();
 	newctxt->dt = NULL;
 
@@ -611,10 +609,8 @@ static int osd_index_backup_dir_init(const struct lu_env *env,
 
 static void osd_index_backup_dir_fini(struct osd_device *dev)
 {
-	if (dev->od_index_backup_inode) {
-		iput(dev->od_index_backup_inode);
-		dev->od_index_backup_inode = NULL;
-	}
+	iput(dev->od_index_backup_inode);
+	dev->od_index_backup_inode = NULL;
 }
 
 int osd_obj_map_init(const struct lu_env *env, struct osd_device *dev)

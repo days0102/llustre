@@ -2,6 +2,7 @@
 #include <linux/circ_buf.h>
 #include <linux/device.h>
 #include <linux/fs.h>
+#include <linux/idr.h>
 #include <linux/kernel.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
@@ -189,9 +190,6 @@ static ssize_t oal_read_entry(struct oal_circ_buf *ocb,
 	}
 
 	BUG_ON(CIRC_CNT(head, tail, oal->oal_log_size) < oal->oal_entry_size);
-
-	/* Read index before reading contents at that index. */
-	smp_read_barrier_depends();
 
 	/* Extract one entry from the buffer. */
 	rc = min_t(size_t, oal->oal_entry_size, entry_buf_size);
@@ -519,6 +517,10 @@ void ofd_access(const struct lu_env *env,
 	unsigned int flags = (rw == READ) ? OFD_ACCESS_READ : OFD_ACCESS_WRITE;
 	struct ofd_access_log *oal = m->ofd_access_log;
 
+	/* obdfilter-survey does not set parent FIDs. */
+	if (fid_is_zero(parent_fid))
+		return;
+
 	if (oal && (flags & m->ofd_access_log_mask)) {
 		struct ofd_access_entry_v1 oae = {
 			.oae_parent_fid = *parent_fid,
@@ -529,12 +531,13 @@ void ofd_access(const struct lu_env *env,
 			.oae_segment_count = segment_count,
 			.oae_flags = flags,
 		};
+		struct lu_seq_range range = {
+			.lsr_flags = LU_SEQ_RANGE_ANY,
+		};
 		struct oal_circ_buf *ocb;
-		struct lu_seq_range range;
 		int rc;
 
 		/* learn target MDT from FID's sequence */
-		range.lsr_flags = LU_SEQ_RANGE_ANY;
 		rc = fld_server_lookup(env, m->ofd_seq_site.ss_server_fld,
 				       fid_seq(parent_fid), &range);
 		if (unlikely(rc))
@@ -569,9 +572,8 @@ void ofd_access_log_delete(struct ofd_access_log *oal)
 
 	oal->oal_is_closed = 1;
 	down_read(&oal->oal_buf_list_sem);
-	list_for_each_entry(ocb, &oal->oal_circ_buf_list, ocb_list) {
-		wake_up_all(&ocb->ocb_read_wait_queue);
-	}
+	list_for_each_entry(ocb, &oal->oal_circ_buf_list, ocb_list)
+		wake_up(&ocb->ocb_read_wait_queue);
 	up_read(&oal->oal_buf_list_sem);
 	cdev_device_del(&oal->oal_cdev, &oal->oal_device);
 }

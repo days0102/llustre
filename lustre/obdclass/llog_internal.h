@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #ifndef __LLOG_INTERNAL_H__
@@ -91,5 +90,10 @@ int llog_cat_cleanup(const struct lu_env *env, struct llog_handle *cathandle,
 static inline struct llog_rec_hdr *llog_rec_hdr_next(struct llog_rec_hdr *rec)
 {
 	return (struct llog_rec_hdr *)((char *)rec + rec->lrh_len);
+}
+int llog_verify_record(const struct llog_handle *llh, struct llog_rec_hdr *rec);
+static inline char *loghandle2name(const struct llog_handle *lgh)
+{
+	return lgh->lgh_ctxt->loc_obd->obd_name;
 }
 #endif

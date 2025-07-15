@@ -82,9 +82,8 @@ kgnilnd_schedule_device(kgn_device_t *dev)
 	 * has come around and set ready to zero */
 	already_live = cmpxchg(&dev->gnd_ready, GNILND_DEV_IDLE, GNILND_DEV_IRQ);
 
-	if (!already_live) {
-		wake_up_all(&dev->gnd_waitq);
-	}
+	if (!already_live)
+		wake_up(&dev->gnd_waitq);
 }
 
 void kgnilnd_schedule_device_timer(cfs_timer_cb_arg_t data)
@@ -535,10 +534,9 @@ kgnilnd_setup_immediate_buffer(kgn_tx_t *tx, unsigned int niov,
 		tx->tx_buffer = NULL;
 	} else {
 
-		if ((niov > 0) && unlikely(niov > (nob/PAGE_SIZE))) {
-			niov = round_up(nob + offset + kiov->bv_offset,
-					PAGE_SIZE);
-		}
+		if (niov && niov > (nob >> PAGE_SHIFT))
+			niov = DIV_ROUND_UP(nob + offset + kiov->bv_offset,
+					    PAGE_SIZE);
 
 		LASSERTF(niov > 0 && niov < GNILND_MAX_IMMEDIATE/PAGE_SIZE,
 			"bad niov %d msg %p kiov %p offset %d nob%d\n",
@@ -1291,7 +1289,7 @@ kgnilnd_tx_log_retrans(kgn_conn_t *conn, kgn_tx_t *tx)
 	 * that we fill up our mailbox, we'll keep trying to resend that msg
 	 * until we exceed the max_retrans _or_ gnc_last_rx expires, indicating
 	 * that he hasn't send us any traffic in return */
-	
+
 	/* some reasonable throttling of the debug message */
 	if (log_retrans) {
 		unsigned long now = jiffies;
@@ -2275,8 +2273,8 @@ kgnilnd_eager_recv(struct lnet_ni *ni, void *private, struct lnet_msg *lntmsg,
 		CERROR("Couldnt find matching peer %p or conn %p / %p\n",
 			peer, conn, found_conn);
 		if (found_conn) {
-			CERROR("Unexpected connstamp %#llx(%#llx expected)"
-				" from %s", rxmsg->gnm_connstamp,
+			CERROR("Unexpected connstamp %#llx(%#llx expected) from %s\n",
+				rxmsg->gnm_connstamp,
 				found_conn->gnc_peer_connstamp,
 				libcfs_nid2str(peer->gnp_nid));
 		}
@@ -4787,7 +4785,7 @@ kgnilnd_process_conns(kgn_device_t *dev, unsigned long deadline)
 
 		conn = list_first_entry(&dev->gnd_ready_conns, kgn_conn_t, gnc_schedlist);
 		list_del_init(&conn->gnc_schedlist);
-		/* 
+		/*
 		 * Since we are processing conn now, we don't need to be on the delaylist any longer.
 		 */
 

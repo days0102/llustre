@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lnet/utils/debug.c
  * Some day I'll split all of this functionality into a cfs_debug module
@@ -69,8 +68,8 @@ static int debug_mask = ~0;
 
 #define MAX_MARK_SIZE 256
 
-static const char *libcfs_debug_subsystems[] = LIBCFS_DEBUG_SUBSYS_NAMES;
-static const char *libcfs_debug_masks[] = LIBCFS_DEBUG_MASKS_NAMES;
+static const char *const libcfs_debug_subsystems[] = LIBCFS_DEBUG_SUBSYS_NAMES;
+static const char *const libcfs_debug_masks[] = LIBCFS_DEBUG_MASKS_NAMES;
 
 #define DAEMON_CTL_NAME		"daemon_file"
 #define SUBSYS_DEBUG_CTL_NAME	"subsystem_debug"

@@ -355,7 +355,7 @@ LU_CONTEXT_KEY_DEFINE(qmt, LCT_MD_THREAD);
 /*
  * lu device type operations associated with the master target.
  */
-static struct lu_device_type_operations qmt_device_type_ops = {
+static const struct lu_device_type_operations qmt_device_type_ops = {
 	.ldto_init		= qmt_type_init,
 	.ldto_fini		= qmt_type_fini,
 
@@ -484,7 +484,7 @@ int qmt_glb_init(void)
 	int rc;
 	ENTRY;
 
-	rc = class_register_type(&qmt_obd_ops, NULL, true, NULL,
+	rc = class_register_type(&qmt_obd_ops, NULL, true,
 				 LUSTRE_QMT_NAME, &qmt_device_type);
 	RETURN(rc);
 }

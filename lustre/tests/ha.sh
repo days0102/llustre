@@ -174,6 +174,7 @@ set -eE
 declare     ha_tmp_dir=/tmp/$(basename $0)-$$
 declare     ha_stop_file=$ha_tmp_dir/stop
 declare     ha_fail_file=$ha_tmp_dir/fail
+declare     ha_pm_states=$ha_tmp_dir/ha_pm_states
 declare     ha_status_file_prefix=$ha_tmp_dir/status
 declare -a  ha_status_files
 declare     ha_machine_file=$ha_tmp_dir/machine_file
@@ -191,22 +192,28 @@ declare     ha_lfsck_fail_on_repaired=${LFSCK_FAIL_ON_REPAIRED:-false}
 declare     ha_power_down_cmd=${POWER_DOWN:-"pm -0"}
 declare     ha_power_up_cmd=${POWER_UP:-"pm -1"}
 declare     ha_power_delay=${POWER_DELAY:-60}
+declare     ha_node_up_delay=${NODE_UP_DELAY:-10}
+declare     ha_pm_host=${PM_HOST:-$(hostname)}
 declare     ha_failback_delay=${DELAY:-5}
 declare     ha_failback_cmd=${FAILBACK:-""}
 declare     ha_stripe_params=${STRIPEPARAMS:-"-c 0"}
+declare     ha_test_dir_stripe_count=${TDSTRIPECOUNT:-"1"}
+declare     ha_test_dir_mdt_index=${TDMDTINDEX:-"0"}
+declare     ha_test_dir_mdt_index_random=${TDMDTINDEXRAND:-false}
 declare     ha_dir_stripe_count=${DSTRIPECOUNT:-"1"}
 declare     ha_mdt_index=${MDTINDEX:-"0"}
 declare     ha_mdt_index_random=${MDTINDEXRAND:-false}
 declare -a  ha_clients
 declare -a  ha_servers
 declare -a  ha_victims
+declare -a  ha_victims_pair
 declare     ha_test_dir=/mnt/lustre/$(basename $0)-$$
 declare     ha_start_time=$(date +%s)
 declare     ha_expected_duration=$((60 * 60 * 24))
 declare     ha_max_failover_period=10
 declare     ha_nr_loops=0
 declare     ha_stop_signals="SIGINT SIGTERM SIGHUP"
-declare     ha_load_timeout=$((60 * 10))
+declare     ha_load_timeout=${LOAD_TIMEOUT:-$((60 * 10))}
 declare     ha_workloads_only=false
 declare     ha_workloads_dry_run=false
 declare     ha_simultaneous=false
@@ -216,6 +223,18 @@ declare     ha_mpi_instances=${ha_mpi_instances:-1}
 declare     ha_mpi_loads=${ha_mpi_loads="ior simul mdtest"}
 declare -a  ha_mpi_load_tags=($ha_mpi_loads)
 declare -a  ha_mpiusers=(${ha_mpi_users="mpiuser"})
+declare -a  ha_users
+declare -A  ha_mpiopts
+
+for ((i=0; i<${#ha_mpiusers[@]}; i++)); do
+	u=${ha_mpiusers[i]%%:*}
+	o=""
+	# user gets empty option if ha_mpi_users does not specify it explicitly
+	[[ ${ha_mpiusers[i]} =~ : ]] && o=${ha_mpiusers[i]##*:}
+	ha_users[i]=$u
+	ha_mpiopts[$u]+=" $o"
+done
+ha_users=(${!ha_mpiopts[@]})
 
 declare     ha_ior_params=${IORP:-'" -b $ior_blockSize -t 2m -w -W -T 1"'}
 declare     ha_simul_params=${SIMULP:-'" -n 10"'}
@@ -256,15 +275,15 @@ declare -A  ha_nonmpi_load_cmds=(
 
 ha_usage()
 {
-    ha_info "Usage: $0 -c HOST[,...] -s HOST[,...]"                         \
-            "-v HOST[,...] [-d DIRECTORY] [-u SECONDS]"
+	ha_info "Usage: $0 -c HOST[,...] -s HOST[,...]" \
+		"-v HOST[,...] -f HOST[,...] [-d DIRECTORY] [-u SECONDS]"
 }
 
 ha_process_arguments()
 {
     local opt
 
-	while getopts hc:s:v:d:p:u:wrm opt; do
+	while getopts hc:s:v:d:p:u:wrmf: opt; do
         case $opt in
         h)
             ha_usage
@@ -296,6 +315,9 @@ ha_process_arguments()
 		;;
 	m)
 		ha_simultaneous=true
+		;;
+	f)
+		ha_victims_pair=(${OPTARG//,/ })
 		;;
         \?)
             ha_usage
@@ -330,8 +352,8 @@ ha_on()
 	# -S is to be used here to track the
 	# remote command return values
 	#
-	pdsh -S -w $nodes PATH=/usr/local/sbin:/usr/local/bin:/sbin:\
-/bin:/usr/sbin:/usr/bin "$@" ||
+	pdsh -S -w $nodes "PATH=/usr/local/sbin:/usr/local/bin:/sbin:\
+/bin:/usr/sbin:/usr/bin; $@" ||
 		rc=$?
 	return $rc
 }
@@ -422,6 +444,7 @@ ha_repeat_mpi_load()
 	local stripeparams=$6
 	local mpiuser=$7
 	local mustpass=$8
+	local mpirunoptions=$9
 	local tag=${ha_mpi_load_tags[$load]}
 	local cmd=${ha_mpi_load_cmds[$tag]}
 	local dir=$ha_test_dir/$client-$tag
@@ -435,11 +458,12 @@ ha_repeat_mpi_load()
 	cmd=${cmd//"{params}"/$parameter}
 
 	[[ -n "$ha_postcmd" ]] && ha_postcmd=${ha_postcmd//"{}"/$dir}
+	[[ -n "$ha_precmd" ]] && ha_precmd=${ha_precmd//"{}"/$dir}
 	ha_info "Starting $tag"
 
 	machines="-machinefile $machines"
 	while [ ! -e "$ha_stop_file" ] && ((rc == 0)); do
-		ha_info "$client Starts: $cmd" 2>&1 |  tee -a $log
+		ha_info "$client Starts: $mpiuser: $cmd" 2>&1 |  tee -a $log
 		{
 		local mdt_index
 		if $ha_mdt_index_random && [ $ha_mdt_index -ne 0 ]; then
@@ -447,22 +471,24 @@ ha_repeat_mpi_load()
 		else
 			mdt_index=$ha_mdt_index
 		fi
+		[[ -n "$ha_precmd" ]] && ha_info "$ha_precmd" &&
+			ha_on $client "$ha_precmd" >>"$log" 2>&1
 		ha_on $client $LFS mkdir -i$mdt_index -c$ha_dir_stripe_count "$dir" &&
 		ha_on $client $LFS getdirstripe "$dir" &&
 		ha_on $client $LFS setstripe $stripeparams $dir &&
 		ha_on $client $LFS getstripe $dir &&
 		ha_on $client chmod a+xwr $dir &&
-		ha_on $client "su $mpiuser sh -c \" $mpirun $ha_mpirun_options \
+		ha_on $client "su $mpiuser sh -c \" $mpirun $mpirunoptions \
 			-np $((${#ha_clients[@]} * mpi_threads_per_client )) \
 			$machines $cmd \" " || rc=$?
 		[[ -n "$ha_postcmd" ]] && ha_info "$ha_postcmd" &&
-			ha_on $client $ha_postcmd >>"$log" 2>&1
+			ha_on $client "$ha_postcmd" >>"$log" 2>&1
 		(( ((rc == 0)) && (( mustpass != 0 )) )) ||
 		(( ((rc != 0)) && (( mustpass == 0 )) )) &&
 			ha_on $client rm -rf "$dir";
 		} >>"$log" 2>&1 || rc=$?
 
-		ha_info rc=$rc mustpass=$mustpass
+		ha_info $client: rc=$rc mustpass=$mustpass
 
 		# mustpass=0 means that failure is expected
 		if (( rc !=0 )); then
@@ -503,6 +529,7 @@ ha_start_mpi_loads()
 	local m
 	local -a mach
 	local mpiuser
+	local nmpi
 
 	# ha_mpi_instances defines the number of
 	# clients start mpi loads; should be <= ${#ha_clients[@]}
@@ -536,7 +563,8 @@ ha_start_mpi_loads()
 
 	for ((n = 0; n < $inst; n++)); do
 		client=${ha_clients[n]}
-		mpiuser=${ha_mpiusers[$((n % ${#ha_mpiusers[@]}))]}
+		nmpi=$((n % ${#ha_users[@]}))
+		mpiuser=${ha_users[nmpi]}
 		for ((load = 0; load < ${#ha_mpi_load_tags[@]}; load++)); do
 			tag=${ha_mpi_load_tags[$load]}
 			status=$ha_status_file_prefix-$tag-$client
@@ -555,7 +583,8 @@ ha_start_mpi_loads()
 			[[ $ha_ninstmustfail == 0 ]] ||
 				mustpass=$(( n % ha_ninstmustfail ))
 			ha_repeat_mpi_load $client $load $status "$parameter" \
-				$machines "$stripe" "$mpiuser" "$mustpass" &
+				$machines "$stripe" "$mpiuser" "$mustpass" \
+				"${ha_mpiopts[$mpiuser]} $ha_mpirun_options" &
 				ha_status_files+=("$status")
 		done
 	done
@@ -752,7 +781,7 @@ ha_wait_loads()
     local file
     local end=$(($(date +%s) + ha_load_timeout))
 
-    ha_info "Waiting for workload status"
+    ha_info "Waiting $ha_load_timeout sec for workload status..."
     rm -f "${ha_status_files[@]}"
 
 	#
@@ -786,24 +815,139 @@ ha_wait_loads()
 	done
 }
 
+ha_powermanage()
+{
+	local nodes=$1
+	local expected_state=$2
+	local state
+	local -a states
+	local i
+	local rc=0
+
+	# store pm -x -q $nodes results in a file to have
+	# more information about nodes statuses
+	ha_on $ha_pm_host pm -x -q $nodes | awk '{print $2 $3}' > $ha_pm_states
+	rc=${PIPESTATUS[0]}
+	echo pmrc=$rc
+
+	while IFS=": " read node state; do
+		[[ "$state" = "$expected_state" ]] && {
+			nodes=${nodes/$node/}
+			nodes=${nodes//,,/,}
+			nodes=${nodes/#,}
+			nodes=${nodes/%,}
+		}
+	done < $ha_pm_states
+
+	if [ -n "$nodes" ]; then
+		cat $ha_pm_states
+		return 1
+	fi
+	return 0
+}
+
+ha_power_down_cmd_fn()
+{
+	local nodes=$1
+	local cmd
+
+	case $ha_power_down_cmd in
+	# format is: POWER_DOWN=sysrqcrash
+	sysrqcrash) cmd="pdsh -S -w $nodes 'echo c > /proc/sysrq-trigger' &" ;;
+	*) cmd="$ha_power_down_cmd $nodes" ;;
+	esac
+
+	eval $cmd
+}
+
 ha_power_down()
 {
 	local nodes=$1
 	local rc=1
 	local i
+	local state
+
+	case $ha_power_down_cmd in
+		*pm*) state=off ;;
+		sysrqcrash) state=off ;;
+		*) state=on;;
+	esac
 
 	if $ha_lfsck_bg && [[ ${nodes//,/ /} =~ $ha_lfsck_node ]]; then
 		ha_info "$ha_lfsck_node down, delay start LFSCK"
 		ha_lock $ha_lfsck_lock
 	fi
 
-	ha_info "Powering down $nodes"
-	for i in $(seq 1 5); do
-		$ha_power_down_cmd $nodes && rc=0 && break
+	ha_info "Powering down $nodes : cmd: $ha_power_down_cmd"
+	for (( i=0; i<10; i++ )) {
+		ha_info "attempt: $i"
+		ha_power_down_cmd_fn $nodes &&
+			ha_powermanage $nodes $state && rc=0 && break
 		sleep $ha_power_delay
+	}
+
+	[ $rc -eq 0 ] || {
+		ha_info "Failed Powering down in $i attempts:" \
+			"$ha_power_down_cmd"
+		cat $ha_pm_states
+		exit 1
+	}
+}
+
+ha_get_pair()
+{
+	local node=$1
+	local i
+
+	for ((i=0; i<${#ha_victims[@]}; i++)) {
+		[[ ${ha_victims[i]} == $node ]] && echo ${ha_victims_pair[i]} &&
+			return
+	}
+	[[ $i -ne ${#ha_victims[@]} ]] ||
+		ha_error "No pair found!"
+}
+
+ha_power_up_delay()
+{
+	local nodes=$1
+	local end=$(($(date +%s) + ha_node_up_delay))
+	local rc
+
+	if [[ ${#ha_victims_pair[@]} -eq 0 ]]; then
+		ha_sleep $ha_node_up_delay
+		return 0
+	fi
+
+	# Check CRM status on failover pair
+	while (($(date +%s) <= end)); do
+		rc=0
+		for n in ${nodes//,/ }; do
+			local pair=$(ha_get_pair $n)
+			local status=$(ha_on $pair crm_mon -1rQ | \
+				grep -w $n | head -1)
+
+			ha_info "$n pair: $pair status: $status"
+			[[ "$status" == *OFFLINE* ]] ||
+				rc=$((rc + $?))
+			ha_info "rc: $rc"
+		done
+
+		if [[ $rc -eq 0 ]];  then
+			ha_info "CRM: Got all victims status OFFLINE"
+			return 0
+		fi
+		sleep 60
 	done
 
-	[ $rc -eq 0 ] || ha_info "Failed Powering down in $i attempts"
+	ha_info "$nodes CRM status not OFFLINE"
+	for n in ${nodes//,/ }; do
+		local pair=$(ha_get_pair $n)
+
+		ha_info "CRM --- $n"
+		ha_on $pair crm_mon -1rQ
+	done
+	ha_error "CRM: some of $nodes are not OFFLINE in $ha_node_up_delay sec"
+	exit 1
 }
 
 ha_power_up()
@@ -812,13 +956,20 @@ ha_power_up()
 	local rc=1
 	local i
 
-	ha_info "Powering up $nodes"
-	for i in $(seq 1 5); do
-		$ha_power_up_cmd $nodes && rc=0 && break
+	ha_power_up_delay $nodes
+	ha_info "Powering up $nodes : cmd: $ha_power_up_cmd"
+	for (( i=0; i<10; i++ )) {
+		ha_info "attempt: $i"
+		$ha_power_up_cmd $nodes &&
+			ha_powermanage $nodes on && rc=0 && break
 		sleep $ha_power_delay
-	done
+	}
 
-	[ $rc -eq 0 ] || ha_info "Failed Powering up in $i attempts"
+	[ $rc -eq 0 ] || {
+		ha_info "Failed Powering up in $i attempts: $ha_power_up_cmd"
+		cat $ha_pm_states
+		exit 1
+	}
 }
 
 #
@@ -944,7 +1095,17 @@ ha_main()
 		"START: $0: $(date +%H:%M:%S' '%s)"
 	trap ha_trap_exit EXIT
 	mkdir "$ha_tmp_dir"
-	ha_on ${ha_clients[0]} mkdir "$ha_test_dir"
+
+	local mdt_index
+	if $ha_test_dir_mdt_index_random &&
+		[ $ha_test_dir_mdt_index -ne 0 ]; then
+		mdt_index=$(ha_rand $ha_test_dir_mdt_index)
+	else
+		mdt_index=$ha_test_dir_mdt_index
+	fi
+	ha_on ${ha_clients[0]} "$LFS mkdir -i$mdt_index \
+		-c$ha_test_dir_stripe_count $ha_test_dir"
+	ha_on ${ha_clients[0]} $LFS getdirstripe $ha_test_dir
 	ha_on ${ha_clients[0]} " \
 		$LFS setstripe $ha_stripe_params $ha_test_dir"
 

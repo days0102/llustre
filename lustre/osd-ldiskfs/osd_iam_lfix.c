@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * iam_lfix.c
  * implementation of iam format for fixed size records.
@@ -512,7 +511,7 @@ static int iam_lfix_leaf_empty(struct iam_leaf *leaf)
 	return lentry_count_get(leaf) == 0;
 }
 
-static struct iam_leaf_operations iam_lfix_leaf_ops = {
+static const struct iam_leaf_operations iam_lfix_leaf_ops = {
 	.init           = iam_lfix_init,
 	.init_new       = iam_lfix_init_new,
 	.fini           = iam_lfix_fini,
@@ -659,7 +658,7 @@ static struct iam_path_descr *iam_lfix_ipd_alloc(const struct iam_container *c,
 	return iam_ipd_alloc(area, c->ic_descr->id_ikey_size);
 }
 
-static struct iam_operations iam_lfix_ops = {
+static const struct iam_operations iam_lfix_ops = {
 	.id_root_ptr    = iam_lfix_root_ptr,
 	.id_node_read   = iam_node_read,
 	.id_node_init   = iam_lfix_node_init,

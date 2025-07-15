@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/mgs/mgs_llog.c
  *
@@ -1025,10 +1024,19 @@ static int check_markers(struct lustre_cfg *lcfg,
 			LASSERT(!(marker->cm_flags & CM_START) ||
 				!(marker->cm_flags & CM_END));
 			if (marker->cm_flags & CM_START) {
-				mrd->state = REPLACE_UUID;
-				mrd->failover = NULL;
+				if (!strncmp(marker->cm_comment,
+					     "add failnid", 11)) {
+					mrd->state = REPLACE_SKIP;
+				} else {
+					mrd->state = REPLACE_UUID;
+					mrd->failover = NULL;
+				}
 			} else if (marker->cm_flags & CM_END)
 				mrd->state = REPLACE_COPY;
+
+			if (!strncmp(marker->cm_comment,
+				"add failnid", 11))
+				return 1;
 		}
 	}
 
@@ -1140,7 +1148,12 @@ static int process_command(const struct lu_env *env, struct lustre_cfg *lcfg,
 			rc = record_add_uuid(env,
 					     mrd->temp_llh, nid,
 					     mrd->nodeuuid);
-			if (!rc)
+			if (rc)
+				CWARN("%s: Can't add nid %s for uuid %s :rc=%d\n",
+					mrd->target.mti_svname,
+					libcfs_nid2str(nid),
+					mrd->nodeuuid, rc);
+			else
 				nids_added++;
 
 			if (*ptr == ':') {
@@ -1197,6 +1210,10 @@ static int process_command(const struct lu_env *env, struct lustre_cfg *lcfg,
 				rc = record_add_uuid(env, mrd->temp_llh, nid,
 						     mrd->nodeuuid);
 				if (rc) {
+					CWARN("%s: Can't add nid %s for failover %s :rc = %d\n",
+						mrd->target.mti_svname,
+						libcfs_nid2str(nid),
+						mrd->nodeuuid, rc);
 					name_destroy(&mrd->nodeuuid);
 					return rc;
 				}
@@ -1222,6 +1239,11 @@ static int process_command(const struct lu_env *env, struct lustre_cfg *lcfg,
 		mrd->state = REPLACE_DONE;
 		return rc ? rc : 1;
 	}
+
+	/* All new UUID are added. Skip. */
+	if (mrd->state == REPLACE_SETUP &&
+		lcfg->lcfg_command == LCFG_ADD_UUID)
+		return 1;
 
 	/* Another commands in target device block */
 	return 0;
@@ -4480,7 +4502,7 @@ int mgs_list_logs(const struct lu_env *env, struct mgs_device *mgs,
 	struct mgs_direntry	*dirent, *n;
 	char			*out, *suffix, prefix[] = "config_log: ";
 	int			 prefix_len = strlen(prefix);
-	int			 l, remains, start = 0, rc;
+	int			 len, remains, start = 0, rc;
 
 	ENTRY;
 
@@ -4499,8 +4521,8 @@ int mgs_list_logs(const struct lu_env *env, struct mgs_device *mgs,
 		list_del_init(&dirent->mde_list);
 		suffix = strrchr(dirent->mde_name, '-');
 		if (suffix != NULL) {
-			l = prefix_len + dirent->mde_len + 1;
-			if (remains - 1 < 0) {
+			len = prefix_len + dirent->mde_len + 1;
+			if (remains - len < 0) {
 				/* No enough space for this record */
 				mgs_direntry_free(dirent);
 				goto out;
@@ -4508,15 +4530,15 @@ int mgs_list_logs(const struct lu_env *env, struct mgs_device *mgs,
 			start++;
 			if (start < data->ioc_count) {
 				mgs_direntry_free(dirent);
-					continue;
+				continue;
 			}
-			l = scnprintf(out, remains, "%s%s\n", prefix,
-				      dirent->mde_name);
-			out += l;
-			remains -= l;
+			len = scnprintf(out, remains, "%s%s\n", prefix,
+					dirent->mde_name);
+			out += len;
+			remains -= len;
 		}
 		mgs_direntry_free(dirent);
-		if (remains == 0)
+		if (remains <= 1)
 			/* Full */
 			goto out;
 	}
@@ -5241,7 +5263,7 @@ static int mgs_set_conf_param(const struct lu_env *env, struct mgs_device *mgs,
 	mutex_lock(&fsdb->fsdb_mutex);
 	rc = mgs_write_log_param(env, mgs, fsdb, mti, mti->mti_params);
 	mutex_unlock(&fsdb->fsdb_mutex);
-	mgs_revoke_lock(mgs, fsdb, CONFIG_T_CONFIG);
+	mgs_revoke_lock(mgs, fsdb, MGS_CFG_T_CONFIG);
 
 out:
 	if (fsdb)
@@ -5340,7 +5362,7 @@ static int mgs_set_param2(const struct lu_env *env, struct mgs_device *mgs,
 	mutex_lock(&fsdb->fsdb_mutex);
 	rc = mgs_write_log_param2(env, mgs, fsdb, mti, mti->mti_params);
 	mutex_unlock(&fsdb->fsdb_mutex);
-	mgs_revoke_lock(mgs, fsdb, CONFIG_T_PARAMS);
+	mgs_revoke_lock(mgs, fsdb, MGS_CFG_T_PARAMS);
 	mgs_put_fsdb(mgs, fsdb);
 out:
 	RETURN(rc);
@@ -5678,7 +5700,7 @@ int mgs_pool_cmd(const struct lu_env *env, struct mgs_device *mgs,
 	locked = false;
 	name_destroy(&logname);
 	/* request for update */
-	mgs_revoke_lock(mgs, fsdb, CONFIG_T_CONFIG);
+	mgs_revoke_lock(mgs, fsdb, MGS_CFG_T_CONFIG);
 
 	GOTO(out_mti, rc);
 

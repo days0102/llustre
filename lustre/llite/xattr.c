@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #include <linux/fs.h>
@@ -42,7 +41,6 @@
 
 #include <obd_support.h>
 #include <lustre_dlm.h>
-#include <lustre_eacl.h>
 #include <lustre_swab.h>
 
 #include "llite_internal.h"
@@ -86,7 +84,7 @@ static int xattr_type_filter(struct ll_sb_info *sbi,
 		return -EOPNOTSUPP;
 
 	if (handler->flags == XATTR_TRUSTED_T &&
-	    !capable(CFS_CAP_SYS_ADMIN))
+	    !capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
 	return 0;
@@ -147,6 +145,17 @@ static int ll_xattr_set_common(const struct xattr_handler *handler,
 		if (!S_ISREG(inode->i_mode) && !S_ISDIR(inode->i_mode))
 			RETURN(-EPERM);
 	}
+
+	/* Setting LL_XATTR_NAME_ENCRYPTION_CONTEXT xattr is only allowed
+	 * when defining an encryption policy on a directory, ie when it
+	 * comes from ll_set_context().
+	 * When new files/dirs are created in an encrypted dir, the xattr
+	 * is set directly in the create request.
+	 */
+	if (handler->flags == XATTR_SECURITY_T &&
+	    !strcmp(name, "c") &&
+	    !test_and_clear_bit(LLIF_SET_ENC_CTX, &ll_i2info(inode)->lli_flags))
+		RETURN(-EPERM);
 
 	fullname = kasprintf(GFP_KERNEL, "%s%s", xattr_prefix(handler), name);
 	if (!fullname)

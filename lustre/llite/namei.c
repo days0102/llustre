@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #include <linux/fs.h>
@@ -36,7 +35,6 @@
 #include <linux/quotaops.h>
 #include <linux/highmem.h>
 #include <linux/pagemap.h>
-#include <linux/security.h>
 #include <linux/user_namespace.h>
 #include <linux/uidgid.h>
 
@@ -212,6 +210,8 @@ static int ll_dom_lock_cancel(struct inode *inode, struct ldlm_lock *lock)
 	if (IS_ERR(env))
 		RETURN(PTR_ERR(env));
 
+	OBD_FAIL_TIMEOUT(OBD_FAIL_LDLM_REPLAY_PAUSE, cfs_fail_val);
+
 	/* reach MDC layer to flush data under  the DoM ldlm lock */
 	rc = cl_object_flush(env, lli->lli_clob, lock);
 	if (rc == -ENODATA) {
@@ -254,6 +254,7 @@ static void ll_lock_cancel_bits(struct ldlm_lock *lock, __u64 to_cancel)
 		LBUG();
 	}
 
+
 	if (bits & MDS_INODELOCK_XATTR) {
 		ll_xattr_cache_destroy(inode);
 		bits &= ~MDS_INODELOCK_XATTR;
@@ -292,6 +293,22 @@ static void ll_lock_cancel_bits(struct ldlm_lock *lock, __u64 to_cancel)
 		    MDS_INODELOCK_DOM))
 		ll_have_md_lock(inode, &bits, LCK_MINMODE);
 
+	/* root WBC EX lock */
+	if (lock->l_req_mode == LCK_EX && bits & MDS_INODELOCK_UPDATE) {
+		bool cached;
+
+		wbc_inode_lock_callback(inode, lock, &cached);
+
+		/*
+		 * Invalidate the alias dentries of this inode.
+		 * TODO: downgrade the lock mode or drop ibits properly.
+		 */
+		if (cached && !(bits & MDS_INODELOCK_LOOKUP) &&
+		    inode->i_sb->s_root != NULL &&
+		    inode != inode->i_sb->s_root->d_inode)
+			ll_prune_aliases(inode);
+	}
+
 	if (bits & MDS_INODELOCK_DOM) {
 		rc =  ll_dom_lock_cancel(inode, lock);
 		if (rc < 0)
@@ -316,7 +333,7 @@ static void ll_lock_cancel_bits(struct ldlm_lock *lock, __u64 to_cancel)
 	lli = ll_i2info(inode);
 
 	if (bits & MDS_INODELOCK_UPDATE)
-		ll_file_set_flag(lli, LLIF_UPDATE_ATIME);
+		set_bit(LLIF_UPDATE_ATIME, &lli->lli_flags);
 
 	if ((bits & MDS_INODELOCK_UPDATE) && S_ISDIR(inode->i_mode)) {
 		CDEBUG(D_INODE, "invalidating inode "DFID" lli = %p, "
@@ -370,8 +387,7 @@ static void ll_lock_cancel_bits(struct ldlm_lock *lock, __u64 to_cancel)
 	}
 
 	if ((bits & (MDS_INODELOCK_LOOKUP | MDS_INODELOCK_PERM)) &&
-	    inode->i_sb->s_root != NULL &&
-	    inode != inode->i_sb->s_root->d_inode)
+	    !is_root_inode(inode))
 		ll_prune_aliases(inode);
 
 	if (bits & (MDS_INODELOCK_LOOKUP | MDS_INODELOCK_PERM))
@@ -614,6 +630,27 @@ struct dentry *ll_splice_alias(struct inode *inode, struct dentry *de)
 	if (rc < 0)
 		return ERR_PTR(rc);
 	d_add(de, inode);
+
+	/* this needs only to be done for foreign symlink dirs as
+	 * DCACHE_SYMLINK_TYPE is already set by d_flags_for_inode()
+	 * kernel routine for files with symlink ops (ie, real symlink)
+	 */
+	if (inode && S_ISDIR(inode->i_mode) &&
+	    ll_sbi_has_foreign_symlink(ll_i2sbi(inode)) &&
+#ifdef HAVE_IOP_GET_LINK
+	    inode->i_op->get_link) {
+#else
+	    inode->i_op->follow_link) {
+#endif
+		CDEBUG(D_INFO, "%s: inode "DFID": faking foreign dir as a symlink\n",
+		       ll_i2sbi(inode)->ll_fsname, PFID(ll_inode2fid(inode)));
+		spin_lock(&de->d_lock);
+		/* like d_flags_for_inode() already does for files */
+		de->d_flags = (de->d_flags & ~DCACHE_ENTRY_TYPE) |
+			      DCACHE_SYMLINK_TYPE;
+		spin_unlock(&de->d_lock);
+	}
+
 	CDEBUG(D_DENTRY, "Add dentry %p inode %p refc %d flags %#x\n",
 	       de, de->d_inode, ll_d_count(de), de->d_flags);
         return de;
@@ -630,6 +667,7 @@ static int ll_lookup_it_finish(struct ptlrpc_request *request,
 	__u64			  bits = 0;
 	int			  rc;
 	struct dentry *alias;
+
 	ENTRY;
 
 	/* NB 1 request reference will be taken away by ll_intent_lock()
@@ -641,7 +679,7 @@ static int ll_lookup_it_finish(struct ptlrpc_request *request,
 		struct mdt_body *body = req_capsule_server_get(pill,
 							       &RMF_MDT_BODY);
 
-		rc = ll_prep_inode(&inode, request, (*de)->d_sb, it);
+		rc = ll_prep_inode(&inode, &request->rq_pill, (*de)->d_sb, it);
 		if (rc)
 			RETURN(rc);
 
@@ -674,6 +712,8 @@ static int ll_lookup_it_finish(struct ptlrpc_request *request,
 				}
 			}
 		}
+
+		ll_intent_inode_init(parent, inode, it);
 
 		ll_set_lock_data(ll_i2sbi(parent)->ll_md_exp, inode, it, &bits);
 		/* OPEN can return data if lock has DoM+LAYOUT bits set */
@@ -732,8 +772,12 @@ static int ll_lookup_it_finish(struct ptlrpc_request *request,
 	*de = alias;
 
 	if (!it_disposition(it, DISP_LOOKUP_NEG)) {
-		/* we have lookup look - unhide dentry */
-		if (bits & MDS_INODELOCK_LOOKUP)
+		/*
+		 * we have lookup look - unhide dentry, or protected by
+		 * a root WBC EX lock.
+		 */
+		if (bits & MDS_INODELOCK_LOOKUP ||
+		    wbc_inode_has_protected(ll_i2wbci(parent)))
 			d_lustre_revalidate(*de);
 
 		if (encrypt) {
@@ -764,6 +808,11 @@ static int ll_lookup_it_finish(struct ptlrpc_request *request,
 				GOTO(out, rc);
 		}
 
+		/*
+		 * TODO: revalidate the dentry if @parent is under the
+		 * protection of the root WBC EX lock for caching the negative
+		 * dentries.
+		 */
 		if (md_revalidate_lock(ll_i2mdexp(parent), &parent_it, &fid,
 				       NULL)) {
 			d_lustre_revalidate(*de);
@@ -781,7 +830,7 @@ static int ll_lookup_it_finish(struct ptlrpc_request *request,
 out:
 	if (rc != 0 && it->it_op & IT_OPEN) {
 		ll_intent_drop_lock(it);
-		ll_open_cleanup((*de)->d_sb, request);
+		ll_open_cleanup((*de)->d_sb, &request->rq_pill);
 	}
 
 	return rc;
@@ -803,6 +852,7 @@ static struct dentry *ll_lookup_it(struct inode *parent, struct dentry *dentry,
 	__u32 opc;
 	int rc;
 	char secctx_name[XATTR_NAME_MAX + 1];
+	__u64 extra_lock_flags;
 
 	ENTRY;
 
@@ -894,8 +944,6 @@ static struct dentry *ll_lookup_it(struct inode *parent, struct dentry *dentry,
 	}
 
 	if (pca && pca->pca_dataset) {
-		struct pcc_dataset *dataset = pca->pca_dataset;
-
 		OBD_ALLOC_PTR(lum);
 		if (lum == NULL)
 			GOTO(out, retval = ERR_PTR(-ENOMEM));
@@ -904,23 +952,13 @@ static struct dentry *ll_lookup_it(struct inode *parent, struct dentry *dentry,
 		lum->lmm_pattern = LOV_PATTERN_F_RELEASED | LOV_PATTERN_RAID0;
 		op_data->op_data = lum;
 		op_data->op_data_size = sizeof(*lum);
-		op_data->op_archive_id = dataset->pccd_rwid;
-
-		rc = obd_fid_alloc(NULL, ll_i2mdexp(parent), &op_data->op_fid2,
-				   op_data);
-		if (rc)
-			GOTO(out, retval = ERR_PTR(rc));
-
-		rc = pcc_inode_create(parent->i_sb, dataset, &op_data->op_fid2,
-				      &pca->pca_dentry);
-		if (rc)
-			GOTO(out, retval = ERR_PTR(rc));
-
+		op_data->op_archive_id = pca->pca_dataset->pccd_rwid;
 		it->it_flags |= MDS_OPEN_PCC;
 	}
 
+	extra_lock_flags = wbc_intent_lock_flags(ll_i2wbci(parent), it);
 	rc = md_intent_lock(ll_i2mdexp(parent), op_data, it, &req,
-			    &ll_md_blocking_ast, 0);
+			    &ll_md_blocking_ast, extra_lock_flags);
 	/* If the MDS allows the client to chgrp (CFS_SETGRP_PERM), but the
 	 * client does not know which suppgid should be sent to the MDS, or
 	 * some other(s) changed the target file's GID after this RPC sent
@@ -944,11 +982,19 @@ static struct dentry *ll_lookup_it(struct inode *parent, struct dentry *dentry,
 		req = NULL;
 		ll_intent_release(it);
 		rc = md_intent_lock(ll_i2mdexp(parent), op_data, it, &req,
-				    &ll_md_blocking_ast, 0);
+				    &ll_md_blocking_ast, extra_lock_flags);
 	}
 
 	if (rc < 0)
 		GOTO(out, retval = ERR_PTR(rc));
+
+	if (pca && pca->pca_dataset) {
+		rc = pcc_inode_create(parent->i_sb, pca->pca_dataset,
+				      &op_data->op_fid2,
+				      &pca->pca_dentry);
+		if (rc)
+			GOTO(out, retval = ERR_PTR(rc));
+	}
 
 	/* dir layout may change */
 	ll_unlock_md_op_lsm(op_data);
@@ -1026,28 +1072,11 @@ static struct dentry *ll_lookup_nd(struct inode *parent, struct dentry *dentry,
 	if (itp != NULL)
 		ll_intent_release(itp);
 
+	if (IS_ERR(de) && PTR_ERR(de) == -ENOENT && (flags & LOOKUP_CREATE))
+		de = NULL;
+
 	return de;
 }
-
-#ifdef FMODE_CREATED /* added in Linux v4.18-rc1-20-g73a09dd */
-# define ll_is_opened(o, f)		((f)->f_mode & FMODE_OPENED)
-# define ll_finish_open(f, d, o)	finish_open((f), (d), NULL)
-# define ll_last_arg
-# define ll_set_created(o, f)						\
-do {									\
-	(f)->f_mode |= FMODE_CREATED;					\
-} while (0)
-
-#else
-# define ll_is_opened(o, f)		(*(o))
-# define ll_finish_open(f, d, o)	finish_open((f), (d), NULL, (o))
-# define ll_last_arg			, int *opened
-# define ll_set_created(o, f)						\
-do {									\
-	*(o) |= FILE_CREATED;						\
-} while (0)
-
-#endif
 
 /*
  * For cached negative dentry and new dentry, handle lookup/create/open
@@ -1068,6 +1097,7 @@ static int ll_atomic_open(struct inode *dir, struct dentry *dentry,
 	struct pcc_create_attach pca = { NULL, NULL };
 	bool encrypt = false;
 	int rc = 0;
+
 	ENTRY;
 
 	CDEBUG(D_VFSTRACE,
@@ -1137,6 +1167,13 @@ static int ll_atomic_open(struct inode *dir, struct dentry *dentry,
 
 	OBD_FAIL_TIMEOUT(OBD_FAIL_LLITE_CREATE_FILE_PAUSE2, cfs_fail_val);
 
+	/* We can only arrive at this path when we have no inode, so
+	 * we only need to request open lock if it was requested
+	 * for every open
+	 */
+	if (ll_i2sbi(dir)->ll_oc_thrsh_count == 1)
+		it->it_flags |= MDS_OPEN_LOCK;
+
 	/* Dentry added to dcache tree in ll_lookup_it */
 	de = ll_lookup_it(dir, dentry, it, &secctx, &secctxlen, &pca, encrypt,
 			  &encctx, &encctxlen);
@@ -1152,7 +1189,7 @@ static int ll_atomic_open(struct inode *dir, struct dentry *dentry,
 			/* Dentry instantiated in ll_create_it. */
 			rc = ll_create_it(dir, dentry, it, secctx, secctxlen,
 					  encrypt, encctx, encctxlen);
-			security_release_secctx(secctx, secctxlen);
+			ll_security_release_secctx(secctx, secctxlen);
 			llcrypt_free_ctx(encctx, encctxlen);
 			if (rc) {
 				/* We dget in ll_splice_alias. */
@@ -1195,7 +1232,9 @@ static int ll_atomic_open(struct inode *dir, struct dentry *dentry,
 			}
 		}
 
-		if (dentry->d_inode && it_disposition(it, DISP_OPEN_OPEN)) {
+		/* check also if a foreign file is openable */
+		if (dentry->d_inode && it_disposition(it, DISP_OPEN_OPEN) &&
+		    ll_foreign_is_openable(dentry, open_flags)) {
 			/* Open dentry. */
 			if (S_ISFIFO(dentry->d_inode->i_mode)) {
 				/* We cannot call open here as it might
@@ -1238,10 +1277,10 @@ static struct inode *ll_create_node(struct inode *dir, struct lookup_intent *it)
 
 	LASSERT(it_disposition(it, DISP_ENQ_CREATE_REF));
 	request = it->it_request;
-        it_clear_disposition(it, DISP_ENQ_CREATE_REF);
-        rc = ll_prep_inode(&inode, request, dir->i_sb, it);
-        if (rc)
-                GOTO(out, inode = ERR_PTR(rc));
+	it_clear_disposition(it, DISP_ENQ_CREATE_REF);
+	rc = ll_prep_inode(&inode, &request->rq_pill, dir->i_sb, it);
+	if (rc)
+		GOTO(out, inode = ERR_PTR(rc));
 
 	/* Pause to allow for a race with concurrent access by fid */
 	OBD_FAIL_TIMEOUT(OBD_FAIL_LLITE_CREATE_NODE_PAUSE, cfs_fail_val);
@@ -1364,7 +1403,6 @@ static int ll_new_node(struct inode *dir, struct dentry *dchild,
 	if (unlikely(tgt != NULL))
 		tgt_len = strlen(tgt) + 1;
 
-again:
 	op_data = ll_prep_md_op_data(NULL, dir, NULL, name->name,
 				     name->len, 0, opc, NULL);
 	if (IS_ERR(op_data))
@@ -1397,10 +1435,11 @@ again:
 			GOTO(err_exit, err);
 	}
 
+	op_data->op_bias |= wbc_md_op_bias(ll_i2wbci(dir));
 	err = md_create(sbi->ll_md_exp, op_data, tgt, tgt_len, mode,
 			from_kuid(&init_user_ns, current_fsuid()),
 			from_kgid(&init_user_ns, current_fsgid()),
-			cfs_curproc_cap_pack(), rdev, &request);
+			cfs_curproc_cap_pack(), rdev, 0, &request);
 #if LUSTRE_VERSION_CODE < OBD_OCD_VERSION(2, 14, 58, 0)
 	/*
 	 * server < 2.12.58 doesn't pack default LMV in intent_getattr reply,
@@ -1437,6 +1476,10 @@ again:
 			md.default_lmv->lsm_md_master_mdt_index =
 				lum->lum_stripe_offset;
 			md.default_lmv->lsm_md_hash_type = lum->lum_hash_type;
+			md.default_lmv->lsm_md_max_inherit =
+				lum->lum_max_inherit;
+			md.default_lmv->lsm_md_max_inherit_rr =
+				lum->lum_max_inherit_rr;
 
 			err = ll_update_inode(dir, &md);
 			md_free_lustre_md(sbi->ll_md_exp, &md);
@@ -1470,7 +1513,7 @@ again:
 
 	CFS_FAIL_TIMEOUT(OBD_FAIL_LLITE_NEWNODE_PAUSE, cfs_fail_val);
 
-	err = ll_prep_inode(&inode, request, dchild->d_sb, NULL);
+	err = ll_prep_inode(&inode, &request->rq_pill, dchild->d_sb, NULL);
 	if (err)
 		GOTO(err_exit, err);
 
@@ -1489,7 +1532,9 @@ again:
 			GOTO(err_exit, err);
 	}
 
-	d_instantiate(dchild, inode);
+	err = ll_new_inode_init(dir, dchild, inode);
+	if (err)
+		GOTO(err_exit, err);
 
 	if (encrypt) {
 		err = ll_set_encflags(inode, op_data->op_file_encctx,
@@ -1588,6 +1633,7 @@ static int ll_symlink(struct inode *dir, struct dentry *dchild,
 {
 	ktime_t kstart = ktime_get();
 	int err;
+
 	ENTRY;
 
 	CDEBUG(D_VFSTRACE, "VFS Op:name=%pd, dir="DFID"(%p), target=%.*s\n",
@@ -1595,11 +1641,9 @@ static int ll_symlink(struct inode *dir, struct dentry *dchild,
 
 	err = ll_new_node(dir, dchild, oldpath, S_IFLNK | S_IRWXUGO, 0,
 			  LUSTRE_OPC_SYMLINK);
-
 	if (!err)
 		ll_stats_ops_tally(ll_i2sbi(dir), LPROC_LL_SYMLINK,
 				   ktime_us_delta(ktime_get(), kstart));
-
 	RETURN(err);
 }
 
@@ -1645,8 +1689,16 @@ out:
 
 static int ll_mkdir(struct inode *dir, struct dentry *dchild, umode_t mode)
 {
+	struct lookup_intent mkdir_it = { .it_op = IT_CREAT };
+	struct ll_sb_info *sbi = ll_i2sbi(dir);
+	struct ptlrpc_request *request = NULL;
+	struct md_op_data *op_data;
+	struct inode *inode = NULL;
 	ktime_t kstart = ktime_get();
-	int err;
+	bool excl_cache = false;
+	__u64 extra_lock_flags;
+	int rc;
+
 	ENTRY;
 
 	CDEBUG(D_VFSTRACE, "VFS Op:name=%pd, dir="DFID"(%p)\n",
@@ -1655,16 +1707,115 @@ static int ll_mkdir(struct inode *dir, struct dentry *dchild, umode_t mode)
 	if (!IS_POSIXACL(dir) || !exp_connect_umask(ll_i2mdexp(dir)))
 		mode &= ~current_umask();
 
-	mode = (mode & (S_IRWXUGO|S_ISVTX)) | S_IFDIR;
+	/*
+	 * TODO: If not want the granted WBC EX lock to be canceled due to
+	 * aging, the lock should not be put into the LRU list via the flag
+	 * LDLM_FL_NO_LRU.
+	 */
+	excl_cache = wbc_may_exclusive_cache(dir, dchild, mode,
+					     &extra_lock_flags);
 
-	err = ll_new_node(dir, dchild, NULL, mode, 0, LUSTRE_OPC_MKDIR);
-	if (err == 0)
-		ll_stats_ops_tally(ll_i2sbi(dir), LPROC_LL_MKDIR,
+	if (!excl_cache) {
+		mode = (mode & (S_IRWXUGO | S_ISVTX)) | S_IFDIR;
+		rc = ll_new_node(dir, dchild, NULL, mode, 0, LUSTRE_OPC_MKDIR);
+		GOTO(out_stats, rc);
+	}
+
+	mkdir_it.it_create_mode = (mode & (S_IRWXUGO | S_ISVTX)) | S_IFDIR;
+
+	op_data = ll_prep_md_op_data(NULL, dir, NULL, dchild->d_name.name,
+				     dchild->d_name.len, mode, LUSTRE_OPC_MKDIR,
+				     NULL);
+	if (IS_ERR(op_data))
+		RETURN(PTR_ERR(op_data));
+
+	if (extra_lock_flags & LDLM_FL_INTENT_PARENT_LOCKED)
+		op_data->op_bias |= MDS_WBC_LOCKLESS;
+
+	if ((sbi->ll_flags & LL_SBI_FILE_SECCTX) && !excl_cache) {
+		rc = ll_dentry_init_security(dchild, mode, &dchild->d_name,
+					     &op_data->op_file_secctx_name,
+					     &op_data->op_file_secctx,
+					     &op_data->op_file_secctx_size);
+		if (rc < 0)
+			GOTO(out_fini, rc);
+	}
+
+
+	rc = md_intent_lock(sbi->ll_md_exp, op_data, &mkdir_it,
+			    &request, &ll_md_blocking_ast, extra_lock_flags);
+	if (rc)
+		GOTO(out_fini, rc);
+
+	/* dir layout may change */
+	ll_unlock_md_op_lsm(op_data);
+
+	ll_update_times(request, dir);
+
+	CFS_FAIL_TIMEOUT(OBD_FAIL_LLITE_NEWNODE_PAUSE, cfs_fail_val);
+
+	rc = ll_prep_inode(&inode, &request->rq_pill, dchild->d_sb, &mkdir_it);
+	if (rc)
+		GOTO(out_fini, rc);
+
+	if (excl_cache)
+		wbc_intent_inode_init(dir, inode, &mkdir_it);
+
+	if (sbi->ll_flags & LL_SBI_FILE_SECCTX && !excl_cache) {
+		inode_lock(inode);
+		/* must be done before d_instantiate, because it calls
+		 * security_d_instantiate, which means a getxattr if security
+		 * context is not set yet
+		 */
+		rc = security_inode_notifysecctx(inode,
+						 op_data->op_file_secctx,
+						 op_data->op_file_secctx_size);
+		inode_unlock(inode);
+		if (rc)
+			GOTO(out_fini, rc);
+	}
+
+	rc = ll_d_init(dchild);
+	if (rc)
+		GOTO(out_fini, rc);
+
+	if (d_unhashed(dchild))
+		d_add(dchild, inode);
+	else
+		d_instantiate(dchild, inode);
+
+	if (!(sbi->ll_flags & LL_SBI_FILE_SECCTX) && !excl_cache) {
+		rc = ll_inode_init_security(dchild, inode, dir);
+		if (rc)
+			GOTO(out_fini, rc);
+	}
+
+
+	if (mkdir_it.it_lock_mode || excl_cache) {
+		__u64 bits = 0;
+
+		LASSERT(it_disposition(&mkdir_it, DISP_LOOKUP_NEG));
+		ll_set_lock_data(sbi->ll_md_exp, inode, &mkdir_it, &bits);
+		if (bits & MDS_INODELOCK_LOOKUP || excl_cache)
+			d_lustre_revalidate(dchild);
+	}
+
+out_fini:
+	ll_finish_md_op_data(op_data);
+	ll_intent_release(&mkdir_it);
+	ptlrpc_req_finished(request);
+out_stats:
+	if (rc == 0)
+		ll_stats_ops_tally(sbi, LPROC_LL_MKDIR,
 				   ktime_us_delta(ktime_get(), kstart));
 
-	RETURN(err);
+	RETURN(rc);
 }
 
+/*
+ * TODO: Same optimization to unlink() if the inode of @dchild is a root
+ * WBC inode.
+ */
 static int ll_rmdir(struct inode *dir, struct dentry *dchild)
 {
 	struct qstr *name = &dchild->d_name;
@@ -1681,6 +1832,10 @@ static int ll_rmdir(struct inode *dir, struct dentry *dchild)
 	if (unlikely(d_mountpoint(dchild)))
                 RETURN(-EBUSY);
 
+	/* some foreign dir may not be allowed to be removed */
+	if (!ll_foreign_is_removable(dchild, false))
+		RETURN(-EPERM);
+
 	op_data = ll_prep_md_op_data(NULL, dir, NULL, name->name, name->len,
 				     S_IFDIR, LUSTRE_OPC_ANY, NULL);
 	if (IS_ERR(op_data))
@@ -1690,6 +1845,7 @@ static int ll_rmdir(struct inode *dir, struct dentry *dchild)
 		op_data->op_fid3 = *ll_inode2fid(dchild->d_inode);
 
 	op_data->op_fid2 = op_data->op_fid3;
+	op_data->op_bias |= wbc_md_op_bias(ll_i2wbci(dir));
 	rc = md_unlink(ll_i2sbi(dir)->ll_md_exp, op_data, &request);
 	ll_finish_md_op_data(op_data);
 	if (!rc) {
@@ -1704,9 +1860,12 @@ static int ll_rmdir(struct inode *dir, struct dentry *dchild)
 		 * to update the link count so the inode can be freed
 		 * immediately.
 		 */
-		body = req_capsule_server_get(&request->rq_pill, &RMF_MDT_BODY);
-		if (body->mbo_valid & OBD_MD_FLNLINK)
-			set_nlink(dchild->d_inode, body->mbo_nlink);
+		if (!wbc_inode_reserved(ll_i2wbci(dchild->d_inode))) {
+			body = req_capsule_server_get(&request->rq_pill,
+						      &RMF_MDT_BODY);
+			if (body->mbo_valid & OBD_MD_FLNLINK)
+				set_nlink(dchild->d_inode, body->mbo_nlink);
+		}
 	}
 
 	ptlrpc_req_finished(request);
@@ -1745,6 +1904,16 @@ int ll_rmdir_entry(struct inode *dir, char *name, int namelen)
 	RETURN(rc);
 }
 
+/*
+ * TODO: If the inode of @dchild is a root WBC inode, it can be optimized as
+ * follows:
+ * As the inode of @dchild is under the protection of the root WBC EX lock,
+ * thus it can delete the inode from icache and discard all cache pages
+ * directly upon the last unlink, and then cancel the root WBC EX lock via
+ * early lock cancelation (ELC) when send unlink request to MDT; Otherwise,
+ * the blocking callback of the root WBC EX lock will flush all dirty data
+ * to OSTs unnecessaryly.
+ */
 static int ll_unlink(struct inode *dir, struct dentry *dchild)
 {
 	struct qstr *name = &dchild->d_name;
@@ -1766,6 +1935,10 @@ static int ll_unlink(struct inode *dir, struct dentry *dchild)
 	if (unlikely(d_mountpoint(dchild)))
 		RETURN(-EBUSY);
 
+	/* some foreign file/dir may not be allowed to be unlinked */
+	if (!ll_foreign_is_removable(dchild, false))
+		RETURN(-EPERM);
+
 	op_data = ll_prep_md_op_data(NULL, dir, NULL, name->name, name->len, 0,
 				     LUSTRE_OPC_ANY, NULL);
 	if (IS_ERR(op_data))
@@ -1778,18 +1951,22 @@ static int ll_unlink(struct inode *dir, struct dentry *dchild)
 	    dirty_cnt(dchild->d_inode))
 		op_data->op_cli_flags |= CLI_DIRTY_DATA;
 	op_data->op_fid2 = op_data->op_fid3;
+	op_data->op_bias |= wbc_md_op_bias(ll_i2wbci(dir));
 	rc = md_unlink(ll_i2sbi(dir)->ll_md_exp, op_data, &request);
 	ll_finish_md_op_data(op_data);
 	if (rc)
 		GOTO(out, rc);
 
-	/*
-	 * The server puts attributes in on the last unlink, use them to update
-	 * the link count so the inode can be freed immediately.
-	 */
-	body = req_capsule_server_get(&request->rq_pill, &RMF_MDT_BODY);
-	if (body->mbo_valid & OBD_MD_FLNLINK)
-		set_nlink(dchild->d_inode, body->mbo_nlink);
+	if (!wbc_inode_reserved(ll_i2wbci(dchild->d_inode))) {
+		/*
+		 * The server puts attributes in on the last unlink, use them
+		 * to update the link count so the inode can be freed
+		 * immediately.
+		 */
+		body = req_capsule_server_get(&request->rq_pill, &RMF_MDT_BODY);
+		if (body->mbo_valid & OBD_MD_FLNLINK)
+			set_nlink(dchild->d_inode, body->mbo_nlink);
+	}
 
 	ll_update_times(request, dir);
 
@@ -1816,6 +1993,7 @@ static int ll_rename(struct inode *src, struct dentry *src_dchild,
 	ktime_t kstart = ktime_get();
 	umode_t mode = 0;
 	int err;
+
 	ENTRY;
 
 #ifdef HAVE_IOPS_RENAME_WITH_FLAGS

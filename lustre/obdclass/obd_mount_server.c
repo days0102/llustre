@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/obdclass/obd_mount_server.c
  *
@@ -1553,6 +1552,8 @@ static int lsi_prepare(struct lustre_sb_info *lsi)
 	 */
 	lsi->lsi_flags |= (lsi->lsi_lmd->lmd_flags & LMD_FLG_WRITECONF) ?
 		LDD_F_WRITECONF : 0;
+	lsi->lsi_flags |= (lsi->lsi_lmd->lmd_flags & LMD_FLG_NO_LOCAL_LOGS) ?
+		LDD_F_NO_LOCAL_LOGS : 0;
 	lsi->lsi_flags |= (lsi->lsi_lmd->lmd_flags & LMD_FLG_VIRGIN) ?
 		LDD_F_VIRGIN : 0;
 	lsi->lsi_flags |= (lsi->lsi_lmd->lmd_flags & LMD_FLG_UPDATE) ?
@@ -1779,7 +1780,7 @@ int server_show_options(struct seq_file *seq, struct dentry *dentry)
 /** The operations we support directly on the superblock:
  * mount, umount, and df.
  */
-static struct super_operations server_ops = {
+static const struct super_operations server_ops = {
 	.put_super	= server_put_super,
 	.umount_begin	= server_umount_begin, /* umount -f */
 	.statfs		= server_statfs,
@@ -2048,6 +2049,7 @@ out_mnt:
 	server_put_super(sb);
 	return rc;
 }
+EXPORT_SYMBOL(server_fill_super);
 
 /*
  * Calculate timeout value for a target.

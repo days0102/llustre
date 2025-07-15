@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 #define DEBUG_SUBSYSTEM S_LLITE
 
@@ -289,6 +288,14 @@ static ssize_t client_type_show(struct kobject *kobj, struct attribute *attr,
 }
 LUSTRE_RO_ATTR(client_type);
 
+LUSTRE_RW_ATTR(foreign_symlink_enable);
+
+LUSTRE_RW_ATTR(foreign_symlink_prefix);
+
+LUSTRE_RW_ATTR(foreign_symlink_upcall);
+
+LUSTRE_WO_ATTR(foreign_symlink_upcall_info);
+
 static ssize_t fstype_show(struct kobject *kobj, struct attribute *attr,
 			   char *buf)
 {
@@ -450,6 +457,7 @@ static int ll_max_cached_mb_seq_show(struct seq_file *m, void *v)
 	struct super_block     *sb    = m->private;
 	struct ll_sb_info      *sbi   = ll_s2sbi(sb);
 	struct cl_client_cache *cache = sbi->ll_cache;
+	struct ll_ra_info *ra = &sbi->ll_ra_info;
 	long max_cached_mb;
 	long unused_mb;
 
@@ -457,16 +465,21 @@ static int ll_max_cached_mb_seq_show(struct seq_file *m, void *v)
 	max_cached_mb = PAGES_TO_MiB(cache->ccc_lru_max);
 	unused_mb = PAGES_TO_MiB(atomic_long_read(&cache->ccc_lru_left));
 	mutex_unlock(&cache->ccc_max_cache_mb_lock);
+
 	seq_printf(m, "users: %d\n"
 		      "max_cached_mb: %ld\n"
 		      "used_mb: %ld\n"
 		      "unused_mb: %ld\n"
-		      "reclaim_count: %u\n",
+		      "reclaim_count: %u\n"
+		      "max_read_ahead_mb: %lu\n"
+		      "used_read_ahead_mb: %d\n",
 		   atomic_read(&cache->ccc_users),
 		   max_cached_mb,
 		   max_cached_mb - unused_mb,
 		   unused_mb,
-		   cache->ccc_lru_shrinkers);
+		   cache->ccc_lru_shrinkers,
+		   PAGES_TO_MiB(ra->ra_max_pages),
+		   PAGES_TO_MiB(atomic_read(&ra->ra_cur_pages)));
 	return 0;
 }
 
@@ -715,7 +728,7 @@ static ssize_t statahead_running_max_show(struct kobject *kobj,
 	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
 					      ll_kset.kobj);
 
-	return snprintf(buf, 16, "%u\n", sbi->ll_sa_running_max);
+	return scnprintf(buf, PAGE_SIZE, "%u\n", sbi->ll_sa_running_max);
 }
 
 static ssize_t statahead_running_max_store(struct kobject *kobj,
@@ -743,6 +756,42 @@ static ssize_t statahead_running_max_store(struct kobject *kobj,
 	return -ERANGE;
 }
 LUSTRE_RW_ATTR(statahead_running_max);
+
+static ssize_t statahead_batch_max_show(struct kobject *kobj,
+					struct attribute *attr,
+					char *buf)
+{
+	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
+					      ll_kset.kobj);
+
+	return snprintf(buf, 16, "%u\n", sbi->ll_sa_batch_max);
+}
+
+static ssize_t statahead_batch_max_store(struct kobject *kobj,
+					 struct attribute *attr,
+					 const char *buffer,
+					 size_t count)
+{
+	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
+					      ll_kset.kobj);
+	unsigned long val;
+	int rc;
+
+	rc = kstrtoul(buffer, 0, &val);
+	if (rc)
+		return rc;
+
+	if (val <= LL_SA_BATCH_MAX) {
+		sbi->ll_sa_batch_max = val;
+		return count;
+	}
+
+	CERROR("Bad statahead_batch_max value %lu. Valid values "
+	       "are in the range [0, %d]\n", val, LL_SA_BATCH_MAX);
+
+	return -ERANGE;
+}
+LUSTRE_RW_ATTR(statahead_batch_max);
 
 static ssize_t statahead_max_show(struct kobject *kobj,
 				  struct attribute *attr,
@@ -866,7 +915,7 @@ static ssize_t statfs_max_age_show(struct kobject *kobj, struct attribute *attr,
 	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
 					      ll_kset.kobj);
 
-	return snprintf(buf, PAGE_SIZE, "%u\n", sbi->ll_statfs_max_age);
+	return scnprintf(buf, PAGE_SIZE, "%u\n", sbi->ll_statfs_max_age);
 }
 
 static ssize_t statfs_max_age_store(struct kobject *kobj,
@@ -904,8 +953,8 @@ static ssize_t max_easize_show(struct kobject *kobj,
 		return rc;
 
 	/* Limit xattr size returned to userspace based on kernel maximum */
-	return snprintf(buf, PAGE_SIZE, "%u\n",
-			ealen > XATTR_SIZE_MAX ? XATTR_SIZE_MAX : ealen);
+	return scnprintf(buf, PAGE_SIZE, "%u\n",
+			 ealen > XATTR_SIZE_MAX ? XATTR_SIZE_MAX : ealen);
 }
 LUSTRE_RO_ATTR(max_easize);
 
@@ -934,8 +983,8 @@ static ssize_t default_easize_show(struct kobject *kobj,
 		return rc;
 
 	/* Limit xattr size returned to userspace based on kernel maximum */
-	return snprintf(buf, PAGE_SIZE, "%u\n",
-			ealen > XATTR_SIZE_MAX ? XATTR_SIZE_MAX : ealen);
+	return scnprintf(buf, PAGE_SIZE, "%u\n",
+			 ealen > XATTR_SIZE_MAX ? XATTR_SIZE_MAX : ealen);
 }
 
 /**
@@ -981,7 +1030,7 @@ LUSTRE_RW_ATTR(default_easize);
 
 static int ll_sbi_flags_seq_show(struct seq_file *m, void *v)
 {
-	const char *str[] = LL_SBI_FLAGS;
+	const char *const str[] = LL_SBI_FLAGS;
 	struct super_block *sb = m->private;
 	int flags = ll_s2sbi(sb)->ll_flags;
 	int i = 0;
@@ -1080,8 +1129,8 @@ static ssize_t max_read_ahead_async_active_show(struct kobject *kobj,
 	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
 					      ll_kset.kobj);
 
-	return snprintf(buf, PAGE_SIZE, "%u\n",
-			sbi->ll_ra_info.ra_async_max_active);
+	return scnprintf(buf, PAGE_SIZE, "%u\n",
+			 sbi->ll_ra_info.ra_async_max_active);
 }
 
 static ssize_t max_read_ahead_async_active_store(struct kobject *kobj,
@@ -1125,8 +1174,8 @@ static ssize_t read_ahead_async_file_threshold_mb_show(struct kobject *kobj,
 	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
 					      ll_kset.kobj);
 
-	return snprintf(buf, PAGE_SIZE, "%lu\n",
-	     PAGES_TO_MiB(sbi->ll_ra_info.ra_async_pages_per_file_threshold));
+	return scnprintf(buf, PAGE_SIZE, "%lu\n", PAGES_TO_MiB(
+			 sbi->ll_ra_info.ra_async_pages_per_file_threshold));
 }
 
 static ssize_t
@@ -1246,8 +1295,8 @@ static ssize_t file_heat_show(struct kobject *kobj,
 	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
 					      ll_kset.kobj);
 
-	return snprintf(buf, PAGE_SIZE, "%u\n",
-			!!(sbi->ll_flags & LL_SBI_FILE_HEAT));
+	return scnprintf(buf, PAGE_SIZE, "%u\n",
+			 !!(sbi->ll_flags & LL_SBI_FILE_HEAT));
 }
 
 static ssize_t file_heat_store(struct kobject *kobj,
@@ -1282,8 +1331,8 @@ static ssize_t heat_decay_percentage_show(struct kobject *kobj,
 	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
 					      ll_kset.kobj);
 
-	return snprintf(buf, PAGE_SIZE, "%u\n",
-		       (sbi->ll_heat_decay_weight * 100 + 128) / 256);
+	return scnprintf(buf, PAGE_SIZE, "%u\n",
+			 (sbi->ll_heat_decay_weight * 100 + 128) / 256);
 }
 
 static ssize_t heat_decay_percentage_store(struct kobject *kobj,
@@ -1316,7 +1365,7 @@ static ssize_t heat_period_second_show(struct kobject *kobj,
 	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
 					      ll_kset.kobj);
 
-	return snprintf(buf, PAGE_SIZE, "%u\n", sbi->ll_heat_period_second);
+	return scnprintf(buf, PAGE_SIZE, "%u\n", sbi->ll_heat_period_second);
 }
 
 static ssize_t heat_period_second_store(struct kobject *kobj,
@@ -1341,6 +1390,105 @@ static ssize_t heat_period_second_store(struct kobject *kobj,
 	return count;
 }
 LUSTRE_RW_ATTR(heat_period_second);
+
+static ssize_t opencache_threshold_count_show(struct kobject *kobj,
+					      struct attribute *attr,
+					      char *buf)
+{
+	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
+					      ll_kset.kobj);
+
+	if (sbi->ll_oc_thrsh_count)
+		return snprintf(buf, PAGE_SIZE, "%u\n",
+				sbi->ll_oc_thrsh_count);
+	else
+		return snprintf(buf, PAGE_SIZE, "off\n");
+}
+
+static ssize_t opencache_threshold_count_store(struct kobject *kobj,
+					       struct attribute *attr,
+					       const char *buffer,
+					       size_t count)
+{
+	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
+					      ll_kset.kobj);
+	unsigned int val;
+	int rc;
+
+	rc = kstrtouint(buffer, 10, &val);
+	if (rc) {
+		bool enable;
+		/* also accept "off" to disable and "on" to always cache */
+		rc = kstrtobool(buffer, &enable);
+		if (rc)
+			return rc;
+		val = enable;
+	}
+	sbi->ll_oc_thrsh_count = val;
+
+	return count;
+}
+LUSTRE_RW_ATTR(opencache_threshold_count);
+
+static ssize_t opencache_threshold_ms_show(struct kobject *kobj,
+					   struct attribute *attr,
+					   char *buf)
+{
+	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
+					      ll_kset.kobj);
+
+	return snprintf(buf, PAGE_SIZE, "%u\n", sbi->ll_oc_thrsh_ms);
+}
+
+static ssize_t opencache_threshold_ms_store(struct kobject *kobj,
+					    struct attribute *attr,
+					    const char *buffer,
+					    size_t count)
+{
+	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
+					      ll_kset.kobj);
+	unsigned int val;
+	int rc;
+
+	rc = kstrtouint(buffer, 10, &val);
+	if (rc)
+		return rc;
+
+	sbi->ll_oc_thrsh_ms = val;
+
+	return count;
+}
+LUSTRE_RW_ATTR(opencache_threshold_ms);
+
+static ssize_t opencache_max_ms_show(struct kobject *kobj,
+				     struct attribute *attr,
+				     char *buf)
+{
+	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
+					      ll_kset.kobj);
+
+	return snprintf(buf, PAGE_SIZE, "%u\n", sbi->ll_oc_max_ms);
+}
+
+static ssize_t opencache_max_ms_store(struct kobject *kobj,
+				      struct attribute *attr,
+				      const char *buffer,
+				      size_t count)
+{
+	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
+					      ll_kset.kobj);
+	unsigned int val;
+	int rc;
+
+	rc = kstrtouint(buffer, 10, &val);
+	if (rc)
+		return rc;
+
+	sbi->ll_oc_max_ms = val;
+
+	return count;
+}
+LUSTRE_RW_ATTR(opencache_max_ms);
 
 static int ll_unstable_stats_seq_show(struct seq_file *m, void *v)
 {
@@ -1529,6 +1677,10 @@ static struct attribute *llite_attrs[] = {
 	&lustre_attr_filestotal.attr,
 	&lustre_attr_filesfree.attr,
 	&lustre_attr_client_type.attr,
+	&lustre_attr_foreign_symlink_enable.attr,
+	&lustre_attr_foreign_symlink_prefix.attr,
+	&lustre_attr_foreign_symlink_upcall.attr,
+	&lustre_attr_foreign_symlink_upcall_info.attr,
 	&lustre_attr_fstype.attr,
 	&lustre_attr_uuid.attr,
 	&lustre_attr_checksums.attr,
@@ -1543,6 +1695,7 @@ static struct attribute *llite_attrs[] = {
 	&lustre_attr_stats_track_ppid.attr,
 	&lustre_attr_stats_track_gid.attr,
 	&lustre_attr_statahead_running_max.attr,
+	&lustre_attr_statahead_batch_max.attr,
 	&lustre_attr_statahead_max.attr,
 	&lustre_attr_statahead_agl.attr,
 	&lustre_attr_lazystatfs.attr,
@@ -1555,6 +1708,9 @@ static struct attribute *llite_attrs[] = {
 	&lustre_attr_file_heat.attr,
 	&lustre_attr_heat_decay_percentage.attr,
 	&lustre_attr_heat_period_second.attr,
+	&lustre_attr_opencache_threshold_count.attr,
+	&lustre_attr_opencache_threshold_ms.attr,
+	&lustre_attr_opencache_max_ms.attr,
 	NULL,
 };
 
@@ -1590,6 +1746,10 @@ static const struct llite_file_opcode {
 	{ LPROC_LL_LLSEEK,	LPROCFS_TYPE_LATENCY,	"seek" },
 	{ LPROC_LL_FSYNC,	LPROCFS_TYPE_LATENCY,	"fsync" },
 	{ LPROC_LL_READDIR,	LPROCFS_TYPE_LATENCY,	"readdir" },
+	{ LPROC_LL_INODE_OCOUNT,LPROCFS_TYPE_REQS |
+				LPROCFS_CNTR_AVGMINMAX |
+				LPROCFS_CNTR_STDDEV,	"opencount" },
+	{ LPROC_LL_INODE_OPCLTM,LPROCFS_TYPE_LATENCY,	"openclosetime" },
 	/* inode operation */
 	{ LPROC_LL_SETATTR,	LPROCFS_TYPE_LATENCY,	"setattr" },
 	{ LPROC_LL_TRUNC,	LPROCFS_TYPE_LATENCY,	"truncate" },
@@ -1635,23 +1795,23 @@ void ll_stats_ops_tally(struct ll_sb_info *sbi, int op, long count)
 }
 EXPORT_SYMBOL(ll_stats_ops_tally);
 
-static const char *ra_stat_string[] = {
-	[RA_STAT_HIT] = "hits",
-	[RA_STAT_MISS] = "misses",
-	[RA_STAT_DISTANT_READPAGE] = "readpage not consecutive",
-	[RA_STAT_MISS_IN_WINDOW] = "miss inside window",
-	[RA_STAT_FAILED_GRAB_PAGE] = "failed grab_cache_page",
-	[RA_STAT_FAILED_MATCH] = "failed lock match",
-	[RA_STAT_DISCARDED] = "read but discarded",
-	[RA_STAT_ZERO_LEN] = "zero length file",
-	[RA_STAT_ZERO_WINDOW] = "zero size window",
-	[RA_STAT_EOF] = "read-ahead to EOF",
-	[RA_STAT_MAX_IN_FLIGHT] = "hit max r-a issue",
-	[RA_STAT_WRONG_GRAB_PAGE] = "wrong page from grab_cache_page",
-	[RA_STAT_FAILED_REACH_END] = "failed to reach end",
-	[RA_STAT_ASYNC] = "async readahead",
-	[RA_STAT_FAILED_FAST_READ] = "failed to fast read",
-	[RA_STAT_MMAP_RANGE_READ] = "mmap range read",
+static const char *const ra_stat_string[] = {
+	[RA_STAT_HIT]			= "hits",
+	[RA_STAT_MISS]			= "misses",
+	[RA_STAT_DISTANT_READPAGE]	= "readpage_not_consecutive",
+	[RA_STAT_MISS_IN_WINDOW]	= "miss_inside_window",
+	[RA_STAT_FAILED_GRAB_PAGE]	= "failed_grab_cache_page",
+	[RA_STAT_FAILED_MATCH]		= "failed_lock_match",
+	[RA_STAT_DISCARDED]		= "read_but_discarded",
+	[RA_STAT_ZERO_LEN]		= "zero_length_file",
+	[RA_STAT_ZERO_WINDOW]		= "zero_size_window",
+	[RA_STAT_EOF]			= "readahead_to_eof",
+	[RA_STAT_MAX_IN_FLIGHT]		= "hit_max_readahead_issue",
+	[RA_STAT_WRONG_GRAB_PAGE]	= "wrong_page_from_grab_cache_page",
+	[RA_STAT_FAILED_REACH_END]	= "failed_to_reach_end",
+	[RA_STAT_ASYNC]			= "async_readahead",
+	[RA_STAT_FAILED_FAST_READ]	= "failed_to_fast_read",
+	[RA_STAT_MMAP_RANGE_READ]	= "mmap_range_read",
 };
 
 int ll_debugfs_register_super(struct super_block *sb, const char *name)
@@ -1681,6 +1841,8 @@ int ll_debugfs_register_super(struct super_block *sb, const char *name)
 
 	debugfs_create_file("offset_stats", 0644, sbi->ll_debugfs_entry, sbi,
 			    &ll_rw_offset_stats_fops);
+
+	wbc_tunables_init(sb);
 
 	/* File operations stats */
 	sbi->ll_stats = lprocfs_alloc_stats(LPROC_LL_FILE_OPCODES,
@@ -1750,6 +1912,7 @@ void ll_debugfs_unregister_super(struct super_block *sb)
 	struct lustre_sb_info *lsi = s2lsi(sb);
 	struct ll_sb_info *sbi = ll_s2sbi(sb);
 
+	wbc_tunables_fini(sb);
 	debugfs_remove_recursive(sbi->ll_debugfs_entry);
 
 	if (sbi->ll_dt_obd)

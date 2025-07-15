@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 /* Intramodule declarations for ptlrpc. */
@@ -36,6 +35,7 @@
 #define PTLRPC_INTERNAL_H
 
 #include "../ldlm/ldlm_internal.h"
+#include "heap.h"
 
 struct ldlm_namespace;
 struct obd_import;
@@ -45,13 +45,13 @@ extern int test_req_buffer_pressure;
 extern struct list_head ptlrpc_all_services;
 extern struct mutex ptlrpc_all_services_mutex;
 extern struct ptlrpc_nrs_pol_conf nrs_conf_fifo;
+extern struct ptlrpc_nrs_pol_conf nrs_conf_delay;
 
 #ifdef HAVE_SERVER_SUPPORT
 extern struct ptlrpc_nrs_pol_conf nrs_conf_crrn;
 extern struct ptlrpc_nrs_pol_conf nrs_conf_orr;
 extern struct ptlrpc_nrs_pol_conf nrs_conf_trr;
 extern struct ptlrpc_nrs_pol_conf nrs_conf_tbf;
-extern struct ptlrpc_nrs_pol_conf nrs_conf_delay;
 #endif /* HAVE_SERVER_SUPPORT */
 
 /**
@@ -66,7 +66,6 @@ extern struct mutex pinger_mutex;
 extern lnet_handler_t ptlrpc_handler;
 extern struct percpu_ref ptlrpc_pending;
 
-int ptlrpc_start_thread(struct ptlrpc_service_part *svcpt, int wait);
 /* ptlrpcd.c */
 int ptlrpcd_start(struct ptlrpcd_ctl *pc);
 
@@ -88,7 +87,7 @@ void ptlrpc_set_add_new_req(struct ptlrpcd_ctl *pc,
 void ptlrpc_expired_set(struct ptlrpc_request_set *set);
 time64_t ptlrpc_set_next_timeout(struct ptlrpc_request_set *);
 void ptlrpc_resend_req(struct ptlrpc_request *request);
-void ptlrpc_set_bulk_mbits(struct ptlrpc_request *req);
+void ptlrpc_set_mbits(struct ptlrpc_request *req);
 void ptlrpc_assign_next_xid_nolock(struct ptlrpc_request *req);
 __u64 ptlrpc_known_replied_xid(struct obd_import *imp);
 void ptlrpc_add_unreplied(struct ptlrpc_request *req);

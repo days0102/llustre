@@ -392,8 +392,8 @@ struct qmt_pool_info *qmt_pool_lookup(const struct lu_env *env,
 		RETURN(ERR_PTR(-ENOENT));
 	}
 
-	CDEBUG(D_QUOTA, "type %d name %p index %d\n",
-	       rtype, pool_name, idx);
+	CDEBUG(D_QUOTA, "type %d name %s index %d\n",
+	       rtype, pool_name ?: "<none>", idx);
 	/* Now just find a pool with correct type in a list. Further we need
 	 * to go through the list and find a pool that includes requested OST
 	 * or MDT. Possibly this would return a list of pools that includes
@@ -845,9 +845,14 @@ out:
 static int lqes_cmp(const void *arg1, const void *arg2)
 {
 	const struct lquota_entry *lqe1, *lqe2;
+
 	lqe1 = *(const struct lquota_entry **)arg1;
 	lqe2 = *(const struct lquota_entry **)arg2;
-	return lqe1->lqe_qunit - lqe2->lqe_qunit;
+	if (lqe1->lqe_qunit > lqe2->lqe_qunit)
+		return 1;
+	if (lqe1->lqe_qunit < lqe2->lqe_qunit)
+		return -1;
+	return 0;
 }
 
 void qmt_lqes_sort(const struct lu_env *env)
@@ -1505,7 +1510,7 @@ static inline int qmt_sarr_pool_init(struct qmt_pool_info *qpi)
 
 	switch (qpi->qpi_rtype) {
 	case LQUOTA_RES_DT:
-		return tgt_pool_init(&qpi->qpi_sarr.osts, 0);
+		return lu_tgt_pool_init(&qpi->qpi_sarr.osts, 0);
 	case LQUOTA_RES_MD:
 	default:
 		return 0;
@@ -1516,7 +1521,7 @@ static inline int qmt_sarr_pool_add(struct qmt_pool_info *qpi, int idx, int min)
 {
 	switch (qpi->qpi_rtype) {
 	case LQUOTA_RES_DT:
-		return tgt_pool_add(&qpi->qpi_sarr.osts, idx, min);
+		return lu_tgt_pool_add(&qpi->qpi_sarr.osts, idx, min);
 	case LQUOTA_RES_MD:
 	default:
 		return 0;
@@ -1527,7 +1532,7 @@ static inline int qmt_sarr_pool_rem(struct qmt_pool_info *qpi, int idx)
 {
 	switch (qpi->qpi_rtype) {
 	case LQUOTA_RES_DT:
-		return tgt_pool_remove(&qpi->qpi_sarr.osts, idx);
+		return lu_tgt_pool_remove(&qpi->qpi_sarr.osts, idx);
 	case LQUOTA_RES_MD:
 	default:
 		return 0;
@@ -1543,7 +1548,7 @@ static inline int qmt_sarr_pool_free(struct qmt_pool_info *qpi)
 	case LQUOTA_RES_DT:
 		if (!qpi->qpi_sarr.osts.op_array)
 			return 0;
-		return tgt_pool_free(&qpi->qpi_sarr.osts);
+		return lu_tgt_pool_free(&qpi->qpi_sarr.osts);
 	case LQUOTA_RES_MD:
 	default:
 		return 0;
@@ -1557,14 +1562,14 @@ static inline int qmt_sarr_check_idx(struct qmt_pool_info *qpi, int idx)
 
 	switch (qpi->qpi_rtype) {
 	case LQUOTA_RES_DT:
-		return tgt_check_index(idx, &qpi->qpi_sarr.osts);
+		return lu_tgt_check_index(idx, &qpi->qpi_sarr.osts);
 	case LQUOTA_RES_MD:
 	default:
 		return 0;
 	}
 }
 
-inline struct rw_semaphore *qmt_sarr_rwsem(struct qmt_pool_info *qpi)
+struct rw_semaphore *qmt_sarr_rwsem(struct qmt_pool_info *qpi)
 {
 	switch (qpi->qpi_rtype) {
 	case LQUOTA_RES_DT:
@@ -1576,7 +1581,7 @@ inline struct rw_semaphore *qmt_sarr_rwsem(struct qmt_pool_info *qpi)
 	}
 }
 
-inline int qmt_sarr_get_idx(struct qmt_pool_info *qpi, int arr_idx)
+int qmt_sarr_get_idx(struct qmt_pool_info *qpi, int arr_idx)
 {
 
 	if (qmt_pool_global(qpi))
@@ -1595,7 +1600,7 @@ inline int qmt_sarr_get_idx(struct qmt_pool_info *qpi, int arr_idx)
 }
 
 /* Number of slaves in a pool */
-inline unsigned int qmt_sarr_count(struct qmt_pool_info *qpi)
+unsigned int qmt_sarr_count(struct qmt_pool_info *qpi)
 {
 	switch (qpi->qpi_rtype) {
 	case LQUOTA_RES_DT:

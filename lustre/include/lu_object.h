@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #ifndef __LUSTRE_LU_OBJECT_H
@@ -40,7 +39,6 @@
 #include <linux/percpu_counter.h>
 #include <linux/rhashtable.h>
 #include <linux/ctype.h>
-#include <obd_target.h>
 
 struct seq_file;
 struct proc_dir_entry;
@@ -934,6 +932,7 @@ enum lu_xattr_flags {
 	LU_XATTR_CREATE  = BIT(1),
 	LU_XATTR_MERGE   = BIT(2),
 	LU_XATTR_SPLIT   = BIT(3),
+	LU_XATTR_PURGE   = BIT(4),
 };
 
 /** @} helpers */
@@ -1519,6 +1518,32 @@ static inline bool lu_object_is_cl(const struct lu_object *o)
 	return lu_device_is_cl(o->lo_dev);
 }
 
+/* Generic subset of tgts */
+struct lu_tgt_pool {
+	__u32		   *op_array;	/* array of index of
+					 * lov_obd->lov_tgts
+					 */
+	unsigned int	    op_count;	/* number of tgts in the array */
+	unsigned int	    op_size;	/* allocated size of op_array */
+	struct rw_semaphore op_rw_sem;	/* to protect lu_tgt_pool use */
+};
+
+int lu_tgt_pool_init(struct lu_tgt_pool *op, unsigned int count);
+int lu_tgt_pool_add(struct lu_tgt_pool *op, __u32 idx, unsigned int min_count);
+int lu_tgt_pool_remove(struct lu_tgt_pool *op, __u32 idx);
+int lu_tgt_pool_free(struct lu_tgt_pool *op);
+int lu_tgt_check_index(int idx, struct lu_tgt_pool *osts);
+int lu_tgt_pool_extend(struct lu_tgt_pool *op, unsigned int min_count);
+
+/* bitflags used in rr / qos allocation */
+enum lq_flag {
+	LQ_DIRTY	= 0, /* recalc qos data */
+	LQ_SAME_SPACE,	     /* the OSTs all have approx.
+			      * the same space avail */
+	LQ_RESET,	     /* zero current penalties */
+};
+
+#ifdef HAVE_SERVER_SUPPORT
 /* round-robin QoS data for LOD/LMV */
 struct lu_qos_rr {
 	spinlock_t		 lqr_alloc;	/* protect allocation index */
@@ -1526,8 +1551,16 @@ struct lu_qos_rr {
 	__u32			 lqr_offset_idx;/* aliasing for start_idx */
 	int			 lqr_start_count;/* reseed counter */
 	struct lu_tgt_pool	 lqr_pool;	/* round-robin optimized list */
-	unsigned long		 lqr_dirty:1;	/* recalc round-robin list */
+	unsigned long		 lqr_flags;
 };
+
+static inline void lu_qos_rr_init(struct lu_qos_rr *lqr)
+{
+	spin_lock_init(&lqr->lqr_alloc);
+	set_bit(LQ_DIRTY, &lqr->lqr_flags);
+}
+
+#endif /* HAVE_SERVER_SUPPORT */
 
 /* QoS data per MDS/OSS */
 struct lu_svr_qos {
@@ -1555,6 +1588,12 @@ struct lu_tgt_qos {
 };
 
 /* target descriptor */
+#define LOV_QOS_DEF_THRESHOLD_RR_PCT	17
+#define LMV_QOS_DEF_THRESHOLD_RR_PCT	5
+
+#define LOV_QOS_DEF_PRIO_FREE		90
+#define LMV_QOS_DEF_PRIO_FREE		90
+
 struct lu_tgt_desc {
 	union {
 		struct dt_device	*ltd_tgt;
@@ -1577,10 +1616,10 @@ struct lu_tgt_desc {
 			   ltd_connecting:1; /* target is connecting */
 };
 
-/* number of pointers at 1st level */
-#define TGT_PTRS		(PAGE_SIZE / sizeof(void *))
 /* number of pointers at 2nd level */
 #define TGT_PTRS_PER_BLOCK	(PAGE_SIZE / sizeof(void *))
+/* number of pointers at 1st level - only need as many as max OST/MDT count */
+#define TGT_PTRS		((LOV_ALL_STRIPES + 1) / TGT_PTRS_PER_BLOCK)
 
 struct lu_tgt_desc_idx {
 	struct lu_tgt_desc *ldi_tgt[TGT_PTRS_PER_BLOCK];
@@ -1593,11 +1632,16 @@ struct lu_qos {
 	__u32			 lq_active_svr_count;
 	unsigned int		 lq_prio_free;   /* priority for free space */
 	unsigned int		 lq_threshold_rr;/* priority for rr */
+#ifdef HAVE_SERVER_SUPPORT
 	struct lu_qos_rr	 lq_rr;          /* round robin qos data */
+#endif
+	unsigned long		 lq_flags;
+#if 0
 	unsigned long		 lq_dirty:1,     /* recalc qos data */
 				 lq_same_space:1,/* the servers all have approx.
 						  * the same space avail */
 				 lq_reset:1;     /* zero current penalties */
+#endif
 };
 
 struct lu_tgt_descs {
@@ -1628,11 +1672,10 @@ struct lu_tgt_descs {
 };
 
 #define LTD_TGT(ltd, index)						\
-	 (ltd)->ltd_tgt_idx[(index) /					\
-	 TGT_PTRS_PER_BLOCK]->ldi_tgt[(index) % TGT_PTRS_PER_BLOCK]
+	 (ltd)->ltd_tgt_idx[(index) / TGT_PTRS_PER_BLOCK]->		\
+		ldi_tgt[(index) % TGT_PTRS_PER_BLOCK]
 
 u64 lu_prandom_u64_max(u64 ep_ro);
-void lu_qos_rr_init(struct lu_qos_rr *lqr);
 int lu_qos_add_tgt(struct lu_qos *qos, struct lu_tgt_desc *ltd);
 void lu_tgt_qos_weight_calc(struct lu_tgt_desc *tgt);
 
@@ -1640,10 +1683,32 @@ int lu_tgt_descs_init(struct lu_tgt_descs *ltd, bool is_mdt);
 void lu_tgt_descs_fini(struct lu_tgt_descs *ltd);
 int ltd_add_tgt(struct lu_tgt_descs *ltd, struct lu_tgt_desc *tgt);
 void ltd_del_tgt(struct lu_tgt_descs *ltd, struct lu_tgt_desc *tgt);
-bool ltd_qos_is_usable(struct lu_tgt_descs *ltd);
 int ltd_qos_penalties_calc(struct lu_tgt_descs *ltd);
 int ltd_qos_update(struct lu_tgt_descs *ltd, struct lu_tgt_desc *tgt,
 		   __u64 *total_wt);
+
+/**
+ * Whether MDT inode and space usages are balanced.
+ */
+static inline bool ltd_qos_is_balanced(struct lu_tgt_descs *ltd)
+{
+	return !test_bit(LQ_DIRTY, &ltd->ltd_qos.lq_flags) &&
+	       test_bit(LQ_SAME_SPACE, &ltd->ltd_qos.lq_flags);
+}
+
+/**
+ * Whether QoS data is up-to-date and QoS can be applied.
+ */
+static inline bool ltd_qos_is_usable(struct lu_tgt_descs *ltd)
+{
+	if (ltd_qos_is_balanced(ltd))
+		return false;
+
+	if (ltd->ltd_lov_desc.ld_active_tgt_count < 2)
+		return false;
+
+	return true;
+}
 
 static inline struct lu_tgt_desc *ltd_first_tgt(struct lu_tgt_descs *ltd)
 {

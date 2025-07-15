@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 #define DEBUG_SUBSYSTEM S_CLASS
 
@@ -57,6 +56,7 @@ static ssize_t active_store(struct kobject *kobj, struct attribute *attr,
 {
 	struct obd_device *obd = container_of(kobj, struct obd_device,
 					      obd_kset.kobj);
+	struct obd_import *imp, *imp0;
 	bool val;
 	int rc;
 
@@ -64,14 +64,18 @@ static ssize_t active_store(struct kobject *kobj, struct attribute *attr,
 	if (rc)
 		return rc;
 
+	with_imp_locked(obd, imp0, rc)
+		imp = class_import_get(imp0);
+	if (rc)
+		return rc;
 	/* opposite senses */
-	if (obd->u.cli.cl_import->imp_deactive == val)
-		rc = ptlrpc_set_import_active(obd->u.cli.cl_import, val);
+	if (imp->imp_deactive == val)
+		rc = ptlrpc_set_import_active(imp, val);
 	else
 		CDEBUG(D_CONFIG, "activate %u: ignoring repeat request\n",
 		       val);
-
-	return count;
+	class_import_put(imp);
+	return rc ?: count;
 }
 LUSTRE_RW_ATTR(active);
 
@@ -541,6 +545,50 @@ static int mdc_rpc_stats_seq_show(struct seq_file *seq, void *v)
 }
 LPROC_SEQ_FOPS(mdc_rpc_stats);
 
+static ssize_t mdc_batch_stats_seq_write(struct file *file,
+					 const char __user *buf,
+					 size_t len, loff_t *off)
+{
+	struct seq_file *seq = file->private_data;
+	struct obd_device *obd = seq->private;
+	struct client_obd *cli = &obd->u.cli;
+
+	lprocfs_oh_clear(&cli->cl_batch_rpc_hist);
+
+	return len;
+}
+
+static int mdc_batch_stats_seq_show(struct seq_file *seq, void *v)
+{
+	struct obd_device *obd = seq->private;
+	struct client_obd *cli = &obd->u.cli;
+	struct timespec64 now;
+	unsigned long tot;
+	unsigned long cum;
+	int i;
+
+	ktime_get_real_ts64(&now);
+	seq_printf(seq, "snapshot_time:         %llu.%9lu (secs.nsecs)\n",
+		   (s64)now.tv_sec, now.tv_nsec);
+
+	seq_printf(seq, "subreqs per batch   batchs   %% cum %%\n");
+	tot = lprocfs_oh_sum(&cli->cl_batch_rpc_hist);
+	cum = 0;
+
+	for (i = 0; i < OBD_HIST_MAX; i++) {
+		unsigned long cnt = cli->cl_batch_rpc_hist.oh_buckets[i];
+
+		cum += cnt;
+		seq_printf(seq, "%d:\t\t%10lu %3u %3u\n",
+			   1 << i, cnt, pct(cnt, tot), pct(cum, tot));
+		if (cum == tot)
+			break;
+	}
+
+	return 0;
+}
+LPROC_SEQ_FOPS(mdc_batch_stats);
+
 static int mdc_stats_seq_show(struct seq_file *seq, void *v)
 {
 	struct timespec64 now;
@@ -634,6 +682,8 @@ struct lprocfs_vars lprocfs_mdc_obd_vars[] = {
 	  .fops	=	&mdc_pinger_recov_fops		},
 	{ .name	=	"rpc_stats",
 	  .fops	=	&mdc_rpc_stats_fops		},
+	{ .name	=	"batch_stats",
+	  .fops	=	&mdc_batch_stats_fops		},
 	{ .name	=	"unstable_stats",
 	  .fops	=	&mdc_unstable_stats_fops	},
 	{ .name	=	"mdc_stats",

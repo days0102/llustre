@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/ofd/ofd_dev.c
  *
@@ -507,7 +506,7 @@ static int ofd_object_print(const struct lu_env *env, void *cookie,
 	return (*p)(env, cookie, LUSTRE_OST_NAME"-object@%p", o);
 }
 
-static struct lu_object_operations ofd_obj_ops = {
+static const struct lu_object_operations ofd_obj_ops = {
 	.loo_object_init	= ofd_object_init,
 	.loo_object_free	= ofd_object_free,
 	.loo_object_print	= ofd_object_print
@@ -703,7 +702,7 @@ static int ofd_recovery_complete(const struct lu_env *env,
 /**
  * lu_device_operations matrix for OFD device.
  */
-static struct lu_device_operations ofd_lu_ops = {
+static const struct lu_device_operations ofd_lu_ops = {
 	.ldo_object_alloc	= ofd_object_alloc,
 	.ldo_process_config	= ofd_process_config,
 	.ldo_recovery_complete	= ofd_recovery_complete,
@@ -1664,18 +1663,12 @@ static int ofd_create_hdl(struct tgt_session_info *tsi)
 		 * (possibly filling the OST), only precreate the last batch.
 		 * LFSCK will eventually clean up any orphans. LU-14 */
 		if (diff > 5 * OST_MAX_PRECREATE) {
+			/* Message below is checked in conf-sanity test_122b */
+			LCONSOLE_WARN("%s: precreate FID "DOSTID" is over %lld higher than LAST_ID "DOSTID", only precreating the last %u objects. OST replaced or reformatted?\n",
+				      ofd_name(ofd), POSTID(&oa->o_oi), diff,
+				      POSTID(&oseq->os_oi),
+				      OST_MAX_PRECREATE / 2);
 			diff = OST_MAX_PRECREATE / 2;
-			LCONSOLE_WARN("%s: Too many FIDs to precreate "
-				      "OST replaced or reformatted: "
-				      "LFSCK will clean up",
-				      ofd_name(ofd));
-
-			CDEBUG(D_HA, "%s: precreate FID "DOSTID" is over "
-			       "%u larger than the LAST_ID "DOSTID", only "
-			       "precreating the last %lld objects.\n",
-			       ofd_name(ofd), POSTID(&oa->o_oi),
-			       5 * OST_MAX_PRECREATE,
-			       POSTID(&oseq->os_oi), diff);
 			ofd_seq_last_oid_set(oseq, ostid_id(&oa->o_oi) - diff);
 		}
 
@@ -1969,15 +1962,29 @@ static int ofd_fallocate_hdl(struct tgt_session_info *tsi)
 	 * fallocate start and end are passed in o_size, o_blocks
 	 * on the wire.
 	 */
+	if ((oa->o_valid & (OBD_MD_FLSIZE | OBD_MD_FLBLOCKS)) !=
+	    (OBD_MD_FLSIZE | OBD_MD_FLBLOCKS))
+		RETURN(err_serious(-EPROTO));
+
 	start = oa->o_size;
 	end = oa->o_blocks;
 	mode = oa->o_falloc_mode;
 	/*
-	 * Only mode == 0 (which is standard prealloc) is supported now.
-	 * Punch is not supported yet.
+	 * mode == 0 (which is standard prealloc) and PUNCH is supported
+	 * Rest of mode options are not supported yet.
 	 */
-	if (mode & ~FALLOC_FL_KEEP_SIZE)
+	if (mode & ~(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE))
 		RETURN(-EOPNOTSUPP);
+
+	/* PUNCH_HOLE mode should always be accompanied with KEEP_SIZE flag
+	 * Check that and add the missing flag for such invalid call with
+	 * warning.
+	 */
+	if (mode & FALLOC_FL_PUNCH_HOLE && !(mode & FALLOC_FL_KEEP_SIZE)) {
+		CWARN("%s: PUNCH mode misses KEEP_SIZE flag, setting it\n",
+		      tsi->tsi_tgt->lut_obd->obd_name);
+		mode |= FALLOC_FL_KEEP_SIZE;
+	}
 
 	repbody->oa.o_oi = oa->o_oi;
 	repbody->oa.o_valid = OBD_MD_FLID;
@@ -2959,7 +2966,6 @@ static int ofd_init0(const struct lu_env *env, struct ofd_device *m,
 	m->ofd_soft_sync_limit = OFD_SOFT_SYNC_LIMIT_DEFAULT;
 
 	m->ofd_seq_count = 0;
-	init_waitqueue_head(&m->ofd_inconsistency_thread.t_ctl_waitq);
 	INIT_LIST_HEAD(&m->ofd_inconsistency_list);
 	spin_lock_init(&m->ofd_inconsistency_lock);
 
@@ -3008,8 +3014,13 @@ static int ofd_init0(const struct lu_env *env, struct ofd_device *m,
 					      LDLM_NAMESPACE_SERVER,
 					      LDLM_NAMESPACE_GREEDY,
 					      LDLM_NS_TYPE_OST);
-	if (m->ofd_namespace == NULL)
-		GOTO(err_fini_stack, rc = -ENOMEM);
+	if (IS_ERR(m->ofd_namespace)) {
+		rc = PTR_ERR(m->ofd_namespace);
+		CERROR("%s: unable to create server namespace: rc = %d\n",
+		       obd->obd_name, rc);
+		m->ofd_namespace = NULL;
+		GOTO(err_fini_stack, rc);
+	}
 	/* set obd_namespace for compatibility with old code */
 	obd->obd_namespace = m->ofd_namespace;
 	ldlm_register_intent(m->ofd_namespace, ofd_intent_policy);
@@ -3221,7 +3232,7 @@ static struct lu_device *ofd_device_alloc(const struct lu_env *env,
 /* type constructor/destructor: ofd_type_init(), ofd_type_fini() */
 LU_TYPE_INIT_FINI(ofd, &ofd_thread_key);
 
-static struct lu_device_type_operations ofd_device_type_ops = {
+static const struct lu_device_type_operations ofd_device_type_ops = {
 	.ldto_init		= ofd_type_init,
 	.ldto_fini		= ofd_type_fini,
 
@@ -3261,7 +3272,7 @@ static int __init ofd_init(void)
 	if (rc)
 		goto out_caches;
 
-	rc = class_register_type(&ofd_obd_ops, NULL, true, NULL,
+	rc = class_register_type(&ofd_obd_ops, NULL, true,
 				 LUSTRE_OST_NAME, &ofd_device_type);
 	if (rc)
 		goto out_ofd_access_log;

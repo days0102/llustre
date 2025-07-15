@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/include/lprocfs_status.h
  *
@@ -47,6 +46,7 @@
 #include <linux/seq_file.h>
 
 #include <libcfs/libcfs.h>
+#include <libcfs/linux/linux-fs.h>
 #include <uapi/linux/lustre/lustre_idl.h>
 
 /*
@@ -318,6 +318,7 @@ static inline int opcode_offset(__u32 opc) {
                         OPC_RANGE(LDLM) +
                         OPC_RANGE(MDS) +
                         OPC_RANGE(OST));
+#ifdef HAVE_SERVER_SUPPORT
 	} else if (opc < OUT_UPDATE_LAST_OPC) {
 		/* update opcode */
 		return (opc - OUT_UPDATE_FIRST_OPC +
@@ -345,25 +346,31 @@ static inline int opcode_offset(__u32 opc) {
 			OPC_RANGE(LDLM) +
 			OPC_RANGE(MDS) +
 			OPC_RANGE(OST));
+#endif /* HAVE_SERVER_SUPPORT */
 	} else {
 		/* Unknown Opcode */
 		return -1;
 	}
 }
 
+#define LUSTRE_MAX_OPCODES_CLIENT (OPC_RANGE(OST)  + \
+				   OPC_RANGE(MDS)  + \
+				   OPC_RANGE(LDLM) + \
+				   OPC_RANGE(MGS)  + \
+				   OPC_RANGE(OBD)  + \
+				   OPC_RANGE(LLOG) + \
+				   OPC_RANGE(SEC)  + \
+				   OPC_RANGE(SEQ)  + \
+				   OPC_RANGE(SEC)  + \
+				   OPC_RANGE(FLD))
 
-#define LUSTRE_MAX_OPCODES (OPC_RANGE(OST)  + \
-                            OPC_RANGE(MDS)  + \
-                            OPC_RANGE(LDLM) + \
-                            OPC_RANGE(MGS)  + \
-                            OPC_RANGE(OBD)  + \
-                            OPC_RANGE(LLOG) + \
-                            OPC_RANGE(SEC)  + \
-                            OPC_RANGE(SEQ)  + \
-                            OPC_RANGE(SEC)  + \
-			    OPC_RANGE(FLD)  + \
+#ifdef HAVE_SERVER_SUPPORT
+#define LUSTRE_MAX_OPCODES (LUSTRE_MAX_OPCODES_CLIENT + \
 			    OPC_RANGE(OUT_UPDATE) + \
 			    OPC_RANGE(LFSCK))
+#else
+#define LUSTRE_MAX_OPCODES LUSTRE_MAX_OPCODES_CLIENT
+#endif
 
 #define EXTRA_MAX_OPCODES ((PTLRPC_LAST_CNTR - PTLRPC_FIRST_CNTR)  + \
                             OPC_RANGE(EXTRA))
@@ -556,9 +563,6 @@ extern void lprocfs_remove_proc_entry(const char *name,
                                       struct proc_dir_entry *parent);
 extern int lprocfs_obd_setup(struct obd_device *obd, bool uuid_only);
 extern int lprocfs_obd_cleanup(struct obd_device *obd);
-#ifdef HAVE_SERVER_SUPPORT
-extern const struct file_operations lprocfs_evict_client_fops;
-#endif
 
 extern int lprocfs_seq_create(struct proc_dir_entry *parent, const char *name,
 			      mode_t mode,
@@ -651,13 +655,21 @@ extern int lprocfs_seq_release(struct inode *, struct file *);
 
 /* You must use these macros when you want to refer to
  * the import in a client obd_device for a lprocfs entry
+ * Note that it is not safe to 'goto', 'return' or 'break'
+ * out of the body of this statement.  It *IS* safe to
+ * 'goto' the a label inside the statement, or to 'continue'
+ * to get out of the statement.
  */
-#define with_imp_locked(__obd, __imp, __rc)				\
-	for (down_read(&(__obd)->u.cli.cl_sem),				\
+
+#define with_imp_locked_nested(__obd, __imp, __rc, __nest)		\
+	for (down_read_nested(&(__obd)->u.cli.cl_sem, __nest),		\
 	     __imp = (__obd)->u.cli.cl_import,				\
 	     __rc = __imp ? 0 : -ENODEV;				\
 	     __imp ? 1 : (up_read(&(__obd)->u.cli.cl_sem), 0);		\
 	     __imp = NULL)
+
+#define with_imp_locked(__obd, __imp, __rc)	\
+	with_imp_locked_nested(__obd, __imp, __rc, 0)
 
 /* write the name##_seq_show function, call LDEBUGFS_SEQ_FOPS_RO for read-only
  * debugfs entries; otherwise, you will define name##_seq_write function also

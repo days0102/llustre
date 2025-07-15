@@ -293,6 +293,8 @@ init_test_env() {
 	fi
 	export RSYNC_RSH=${RSYNC_RSH:-rsh}
 
+	export LNETCTL=${LNETCTL:-"$LUSTRE/../lnet/utils/lnetctl"}
+	[ ! -f "$LNETCTL" ] && export LNETCTL=$(which lnetctl 2> /dev/null)
 	export LCTL=${LCTL:-"$LUSTRE/utils/lctl"}
 	[ ! -f "$LCTL" ] && export LCTL=$(which lctl)
 	export LFS=${LFS:-"$LUSTRE/utils/lfs"}
@@ -821,9 +823,7 @@ check_mem_leak () {
 	fi
 }
 
-unload_modules() {
-	wait_exit_ST client # bug 12845
-
+unload_modules_local() {
 	$LUSTRE_RMMOD ldiskfs || return 2
 
 	[ -f /etc/udev/rules.d/99-lustre-test.rules ] &&
@@ -831,15 +831,23 @@ unload_modules() {
 	udevadm control --reload-rules
 	udevadm trigger
 
+	check_mem_leak || return 254
+
+	return 0
+}
+
+unload_modules() {
+	local rc=0
+
+	wait_exit_ST client # bug 12845
+
+	unload_modules_local || rc=$?
+
 	if $LOAD_MODULES_REMOTE; then
 		local list=$(comma_list $(remote_nodes_list))
 		if [ -n "$list" ]; then
 			echo "unloading modules on: '$list'"
-			do_rpc_nodes "$list" $LUSTRE_RMMOD ldiskfs
-			do_rpc_nodes "$list" check_mem_leak
-			do_rpc_nodes "$list" "rm -f /etc/udev/rules.d/99-lustre-test.rules"
-			do_rpc_nodes "$list" "udevadm control --reload-rules"
-			do_rpc_nodes "$list" "udevadm trigger"
+			do_rpc_nodes "$list" unload_modules_local
 		fi
 	fi
 
@@ -850,10 +858,9 @@ unload_modules() {
 			rm -f $sbin_mount
 	fi
 
-	check_mem_leak || return 254
+	[[ $rc -eq 0 ]] && echo "modules unloaded."
 
-	echo "modules unloaded."
-	return 0
+	return $rc
 }
 
 fs_log_size() {
@@ -6796,7 +6803,7 @@ host_id() {
 # Description:
 #   Returns list of ip addresses for each interface
 local_addr_list() {
-	ip addr | awk '/inet\ / {print $2}' | awk -F\/ '{print $1}'
+	ip addr | awk '/inet / {print $2}' | awk -F/ '{print $1}'
 }
 
 is_local_addr() {
@@ -7169,35 +7176,46 @@ add_user() {
 }
 
 check_runas_id_ret() {
-    local myRC=0
-    local myRUNAS_UID=$1
-    local myRUNAS_GID=$2
-    shift 2
-    local myRUNAS=$@
-    if [ -z "$myRUNAS" ]; then
-        error_exit "myRUNAS command must be specified for check_runas_id"
-    fi
-    if $GSS_KRB5; then
-        $myRUNAS krb5_login.sh || \
-            error "Failed to refresh Kerberos V5 TGT for UID $myRUNAS_ID."
-    fi
-    mkdir $DIR/d0_runas_test
-    chmod 0755 $DIR
-    chown $myRUNAS_UID:$myRUNAS_GID $DIR/d0_runas_test
-    $myRUNAS touch $DIR/d0_runas_test/f$$ || myRC=$?
-    rm -rf $DIR/d0_runas_test
-    return $myRC
+	local myRC=0
+	local myRUNAS_UID=$1
+	local myRUNAS_GID=$2
+	shift 2
+	local myRUNAS=$@
+
+	if [ -z "$myRUNAS" ]; then
+		error_exit "check_runas_id_ret requires myRUNAS argument"
+	fi
+
+	$myRUNAS true ||
+		error "Unable to execute $myRUNAS"
+
+	id $myRUNAS_UID > /dev/null ||
+		error "Invalid RUNAS_ID $myRUNAS_UID. Please set RUNAS_ID to " \
+		      "some UID which exists on MDS and client or add user " \
+		      "$myRUNAS_UID:$myRUNAS_GID on these nodes."
+
+	if $GSS_KRB5; then
+		$myRUNAS krb5_login.sh ||
+			error "Failed to refresh krb5 TGT for UID $myRUNAS_ID."
+	fi
+	mkdir $DIR/d0_runas_test
+	chmod 0755 $DIR
+	chown $myRUNAS_UID:$myRUNAS_GID $DIR/d0_runas_test
+	$myRUNAS -u $myRUNAS_UID -g $myRUNAS_GID touch $DIR/d0_runas_test/f$$ ||
+		myRC=$?
+	rm -rf $DIR/d0_runas_test
+	return $myRC
 }
 
 check_runas_id() {
-    local myRUNAS_UID=$1
-    local myRUNAS_GID=$2
-    shift 2
-    local myRUNAS=$@
-    check_runas_id_ret $myRUNAS_UID $myRUNAS_GID $myRUNAS || \
-        error "unable to write to $DIR/d0_runas_test as UID $myRUNAS_UID.
-        Please set RUNAS_ID to some UID which exists on MDS and client or
-        add user $myRUNAS_UID:$myRUNAS_GID on these nodes."
+	local myRUNAS_UID=$1
+	local myRUNAS_GID=$2
+	shift 2
+	local myRUNAS=$@
+
+	check_runas_id_ret $myRUNAS_UID $myRUNAS_GID $myRUNAS || \
+		error "unable to write to $DIR/d0_runas_test as " \
+		      "UID $myRUNAS_UID."
 }
 
 # obtain the UID/GID for MPI_USER
@@ -7558,8 +7576,9 @@ _wait_osc_import_state() {
 		params=$param
 	fi
 
+	local plist=$(comma_list $params)
 	if ! do_rpc_nodes "$(facet_active_host $facet)" \
-			wait_import_state $expected "$params" $maxtime; then
+			wait_import_state $expected $plist $maxtime; then
 		error "$facet: import is not in $expected state after $maxtime"
 		return 1
 	fi
@@ -7614,8 +7633,9 @@ _wait_mgc_import_state() {
 			params=$($LCTL list_param $param 2>/dev/null || true)
 		done
 	fi
+	local plist=$(comma_list $params)
 	if ! do_rpc_nodes "$(facet_active_host $facet)" \
-			wait_import_state $expected "$params" $maxtime \
+			wait_import_state $expected $plist $maxtime \
 					  $error_on_failure; then
 		if [ $error_on_failure -ne 0 ]; then
 		    error "import is not in ${expected} state"
@@ -7947,8 +7967,11 @@ gather_logs () {
 	fi
 
 	if [ ! -f $LOGDIR/shared ]; then
-		do_nodes $list rsync -az "${prefix}.*.${suffix}" \
-			 $HOSTNAME:$LOGDIR
+		local remote_nodes=$(exclude_items_from_list $list $HOSTNAME)
+
+		for node in ${remote_nodes//,/ }; do
+			rsync -az -e ssh $node:${prefix}.'*'.${suffix} $LOGDIR &
+		done
 	fi
 }
 
@@ -9005,8 +9028,18 @@ pool_add_targets() {
 	fi
 
 	local t=$(for i in $list; do printf "$FSNAME-OST%04x_UUID " $i; done)
+	local tg=$(for i in $list;
+		do printf -- "-e $FSNAME-OST%04x_UUID " $i; done)
+	local firstx=$(printf "%04x" $first)
+	local lastx=$(printf "%04x" $last)
+
 	do_facet mgs $LCTL pool_add \
-			$FSNAME.$pool $FSNAME-OST[$first-$last/$step]
+		$FSNAME.$pool $FSNAME-OST[$firstx-$lastx/$step]
+	# ignore EEXIST(17)
+	if (( $? != 0 && $? != 17 )); then
+		error_noexit "pool_add $FSNAME-OST[$firstx-$lastx/$step] failed"
+		return 3
+	fi
 
 	# wait for OSTs to be added to the pool
 	for mds_id in $(seq $MDSCOUNT); do
@@ -9014,22 +9047,15 @@ pool_add_targets() {
 		local lodname=$FSNAME-MDT$(printf "%04x" $mdt_id)-mdtlov
 		wait_update_facet mds$mds_id \
 			"lctl get_param -n lod.$lodname.pools.$pool |
-				sort -u | tr '\n' ' ' " "$t" || {
+				grep $tg | sort -u | tr '\n' ' '" "$t" || {
 			error_noexit "mds$mds_id: Add to pool failed"
-			return 3
+			return 2
 		}
 	done
-	wait_update $HOSTNAME "lctl get_param -n lov.$FSNAME-*.pools.$pool \
-			| sort -u | tr '\n' ' ' " "$t" || {
+	wait_update $HOSTNAME "lctl get_param -n lov.$FSNAME-*.pools.$pool |
+			grep $tg | sort -u | tr '\n' ' ' " "$t" || {
 		error_noexit "Add to pool failed"
 		return 1
-	}
-	local lfscount=$($LFS pool_list $FSNAME.$pool | grep -c "\-OST")
-	local addcount=$(((last - first) / step + 1))
-	[ $lfscount -eq $addcount ] || {
-		error_noexit "lfs pool_list bad ost count" \
-						"$lfscount != $addcount"
-		return 2
 	}
 }
 
@@ -9553,14 +9579,17 @@ check_clients_evicted() {
 	local rc=0
 
 	for osc in $oscs; do
-		((rc++))
 		echo "Check state for $osc"
 		local evicted=$(do_facet client $LCTL get_param osc.$osc.state |
-			tail -n 3 | awk -F"[ [,]" \
-			'/EVICTED ]$/ { if (mx<$5) {mx=$5;} } END { print mx }')
+			tail -n 5 | awk -F"[ ,]" \
+			'/EVICTED/ { if (mx<$4) { mx=$4; } } END { print mx }')
 		if (($? == 0)) && (($evicted > $before)); then
 			echo "$osc is evicted at $evicted"
-			((rc--))
+		else
+			((rc++))
+			echo "$osc was not evicted after $before:"
+			do_facet client $LCTL get_param osc.$osc.state |
+				tail -n 8
 		fi
 	done
 
@@ -10087,6 +10116,7 @@ init_agt_vars() {
 	export HSMTOOL_UPDATE_INTERVAL=${HSMTOOL_UPDATE_INTERVAL:=""}
 	export HSMTOOL_EVENT_FIFO=${HSMTOOL_EVENT_FIFO:=""}
 	export HSMTOOL_TESTDIR
+	export HSMTOOL_ARCHIVE_FORMAT=${HSMTOOL_ARCHIVE_FORMAT:-v2}
 
 	if ! [[ $HSMTOOL =~ hsmtool ]]; then
 		echo "HSMTOOL = '$HSMTOOL' does not contain 'hsmtool', GLWT" >&2
@@ -10178,27 +10208,27 @@ copytool_logfile()
 
 __lhsmtool_rebind()
 {
-	do_facet $facet $HSMTOOL -p "$hsm_root" --rebind "$@" "$mountpoint"
+	do_facet $facet $HSMTOOL "${hsmtool_options[@]}" --rebind "$@" "$mountpoint"
 }
 
 __lhsmtool_import()
 {
 	mkdir -p "$(dirname "$2")" ||
 		error "cannot create directory '$(dirname "$2")'"
-	do_facet $facet $HSMTOOL -p "$hsm_root" --import "$@" "$mountpoint"
+	do_facet $facet $HSMTOOL "${hsmtool_options[@]}" --import "$@" "$mountpoint"
 }
 
 __lhsmtool_setup()
 {
 	local host="$(facet_host "$facet")"
-	local cmd="$HSMTOOL $HSMTOOL_VERBOSE --daemon --pid-file=$HSMTOOL_PID_FILE --hsm-root \"$hsm_root\""
+	local cmd="$HSMTOOL ${hsmtool_options[@]} --daemon --pid-file=$HSMTOOL_PID_FILE"
 	[ -n "$bandwidth" ] && cmd+=" --bandwidth $bandwidth"
 	[ -n "$archive_id" ] && cmd+=" --archive $archive_id"
-	[ ${#misc_options[@]} -gt 0 ] &&
-		cmd+=" $(IFS=" " echo "$@")"
-	cmd+=" \"$mountpoint\""
+#	[ ${#misc_options[@]} -gt 0 ] &&
+#		cmd+=" $(IFS=" " echo "$@")"
+	cmd+=" $@ \"$mountpoint\""
 
-	echo "Starting copytool '$facet' on '$host'"
+	echo "Starting copytool '$facet' on '$host' with cmdline '$cmd'"
 	stack_trap "pkill_copytools $host TERM || true" EXIT
 	do_node "$host" "$cmd < /dev/null > \"$(copytool_logfile $facet)\" 2>&1"
 }
@@ -10233,7 +10263,17 @@ copytool()
 
 	# Parse arguments
 	local fail_on_error=true
-	local -a misc_options
+	local -a hsmtool_options=("--hsm-root=$hsm_root")
+	local -a action_options=()
+
+	if [[ -n "$HSMTOOL_ARCHIVE_FORMAT" ]]; then
+		hsmtool_options+=("--archive-format=$HSMTOOL_ARCHIVE_FORMAT")
+	fi
+
+	if [[ -n "$HSMTOOL_VERBOSE" ]]; then
+		hsmtool_options+=("$HSMTOOL_VERBOSE")
+	fi
+
 	while [ $# -gt 0 ]; do
 		case "$1" in
 		-f|--facet)
@@ -10261,7 +10301,7 @@ copytool()
 			;;
 		*)
 			# Uncommon(/copytool dependent) option
-			misc_options+=("$1")
+			action_options+=("$1")
 			;;
 		esac
 		shift
@@ -10277,7 +10317,7 @@ copytool()
 		;;
 	esac
 
-	__${copytool}_${action} "${misc_options[@]}"
+	__${copytool}_${action} "${action_options[@]}"
 	if [ $? -ne 0 ]; then
 		local error_msg
 
@@ -10287,8 +10327,8 @@ copytool()
 			error_msg="Failed to start copytool $facet on '$host'"
 			;;
 		import)
-			local src="${misc_options[0]}"
-			local dest="${misc_options[1]}"
+			local src="${action_options[0]}"
+			local dest="${action_options[1]}"
 			error_msg="Failed to import '$src' to '$dest'"
 			;;
 		rebind)
@@ -10588,3 +10628,85 @@ function check_set_fallocate_or_skip()
 	check_set_fallocate || skip "need at least 2.13.57 for fallocate"
 }
 
+function disable_opencache()
+{
+	local state=$($LCTL get_param -n "llite.*.opencache_threshold_count" | head -1)
+
+	test -z "${saved_OPENCACHE_value}" &&
+					export saved_OPENCACHE_value="$state"
+
+	[[ "$state" = "off" ]] && return
+
+	$LCTL set_param -n "llite.*.opencache_threshold_count"=off
+}
+
+function set_opencache()
+{
+	local newvalue="$1"
+	local state=$($LCTL get_param -n "llite.*.opencache_threshold_count")
+
+	[[ -n "$newvalue" ]] || return
+
+	[[ -n "${saved_OPENCACHE_value}" ]] ||
+					export saved_OPENCACHE_value="$state"
+
+	$LCTL set_param -n "llite.*.opencache_threshold_count"=$newvalue
+}
+
+
+
+function restore_opencache()
+{
+	[[ -z "${saved_OPENCACHE_value}" ]] ||
+		$LCTL set_param -n "llite.*.opencache_threshold_count"=${saved_OPENCACHE_value}
+}
+
+cleanup_pcc_mapping() {
+	local facet=${1:-$SINGLEAGT}
+
+	echo "Cleanup PCC backend on $MOUNT"
+	do_facet $facet $LCTL pcc clear $MOUNT
+}
+
+setup_pcc_mapping() {
+	local facet=${1:-$SINGLEAGT}
+	local hsm_root=${hsm_root:-$(hsm_root "$facet")}
+	local param="$2"
+
+	[ -z "$param" ] && param="projid={100}\ rwid=$HSM_ARCHIVE_NUMBER"
+	stack_trap "cleanup_pcc_mapping $facet" EXIT
+	do_facet $facet $LCTL pcc add $MOUNT $hsm_root -p "$param" ||
+		error "Setup PCC backend $hsm_root on $MOUNT failed"
+}
+
+umount_loopdev() {
+	local facet=$1
+	local mntpt=$2
+	local rc
+
+	do_facet $facet lsof $mntpt || true
+	do_facet $facet $UMOUNT $mntpt
+	rc=$?
+	return $rc
+}
+
+setup_loopdev() {
+	local facet=$1
+	local file=$2
+	local mntpt=$3
+	local size=${4:-50}
+
+	do_facet $facet mkdir -p $mntpt || error "mkdir -p $mntpt failed"
+	stack_trap "do_facet $facet rmdir $mntpt" EXIT
+	do_facet $facet dd if=/dev/zero of=$file bs=1M count=$size
+	stack_trap "do_facet $facet rm -f $file" EXIT
+	do_facet $facet mount
+	do_facet $facet $UMOUNT $mntpt
+	do_facet $facet mount
+	do_facet $facet mkfs.ext4 $file ||
+		error "mkfs.ext4 $file failed"
+	do_facet $facet file $file
+	do_facet $facet mount -t ext4 -o loop,usrquota,grpquota $file $mntpt ||
+		error "mount -o loop,usrquota,grpquota $file $mntpt failed"
+	stack_trap "umount_loopdev $facet $mntpt" EXIT
+}

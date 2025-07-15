@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/lod/lod_internal.h
  *
@@ -87,7 +86,8 @@ struct lod_avoid_guide {
 	/* number of allocated array items */
 	unsigned int		lag_oaa_size;
 	/* bitmap of OSTs avoid guidance */
-	struct cfs_bitmap	*lag_ost_avoid_bitmap;
+	unsigned long		*lag_ost_avoid_bitmap;
+	u32			lag_ost_avoid_size;
 	/* how many OSTs are available for alloc */
 	__u32			lag_ost_avail;
 };
@@ -182,6 +182,8 @@ struct lod_default_striping {
 	__u32				lds_dir_def_stripe_count;
 	__u32				lds_dir_def_stripe_offset;
 	__u32				lds_dir_def_hash_type;
+	__u8				lds_dir_def_max_inherit;
+	__u8				lds_dir_def_max_inherit_rr;
 					/* default file striping flags (LOV) */
 	__u32				lds_def_striping_set:1,
 					lds_def_striping_is_composite:1,
@@ -189,9 +191,30 @@ struct lod_default_striping {
 					lds_dir_def_striping_set:1;
 };
 
+static inline __u8 lmv_inherit_next(__u8 inherit)
+{
+	if (inherit == LMV_INHERIT_END || inherit == LMV_INHERIT_NONE)
+		return LMV_INHERIT_NONE;
+
+	if (inherit == LMV_INHERIT_UNLIMITED || inherit > LMV_INHERIT_MAX)
+		return inherit;
+
+	return inherit - 1;
+}
+
+static inline __u8 lmv_inherit_rr_next(__u8 inherit_rr)
+{
+	if (inherit_rr == LMV_INHERIT_RR_NONE ||
+	    inherit_rr == LMV_INHERIT_RR_UNLIMITED ||
+	    inherit_rr > LMV_INHERIT_RR_MAX)
+		return inherit_rr;
+
+	return inherit_rr - 1;
+}
+
 struct lod_mirror_entry {
 	__u16	lme_stale:1,
-		lme_primary:1;
+		lme_prefer:1;
 	/* mirror id */
 	__u16	lme_id;
 	/* start,end index of this mirror in ldo_comp_entries */
@@ -392,6 +415,7 @@ struct lod_thread_info {
 	/* object allocation avoid guide info */
 	struct lod_avoid_guide		lti_avoid;
 	union lmv_mds_md		lti_lmv;
+	struct dt_allocation_hint	lti_ah;
 };
 
 extern const struct lu_device_operations lod_lu_ops;
@@ -546,6 +570,7 @@ int lod_add_device(const struct lu_env *env, struct lod_device *lod,
 int lod_del_device(const struct lu_env *env, struct lod_device *lod,
 		   struct lod_tgt_descs *ltd, char *osp, unsigned int idx,
 		   unsigned int gen);
+int validate_lod_and_idx(struct lod_device *lod, __u32 idx);
 int lod_fini_tgt(const struct lu_env *env, struct lod_device *lod,
 		 struct lod_tgt_descs *ltd);
 int lod_striping_load(const struct lu_env *env, struct lod_object *lo);
@@ -699,8 +724,8 @@ int lod_procfs_init(struct lod_device *lod);
 void lod_procfs_fini(struct lod_device *lod);
 
 /* lod_object.c */
-extern struct dt_object_operations lod_obj_ops;
-extern struct lu_object_operations lod_lu_obj_ops;
+extern const struct dt_object_operations lod_obj_ops;
+extern const struct lu_object_operations lod_lu_obj_ops;
 
 int lod_load_lmv_shards(const struct lu_env *env, struct lod_object *lo,
 			struct lu_buf *buf, bool resize);

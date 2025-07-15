@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * cl_device and cl_device_type implementation for VVP layer.
  *
@@ -269,6 +268,18 @@ struct lu_device_type vvp_device_type = {
 #ifndef HAVE_ACCOUNT_PAGE_DIRTIED_EXPORT
 unsigned int (*vvp_account_page_dirtied)(struct page *page,
 					 struct address_space *mapping);
+
+unsigned int ll_account_page_dirtied(struct page *page,
+				     struct address_space *mapping)
+{
+	/* must use __set_page_dirty, which means unlocking and
+	 * relocking, which hurts performance.
+	 */
+	ll_xa_unlock(&mapping->i_pages);
+	__set_page_dirty(page, mapping, 0);
+	ll_xa_lock(&mapping->i_pages);
+	return 0;
+}
 #endif
 
 /**
@@ -292,8 +303,9 @@ int vvp_global_init(void)
 	 * Kernel v5.2-5678-gac1c3e4 no longer exports account_page_dirtied
 	 */
 	vvp_account_page_dirtied = (void *)
-		kallsyms_lookup_name("account_page_dirtied");
-	BUG_ON(!vvp_account_page_dirtied);
+		cfs_kallsyms_lookup_name("account_page_dirtied");
+	if (!vvp_account_page_dirtied)
+		vvp_account_page_dirtied = ll_account_page_dirtied;
 #endif
 
 	return 0;
@@ -541,11 +553,11 @@ static void vvp_pgcache_stop(struct seq_file *f, void *v)
         /* Nothing to do */
 }
 
-static struct seq_operations vvp_pgcache_ops = {
-        .start = vvp_pgcache_start,
-        .next  = vvp_pgcache_next,
-        .stop  = vvp_pgcache_stop,
-        .show  = vvp_pgcache_show
+static const struct seq_operations vvp_pgcache_ops = {
+	.start = vvp_pgcache_start,
+	.next  = vvp_pgcache_next,
+	.stop  = vvp_pgcache_stop,
+	.show  = vvp_pgcache_show
 };
 
 static int vvp_dump_pgcache_seq_open(struct inode *inode, struct file *filp)

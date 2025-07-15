@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 #define DEBUG_SUBSYSTEM S_CLASS
 
@@ -78,7 +77,7 @@ out:
 	RETURN(0);
 }
 
-LPROC_SEQ_FOPS_RO(mgs_fs);
+LDEBUGFS_SEQ_FOPS_RO(mgs_fs);
 
 static void seq_show_srpc_rules(struct seq_file *seq, const char *tgtname,
 				struct sptlrpc_rule_set *rset)
@@ -124,7 +123,7 @@ static int mgsself_srpc_seq_show(struct seq_file *seq, void *v)
 
         return 0;
 }
-LPROC_SEQ_FOPS_RO(mgsself_srpc);
+LDEBUGFS_SEQ_FOPS_RO(mgsself_srpc);
 
 static int mgs_live_seq_show(struct seq_file *seq, void *v)
 {

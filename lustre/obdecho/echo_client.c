@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #define DEBUG_SUBSYSTEM S_ECHO
@@ -39,7 +38,6 @@
 #include <obd.h>
 #include <obd_support.h>
 #include <obd_class.h>
-#include <lustre_debug.h>
 #include <lprocfs_status.h>
 #include <cl_object.h>
 #include <lustre_fid.h>
@@ -401,8 +399,8 @@ static void echo_lock_fini(const struct lu_env *env,
 	OBD_SLAB_FREE_PTR(ecl, echo_lock_kmem);
 }
 
-static struct cl_lock_operations echo_lock_ops = {
-	.clo_fini      = echo_lock_fini,
+static const struct cl_lock_operations echo_lock_ops = {
+	.clo_fini	= echo_lock_fini,
 };
 
 /** @} echo_lock */
@@ -619,7 +617,7 @@ static struct lu_object *echo_object_alloc(const struct lu_env *env,
 	RETURN(obj);
 }
 
-static struct lu_device_operations echo_device_lu_ops = {
+static const struct lu_device_operations echo_device_lu_ops = {
 	.ldo_object_alloc   = echo_object_alloc,
 };
 
@@ -2247,6 +2245,7 @@ static struct lu_object *echo_resolve_path(const struct lu_env *env,
 static void echo_ucred_init(struct lu_env *env)
 {
 	struct lu_ucred *ucred = lu_ucred(env);
+	kernel_cap_t kcap = current_cap();
 
 	ucred->uc_valid = UCRED_INVALID;
 
@@ -2264,8 +2263,11 @@ static void echo_ucred_init(struct lu_env *env)
 	ucred->uc_cap = cfs_curproc_cap_pack();
 
 	/* remove fs privilege for non-root user. */
-	if (ucred->uc_fsuid)
-		ucred->uc_cap &= ~CFS_CAP_FS_MASK;
+	if (ucred->uc_fsuid) {
+		kcap = cap_drop_nfsd_set(kcap);
+		kcap = cap_drop_fs_set(kcap);
+	}
+	ucred->uc_cap = kcap.cap[0];
 	ucred->uc_valid = UCRED_NEW;
 }
 
@@ -2573,13 +2575,13 @@ static int echo_client_kbrw(struct echo_device *ed, int rw, struct obdo *oa,
 	if (rw == OBD_BRW_WRITE)
 		brw_flags = OBD_BRW_ASYNC;
 
-	OBD_ALLOC_PTR_ARRAY(pga, npages);
+	OBD_ALLOC_PTR_ARRAY_LARGE(pga, npages);
 	if (!pga)
 		RETURN(-ENOMEM);
 
-	OBD_ALLOC_PTR_ARRAY(pages, npages);
+	OBD_ALLOC_PTR_ARRAY_LARGE(pages, npages);
 	if (!pages) {
-		OBD_FREE_PTR_ARRAY(pga, npages);
+		OBD_FREE_PTR_ARRAY_LARGE(pga, npages);
 		RETURN(-ENOMEM);
 	}
 
@@ -2631,8 +2633,8 @@ static int echo_client_kbrw(struct echo_device *ed, int rw, struct obdo *oa,
 		}
 		__free_page(pgp->pg);
 	}
-	OBD_FREE_PTR_ARRAY(pga, npages);
-	OBD_FREE_PTR_ARRAY(pages, npages);
+	OBD_FREE_PTR_ARRAY_LARGE(pga, npages);
+	OBD_FREE_PTR_ARRAY_LARGE(pages, npages);
 	RETURN(rc);
 }
 
@@ -2842,7 +2844,7 @@ echo_client_iocontrol(unsigned int cmd, struct obd_export *exp, int len,
 
 	switch (cmd) {
 	case OBD_IOC_CREATE:                    /* may create echo object */
-		if (!cfs_capable(CFS_CAP_SYS_ADMIN))
+		if (!capable(CAP_SYS_ADMIN))
 			GOTO(out, rc = -EPERM);
 
 		rc = echo_create_object(env, ed, oa);
@@ -2856,7 +2858,7 @@ echo_client_iocontrol(unsigned int cmd, struct obd_export *exp, int len,
 		int dirlen;
 		__u64 id;
 
-		if (!cfs_capable(CFS_CAP_SYS_ADMIN))
+		if (!capable(CAP_SYS_ADMIN))
 			GOTO(out, rc = -EPERM);
 
 		count = data->ioc_count;
@@ -2881,7 +2883,7 @@ echo_client_iocontrol(unsigned int cmd, struct obd_export *exp, int len,
 		__u64            seq;
 		int              max_count;
 
-		if (!cfs_capable(CFS_CAP_SYS_ADMIN))
+		if (!capable(CAP_SYS_ADMIN))
 			GOTO(out, rc = -EPERM);
 
 		rc = seq_client_get_seq(env, ed->ed_cl_seq, &seq);
@@ -2902,7 +2904,7 @@ echo_client_iocontrol(unsigned int cmd, struct obd_export *exp, int len,
 	}
 #endif /* HAVE_SERVER_SUPPORT */
 	case OBD_IOC_DESTROY:
-		if (!cfs_capable(CFS_CAP_SYS_ADMIN))
+		if (!capable(CAP_SYS_ADMIN))
 			GOTO(out, rc = -EPERM);
 
 		rc = echo_get_object(&eco, ed, oa);
@@ -2923,7 +2925,7 @@ echo_client_iocontrol(unsigned int cmd, struct obd_export *exp, int len,
 		GOTO(out, rc);
 
 	case OBD_IOC_SETATTR:
-		if (!cfs_capable(CFS_CAP_SYS_ADMIN))
+		if (!capable(CAP_SYS_ADMIN))
 			GOTO(out, rc = -EPERM);
 
 		rc = echo_get_object(&eco, ed, oa);
@@ -2934,7 +2936,7 @@ echo_client_iocontrol(unsigned int cmd, struct obd_export *exp, int len,
 		GOTO(out, rc);
 
 	case OBD_IOC_BRW_WRITE:
-		if (!cfs_capable(CFS_CAP_SYS_ADMIN))
+		if (!capable(CAP_SYS_ADMIN))
 			GOTO(out, rc = -EPERM);
 
 		rw = OBD_BRW_WRITE;
@@ -3007,7 +3009,9 @@ static int echo_client_setup(const struct lu_env *env,
 				 OBD_CONNECT_BRW_SIZE |
 				 OBD_CONNECT_GRANT | OBD_CONNECT_FULL20 |
 				 OBD_CONNECT_64BITHASH | OBD_CONNECT_LVB_TYPE |
-				 OBD_CONNECT_FID;
+				 OBD_CONNECT_FID | OBD_CONNECT_FLAGS2;
+	ocd->ocd_connect_flags2 = OBD_CONNECT2_REP_MBITS;
+
 	ocd->ocd_brw_size = DT_MAX_BRW_SIZE;
 	ocd->ocd_version = LUSTRE_VERSION_CODE;
 	ocd->ocd_group = FID_SEQ_ECHO;
@@ -3118,7 +3122,7 @@ static int __init obdecho_init(void)
 	if (rc != 0)
 		goto failed_0;
 
-	rc = class_register_type(&echo_obd_ops, NULL, true, NULL,
+	rc = class_register_type(&echo_obd_ops, NULL, true,
 				 LUSTRE_ECHO_NAME, &echo_srv_type);
 	if (rc != 0)
 		goto failed_1;
@@ -3127,7 +3131,7 @@ static int __init obdecho_init(void)
 	rc = lu_kmem_init(echo_caches);
 	if (rc == 0) {
 		rc = class_register_type(&echo_client_obd_ops, NULL, false,
-					 NULL, LUSTRE_ECHO_CLIENT_NAME,
+					 LUSTRE_ECHO_CLIENT_NAME,
 					 &echo_device_type);
 		if (rc)
 			lu_kmem_fini(echo_caches);

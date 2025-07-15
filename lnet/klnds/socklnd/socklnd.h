@@ -56,6 +56,8 @@
 #include <lnet/lib-lnet.h>
 #include <lnet/socklnd.h>
 
+#include <libcfs/linux/linux-net.h>
+
 #ifndef NETIF_F_CSUM_MASK
 # define NETIF_F_CSUM_MASK NETIF_F_ALL_CSUM
 #endif
@@ -109,7 +111,7 @@ struct ksock_sched {
 
 struct ksock_interface {			/* in-use interface */
 	int		ksni_index;		/* Linux interface index */
-	__u32		ksni_ipaddr;		/* interface's IP address */
+	struct sockaddr_storage ksni_addr;	/* interface's address */
 	__u32		ksni_netmask;		/* interface's network mask */
 	int		ksni_nroutes;		/* # routes using (active) */
 	int		ksni_npeers;		/* # peers using (passive) */
@@ -154,14 +156,18 @@ struct ksock_tunables {
 #if SOCKNAL_VERSION_DEBUG
         int              *ksnd_protocol;        /* protocol version */
 #endif
+	int              *ksnd_conns_per_peer;  /* for typed mode, yields:
+						 * 1 + 2*conns_per_peer total
+						 * for untyped:
+						 * conns_per_peer total
+						 */
 };
 
 struct ksock_net {
 	__u64		  ksnn_incarnation;	/* my epoch */
 	struct list_head  ksnn_list;		/* chain on global list */
 	atomic_t	  ksnn_npeers;		/* # peers */
-	int		  ksnn_ninterfaces;	/* IP interfaces */
-	struct ksock_interface ksnn_interfaces[LNET_INTERFACES_NUM];
+	struct ksock_interface ksnn_interface;  /* IP interface */
 };
 /* When the ksock_net is shut down, this (negative) bias is added to
  * ksnn_npeers, which prevents new peers from being added.
@@ -244,7 +250,7 @@ struct ksock_nal_data {
  * received into struct bio_vec fragments.
  */
 struct ksock_conn;				/* forward ref */
-struct ksock_route;				/* forward ref */
+struct ksock_conn_cb;				/* forward ref */
 struct ksock_proto;				/* forward ref */
 
 struct ksock_tx {			/* transmit packet */
@@ -288,7 +294,7 @@ union ksock_rxiovspace {
 
 struct ksock_conn {
 	struct ksock_peer_ni	*ksnc_peer;		/* owning peer_ni */
-	struct ksock_route	*ksnc_route;		/* owning route */
+	struct ksock_conn_cb	*ksnc_conn_cb;		/* owning conn control block */
 	struct list_head	ksnc_list;		/* on peer_ni's conn list */
 	struct socket		*ksnc_sock;		/* actual socket */
 	void			*ksnc_saved_data_ready; /* socket's original
@@ -299,9 +305,8 @@ struct ksock_conn {
 	refcount_t		ksnc_sock_refcount;	/* sock refcount */
 	struct ksock_sched	*ksnc_scheduler;	/* who schedules this
 							 * connection */
-	__u32			ksnc_myipaddr;		/* my IP */
-	__u32			ksnc_ipaddr;		/* peer_ni's IP */
-	int			ksnc_port;		/* peer_ni's port */
+	struct sockaddr_storage ksnc_myaddr;		/* my address */
+	struct sockaddr_storage ksnc_peeraddr;		/*  peer_ni's address */
 	signed int		ksnc_type:3;		/* type of connection,
 							 * should be signed
 							 * value */
@@ -357,8 +362,9 @@ struct ksock_conn {
 	time64_t		ksnc_tx_last_post;
 };
 
-struct ksock_route {
-	struct list_head	ksnr_list;	/* chain on peer_ni route list*/
+#define SOCKNAL_CONN_COUNT_MAX_BITS	8	/* max conn count bits */
+
+struct ksock_conn_cb {
 	struct list_head	ksnr_connd_list;/* chain on ksnr_connd_routes */
 	struct ksock_peer_ni   *ksnr_peer;	/* owning peer_ni */
 	refcount_t		ksnr_refcount;	/* # users */
@@ -367,14 +373,16 @@ struct ksock_route {
 						 */
 	time64_t		ksnr_retry_interval;/* secs between retries */
 	int			ksnr_myiface;	/* interface index */
-	__u32			ksnr_ipaddr;	/* IP address to connect to */
-	int			ksnr_port;	/* port to connect to */
+	struct sockaddr_storage	ksnr_addr;	/* IP address to connect to */
 	unsigned int		ksnr_scheduled:1;/* scheduled for attention */
 	unsigned int		ksnr_connecting:1;/* connection in progress */
 	unsigned int		ksnr_connected:4;/* connections by type */
 	unsigned int		ksnr_deleted:1;	/* been removed from peer_ni? */
-	unsigned int		ksnr_share_count;/* created explicitly? */
-	int			ksnr_conn_count;/* # conns for this route */
+	unsigned int		ksnr_ctrl_conn_count:1; /* # conns by type */
+	unsigned int		ksnr_blki_conn_count:8;
+	unsigned int		ksnr_blko_conn_count:8;
+	int			ksnr_conn_count;/* total # conns for this cb */
+
 };
 
 #define SOCKNAL_KEEPALIVE_PING          1       /* cookie for keepalive ping */
@@ -391,7 +399,7 @@ struct ksock_peer_ni {
 	__u64			ksnp_incarnation;   /* latest known peer_ni incarnation */
 	const struct ksock_proto *ksnp_proto;	/* latest known protocol */
 	struct list_head	ksnp_conns;	/* all active connections */
-	struct list_head	ksnp_routes;	/* routes */
+	struct ksock_conn_cb	*ksnp_conn_cb;	/* conn control block */
 	struct list_head	ksnp_tx_queue;	/* waiting packets */
 	spinlock_t		ksnp_lock;	/* serialize, g_lock unsafe */
 	/* zero copy requests wait for ACK  */
@@ -460,7 +468,7 @@ static inline __u32 ksocknal_csum(__u32 crc, unsigned char const *p, size_t len)
 }
 
 static inline int
-ksocknal_route_mask(void)
+ksocknal_conn_cb_mask(void)
 {
 	if (!*ksocknal_tunables.ksnd_typed_conns)
 		return BIT(SOCKLND_CONN_ANY);
@@ -529,18 +537,18 @@ ksocknal_tx_decref(struct ksock_tx *tx)
 }
 
 static inline void
-ksocknal_route_addref(struct ksock_route *route)
+ksocknal_conn_cb_addref(struct ksock_conn_cb  *conn_cb)
 {
-	refcount_inc(&route->ksnr_refcount);
+	refcount_inc(&conn_cb->ksnr_refcount);
 }
 
-extern void ksocknal_destroy_route(struct ksock_route *route);
+extern void ksocknal_destroy_conn_cb(struct ksock_conn_cb *conn_cb);
 
 static inline void
-ksocknal_route_decref(struct ksock_route *route)
+ksocknal_conn_cb_decref(struct ksock_conn_cb *conn_cb)
 {
-	if (refcount_dec_and_test(&route->ksnr_refcount))
-		ksocknal_destroy_route (route);
+	if (refcount_dec_and_test(&conn_cb->ksnr_refcount))
+		ksocknal_destroy_conn_cb(conn_cb);
 }
 
 static inline void
@@ -560,9 +568,12 @@ ksocknal_peer_decref(struct ksock_peer_ni *peer_ni)
 
 static inline int ksocknal_timeout(void)
 {
-	return *ksocknal_tunables.ksnd_timeout ?
-		*ksocknal_tunables.ksnd_timeout :
-		lnet_get_lnd_timeout();
+	return *ksocknal_tunables.ksnd_timeout ?: lnet_get_lnd_timeout();
+}
+
+static inline int ksocknal_conns_per_peer(void)
+{
+	return *ksocknal_tunables.ksnd_conns_per_peer ?: 1;
 }
 
 int ksocknal_startup(struct lnet_ni *ni);
@@ -575,20 +586,21 @@ int ksocknal_recv(struct lnet_ni *ni, void *private, struct lnet_msg *lntmsg,
                   unsigned int offset, unsigned int mlen, unsigned int rlen);
 int ksocknal_accept(struct lnet_ni *ni, struct socket *sock);
 
-int ksocknal_add_peer(struct lnet_ni *ni, struct lnet_process_id id, __u32 ip,
-		      int port);
+int ksocknal_add_peer(struct lnet_ni *ni, struct lnet_process_id id,
+		      struct sockaddr *addr);
 struct ksock_peer_ni *ksocknal_find_peer_locked(struct lnet_ni *ni,
 					   struct lnet_process_id id);
 struct ksock_peer_ni *ksocknal_find_peer(struct lnet_ni *ni,
 				    struct lnet_process_id id);
 extern void ksocknal_peer_failed(struct ksock_peer_ni *peer_ni);
-extern int ksocknal_create_conn(struct lnet_ni *ni, struct ksock_route *route,
+extern int ksocknal_create_conn(struct lnet_ni *ni,
+				struct ksock_conn_cb *conn_cb,
 				struct socket *sock, int type);
 extern void ksocknal_close_conn_locked(struct ksock_conn *conn, int why);
 extern void ksocknal_terminate_conn(struct ksock_conn *conn);
 extern void ksocknal_destroy_conn(struct ksock_conn *conn);
 extern int  ksocknal_close_peer_conns_locked(struct ksock_peer_ni *peer_ni,
-					     __u32 ipaddr, int why);
+					     struct sockaddr *peer, int why);
 extern int ksocknal_close_conn_and_siblings(struct ksock_conn *conn, int why);
 int ksocknal_close_matching_conns(struct lnet_process_id id, __u32 ipaddr);
 extern struct ksock_conn *ksocknal_find_conn_locked(struct ksock_peer_ni *peer_ni,
@@ -606,8 +618,8 @@ extern void ksocknal_txlist_done(struct lnet_ni *ni, struct list_head *txlist,
 extern int ksocknal_thread_start(int (*fn)(void *arg), void *arg, char *name);
 extern void ksocknal_thread_fini(void);
 extern void ksocknal_launch_all_connections_locked(struct ksock_peer_ni *peer_ni);
-extern struct ksock_route *ksocknal_find_connectable_route_locked(struct ksock_peer_ni *peer_ni);
-extern struct ksock_route *ksocknal_find_connecting_route_locked(struct ksock_peer_ni *peer_ni);
+extern struct ksock_conn_cb *ksocknal_find_connectable_conn_cb_locked(struct ksock_peer_ni *peer_ni);
+extern struct ksock_conn_cb *ksocknal_find_connecting_conn_cb_locked(struct ksock_peer_ni *peer_ni);
 extern int ksocknal_new_packet(struct ksock_conn *conn, int skip);
 extern int ksocknal_scheduler(void *arg);
 extern int ksocknal_connd(void *arg);

@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/lod/lod_dev.c
  *
@@ -1816,6 +1815,8 @@ static int lod_init0(const struct lu_env *env, struct lod_device *lod,
 	spin_lock_init(&lod->lod_connects_lock);
 	lu_tgt_descs_init(&lod->lod_mdt_descs, true);
 	lu_tgt_descs_init(&lod->lod_ost_descs, false);
+	lu_qos_rr_init(&lod->lod_mdt_descs.ltd_qos.lq_rr);
+	lu_qos_rr_init(&lod->lod_ost_descs.ltd_qos.lq_rr);
 
 	RETURN(0);
 
@@ -1888,8 +1889,7 @@ static void lod_avoid_guide_fini(struct lod_avoid_guide *lag)
 	if (lag->lag_oss_avoid_array)
 		OBD_FREE_PTR_ARRAY(lag->lag_oss_avoid_array,
 				   lag->lag_oaa_size);
-	if (lag->lag_ost_avoid_bitmap)
-		CFS_FREE_BITMAP(lag->lag_ost_avoid_bitmap);
+	bitmap_free(lag->lag_ost_avoid_bitmap);
 }
 
 /**
@@ -2049,17 +2049,17 @@ LU_CONTEXT_KEY_DEFINE(lod, LCT_MD_THREAD);
 
 LU_TYPE_INIT_FINI(lod, &lod_thread_key);
 
-static struct lu_device_type_operations lod_device_type_ops = {
-	.ldto_init           = lod_type_init,
-	.ldto_fini           = lod_type_fini,
+static const struct lu_device_type_operations lod_device_type_ops = {
+	.ldto_init		= lod_type_init,
+	.ldto_fini		= lod_type_fini,
 
-	.ldto_start          = lod_type_start,
-	.ldto_stop           = lod_type_stop,
+	.ldto_start		= lod_type_start,
+	.ldto_stop		= lod_type_stop,
 
-	.ldto_device_alloc   = lod_device_alloc,
-	.ldto_device_free    = lod_device_free,
+	.ldto_device_alloc	= lod_device_alloc,
+	.ldto_device_free	= lod_device_free,
 
-	.ldto_device_fini    = lod_device_fini
+	.ldto_device_fini	= lod_device_fini
 };
 
 static struct lu_device_type lod_device_type = {
@@ -2203,16 +2203,84 @@ static int lod_obd_set_info_async(const struct lu_env *env,
 	RETURN(rc);
 }
 
+
+#define QMT0_DEV_NAME_LEN (LUSTRE_MAXFSNAME + sizeof("-QMT0000"))
+static struct obd_device *obd_find_qmt0(char *obd_name)
+{
+	char qmt_name[QMT0_DEV_NAME_LEN];
+	struct obd_device *qmt = NULL;
+
+	if (!server_name2fsname(obd_name, qmt_name, NULL)) {
+		strlcat(qmt_name, "-QMT0000", QMT0_DEV_NAME_LEN);
+		qmt = class_name2obd(qmt_name);
+	}
+
+	return qmt;
+}
+
+static int lod_pool_new_q(struct obd_device *obd, char *poolname)
+{
+	int err = lod_pool_new(obd, poolname);
+
+	if (!err) {
+		obd = obd_find_qmt0(obd->obd_name);
+		if (obd)
+			obd_pool_new(obd, poolname);
+	}
+
+	return err;
+}
+
+static int lod_pool_remove_q(struct obd_device *obd, char *poolname,
+			     char *ostname)
+{
+	int err = lod_pool_remove(obd, poolname, ostname);
+
+	if (!err) {
+		obd = obd_find_qmt0(obd->obd_name);
+		if (obd)
+			obd_pool_rem(obd, poolname, ostname);
+	}
+
+	return err;
+}
+
+static int lod_pool_add_q(struct obd_device *obd, char *poolname, char *ostname)
+{
+	int err = lod_pool_add(obd, poolname, ostname);
+
+	if (!err) {
+		obd = obd_find_qmt0(obd->obd_name);
+		if (obd)
+			obd_pool_add(obd, poolname, ostname);
+	}
+
+	return err;
+}
+
+static int lod_pool_del_q(struct obd_device *obd, char *poolname)
+{
+	int err = lod_pool_del(obd, poolname);
+
+	if (!err) {
+		obd = obd_find_qmt0(obd->obd_name);
+		if (obd)
+			obd_pool_del(obd, poolname);
+	}
+
+	return err;
+}
+
 static const struct obd_ops lod_obd_device_ops = {
 	.o_owner        = THIS_MODULE,
 	.o_connect      = lod_obd_connect,
 	.o_disconnect   = lod_obd_disconnect,
 	.o_get_info     = lod_obd_get_info,
 	.o_set_info_async = lod_obd_set_info_async,
-	.o_pool_new     = lod_pool_new,
-	.o_pool_rem     = lod_pool_remove,
-	.o_pool_add     = lod_pool_add,
-	.o_pool_del     = lod_pool_del,
+	.o_pool_new     = lod_pool_new_q,
+	.o_pool_rem     = lod_pool_remove_q,
+	.o_pool_add     = lod_pool_add_q,
+	.o_pool_del     = lod_pool_del_q,
 };
 
 static int __init lod_init(void)
@@ -2224,7 +2292,7 @@ static int __init lod_init(void)
 	if (rc)
 		return rc;
 
-	rc = class_register_type(&lod_obd_device_ops, NULL, true, NULL,
+	rc = class_register_type(&lod_obd_device_ops, NULL, true,
 				 LUSTRE_LOD_NAME, &lod_device_type);
 	if (rc) {
 		lu_kmem_fini(lod_caches);

@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #define DEBUG_SUBSYSTEM S_LMV
@@ -1069,7 +1068,23 @@ int lmv_fid_alloc(const struct lu_env *env, struct obd_export *exp,
 	LASSERT(op_data);
 	LASSERT(fid);
 
-	tgt = lmv_tgt(lmv, op_data->op_mds);
+	/*
+	 * All files under a root WBC directory are with FIDs located on the
+	 * same target (MDT).
+	 * TODO: Files under a root WBC directory could be distributed across
+	 * MDT targets other than the one which the root WBC directory located
+	 * on.
+	 */
+	if (op_data->op_cli_flags & CLI_WBC_TGT) {
+		/* It does not support default LMV on the parent currently. */
+		if (op_data->op_default_mea1)
+			RETURN(-EINVAL);
+
+		tgt = lmv_locate_tgt(lmv, op_data);
+	} else {
+		tgt = lmv_tgt(lmv, op_data->op_mds);
+	}
+
 	if (!tgt)
 		RETURN(-ENODEV);
 
@@ -1311,7 +1326,7 @@ static int lmv_statfs_update(void *cookie, int rc)
 		tgt->ltd_statfs = *osfs;
 		tgt->ltd_statfs_age = ktime_get_seconds();
 		spin_unlock(&lmv->lmv_lock);
-		lmv->lmv_qos.lq_dirty = 1;
+		set_bit(LQ_DIRTY, &lmv->lmv_qos.lq_flags);
 	}
 
 	return rc;
@@ -1462,9 +1477,10 @@ static int lmv_close(struct obd_export *exp, struct md_op_data *op_data,
 
 static struct lu_tgt_desc *lmv_locate_tgt_qos(struct lmv_obd *lmv, __u32 *mdt)
 {
-	struct lu_tgt_desc *tgt;
+	struct lu_tgt_desc *tgt, *cur = NULL;
 	__u64 total_weight = 0;
 	__u64 cur_weight = 0;
+	int total_usable = 0;
 	__u64 rand;
 	int rc;
 
@@ -1483,15 +1499,29 @@ static struct lu_tgt_desc *lmv_locate_tgt_qos(struct lmv_obd *lmv, __u32 *mdt)
 		GOTO(unlock, tgt = ERR_PTR(rc));
 
 	lmv_foreach_tgt(lmv, tgt) {
-		tgt->ltd_qos.ltq_usable = 0;
-		if (!tgt->ltd_exp || !tgt->ltd_active)
+		if (!tgt->ltd_exp || !tgt->ltd_active) {
+			tgt->ltd_qos.ltq_usable = 0;
 			continue;
+		}
 
 		tgt->ltd_qos.ltq_usable = 1;
 		lu_tgt_qos_weight_calc(tgt);
+		if (tgt->ltd_index == *mdt) {
+			cur = tgt;
+			cur_weight = tgt->ltd_qos.ltq_weight;
+		}
 		total_weight += tgt->ltd_qos.ltq_weight;
+		total_usable++;
 	}
 
+	/* if current MDT has higher-than-average space, stay on same MDT */
+	rand = total_weight / total_usable;
+	if (cur_weight >= rand) {
+		tgt = cur;
+		GOTO(unlock, rc = 0);
+	}
+
+	cur_weight = 0;
 	rand = lu_prandom_u64_max(total_weight);
 
 	lmv_foreach_connected_tgt(lmv, tgt) {
@@ -1523,7 +1553,7 @@ static struct lu_tgt_desc *lmv_locate_tgt_rr(struct lmv_obd *lmv, __u32 *mdt)
 
 	ENTRY;
 
-	spin_lock(&lmv->lmv_qos.lq_rr.lqr_alloc);
+	spin_lock(&lmv->lmv_lock);
 	for (i = 0; i < lmv->lmv_mdt_descs.ltd_tgts_size; i++) {
 		index = (i + lmv->lmv_qos_rr_index) %
 			lmv->lmv_mdt_descs.ltd_tgts_size;
@@ -1534,11 +1564,11 @@ static struct lu_tgt_desc *lmv_locate_tgt_rr(struct lmv_obd *lmv, __u32 *mdt)
 		*mdt = tgt->ltd_index;
 		lmv->lmv_qos_rr_index = (*mdt + 1) %
 					lmv->lmv_mdt_descs.ltd_tgts_size;
-		spin_unlock(&lmv->lmv_qos.lq_rr.lqr_alloc);
+		spin_unlock(&lmv->lmv_lock);
 
 		RETURN(tgt);
 	}
-	spin_unlock(&lmv->lmv_qos.lq_rr.lqr_alloc);
+	spin_unlock(&lmv->lmv_lock);
 
 	RETURN(ERR_PTR(-ENODEV));
 }
@@ -1721,6 +1751,22 @@ int lmv_old_layout_lookup(struct lmv_obd *lmv, struct md_op_data *op_data)
 	return rc;
 }
 
+static inline bool lmv_op_user_qos_mkdir(const struct md_op_data *op_data)
+{
+	const struct lmv_user_md *lum = op_data->op_data;
+
+	return (op_data->op_cli_flags & CLI_SET_MEA) && lum &&
+	       le32_to_cpu(lum->lum_magic) == LMV_USER_MAGIC &&
+	       le32_to_cpu(lum->lum_stripe_offset) == LMV_OFFSET_DEFAULT;
+}
+
+static inline bool lmv_op_default_qos_mkdir(const struct md_op_data *op_data)
+{
+	const struct lmv_stripe_md *lsm = op_data->op_default_mea1;
+
+	return lsm && lsm->lsm_md_master_mdt_index == LMV_OFFSET_DEFAULT;
+}
+
 /* mkdir by QoS in two cases:
  * 1. 'lfs mkdir -i -1'
  * 2. parent default LMV master_mdt_index is -1
@@ -1730,25 +1776,36 @@ int lmv_old_layout_lookup(struct lmv_obd *lmv, struct md_op_data *op_data)
  */
 static inline bool lmv_op_qos_mkdir(const struct md_op_data *op_data)
 {
-	const struct lmv_stripe_md *lsm = op_data->op_default_mea1;
-	const struct lmv_user_md *lum = op_data->op_data;
-
 	if (op_data->op_code != LUSTRE_OPC_MKDIR)
 		return false;
 
 	if (lmv_dir_striped(op_data->op_mea1))
 		return false;
 
-	if (op_data->op_cli_flags & CLI_SET_MEA && lum &&
-	    (le32_to_cpu(lum->lum_magic) == LMV_USER_MAGIC ||
-	     le32_to_cpu(lum->lum_magic) == LMV_USER_MAGIC_SPECIFIC) &&
-	    le32_to_cpu(lum->lum_stripe_offset) == LMV_OFFSET_DEFAULT)
+	if (lmv_op_user_qos_mkdir(op_data))
 		return true;
 
-	if (lsm && lsm->lsm_md_master_mdt_index == LMV_OFFSET_DEFAULT)
+	if (lmv_op_default_qos_mkdir(op_data))
 		return true;
 
 	return false;
+}
+
+/* if default LMV is set, and its index is LMV_OFFSET_DEFAULT, and
+ * 1. max_inherit_rr is set and is not LMV_INHERIT_RR_NONE
+ * 2. or parent is ROOT
+ * mkdir roundrobin.
+ * NB, this also needs to check server is balanced, which is checked by caller.
+ */
+static inline bool lmv_op_default_rr_mkdir(const struct md_op_data *op_data)
+{
+	const struct lmv_stripe_md *lsm = op_data->op_default_mea1;
+
+	if (!lmv_op_default_qos_mkdir(op_data))
+		return false;
+
+	return lsm->lsm_md_max_inherit_rr != LMV_INHERIT_RR_NONE ||
+	       fid_is_root(&op_data->op_fid1);
 }
 
 /* 'lfs mkdir -i <specific_MDT>' */
@@ -1772,9 +1829,65 @@ lmv_op_default_specific_mkdir(const struct md_op_data *op_data)
 	       op_data->op_default_mea1->lsm_md_master_mdt_index !=
 			LMV_OFFSET_DEFAULT;
 }
+
+struct lmv_tgt_desc *lmv_locate_tgt_create(struct obd_device *obd,
+					   struct lmv_obd *lmv,
+					   struct md_op_data *op_data)
+{
+	struct lmv_tgt_desc *tgt;
+
+	ENTRY;
+
+	tgt = lmv_locate_tgt(lmv, op_data);
+	if (IS_ERR(tgt))
+		RETURN(tgt);
+
+	if (lmv_op_user_specific_mkdir(op_data)) {
+		struct lmv_user_md *lum = op_data->op_data;
+
+		op_data->op_mds = le32_to_cpu(lum->lum_stripe_offset);
+		tgt = lmv_tgt(lmv, op_data->op_mds);
+		if (!tgt)
+			RETURN(ERR_PTR(-ENODEV));
+	} else if (lmv_op_default_specific_mkdir(op_data)) {
+		op_data->op_mds =
+			op_data->op_default_mea1->lsm_md_master_mdt_index;
+		tgt = lmv_tgt(lmv, op_data->op_mds);
+		if (!tgt)
+			RETURN(ERR_PTR(-ENODEV));
+	} else if (lmv_op_qos_mkdir(op_data)) {
+		struct lmv_tgt_desc *tmp = tgt;
+
+		tgt = lmv_locate_tgt_qos(lmv, &op_data->op_mds);
+		if (tgt == ERR_PTR(-EAGAIN)) {
+			if (ltd_qos_is_balanced(&lmv->lmv_mdt_descs) &&
+			    !lmv_op_default_rr_mkdir(op_data) &&
+			    !lmv_op_user_qos_mkdir(op_data))
+				/* if it's not necessary, don't create remote
+				 * directory.
+				 */
+				tgt = tmp;
+			else
+				tgt = lmv_locate_tgt_rr(lmv, &op_data->op_mds);
+		}
+		if (IS_ERR(tgt))
+			RETURN(tgt);
+
+		/*
+		 * only update statfs after QoS mkdir, this means the cached
+		 * statfs may be stale, and current mkdir may not follow QoS
+		 * accurately, but it's not serious, and avoids periodic statfs
+		 * when client doesn't mkdir by QoS.
+		 */
+		lmv_statfs_check_update(obd, tgt);
+	}
+
+	RETURN(tgt);
+}
+
 int lmv_create(struct obd_export *exp, struct md_op_data *op_data,
 		const void *data, size_t datalen, umode_t mode, uid_t uid,
-		gid_t gid, cfs_cap_t cap_effective, __u64 rdev,
+		gid_t gid, cfs_cap_t cap_effective, __u64 rdev, __u64 cr_flags,
 		struct ptlrpc_request **request)
 {
 	struct obd_device *obd = exp->exp_obd;
@@ -1803,42 +1916,17 @@ int lmv_create(struct obd_export *exp, struct md_op_data *op_data,
 		op_data->op_new_layout = true;
 	}
 
-	tgt = lmv_locate_tgt(lmv, op_data);
+	tgt = lmv_locate_tgt_create(obd, lmv, op_data);
 	if (IS_ERR(tgt))
 		RETURN(PTR_ERR(tgt));
 
-	if (lmv_op_user_specific_mkdir(op_data)) {
-		struct lmv_user_md *lum = op_data->op_data;
-
-		op_data->op_mds = le32_to_cpu(lum->lum_stripe_offset);
-		tgt = lmv_tgt(lmv, op_data->op_mds);
-		if (!tgt)
-			RETURN(-ENODEV);
-	} else if (lmv_op_default_specific_mkdir(op_data)) {
-		op_data->op_mds =
-			op_data->op_default_mea1->lsm_md_master_mdt_index;
-		tgt = lmv_tgt(lmv, op_data->op_mds);
-		if (!tgt)
-			RETURN(-ENODEV);
-	} else if (lmv_op_qos_mkdir(op_data)) {
-		tgt = lmv_locate_tgt_qos(lmv, &op_data->op_mds);
-		if (tgt == ERR_PTR(-EAGAIN))
-			tgt = lmv_locate_tgt_rr(lmv, &op_data->op_mds);
-		if (IS_ERR(tgt))
-			RETURN(PTR_ERR(tgt));
-		/*
-		 * only update statfs after QoS mkdir, this means the cached
-		 * statfs may be stale, and current mkdir may not follow QoS
-		 * accurately, but it's not serious, and avoids periodic statfs
-		 * when client doesn't mkdir by QoS.
-		 */
-		lmv_statfs_check_update(obd, tgt);
-	}
-
 retry:
-	rc = lmv_fid_alloc(NULL, exp, &op_data->op_fid2, op_data);
-	if (rc)
-		RETURN(rc);
+	if (!(op_data->op_bias & MDS_WBC_LOCKLESS) ||
+	    !fid_is_sane(&op_data->op_fid2)) {
+		rc = lmv_fid_alloc(NULL, exp, &op_data->op_fid2, op_data);
+		if (rc)
+			RETURN(rc);
+	}
 
 	CDEBUG(D_INODE, "CREATE name '%.*s' "DFID" on "DFID" -> mds #%x\n",
 		(int)op_data->op_namelen, op_data->op_name,
@@ -1847,7 +1935,7 @@ retry:
 
 	op_data->op_flags |= MF_MDC_CANCEL_FID1;
 	rc = md_create(tgt->ltd_exp, op_data, data, datalen, mode, uid, gid,
-		       cap_effective, rdev, request);
+		       cap_effective, rdev, cr_flags, request);
 	if (rc == 0) {
 		if (*request == NULL)
 			RETURN(rc);
@@ -2954,7 +3042,7 @@ static int lmv_get_info(const struct lu_env *env, struct obd_export *exp,
 }
 
 static int lmv_rmfid(struct obd_export *exp, struct fid_array *fa,
-		     int *__rcs, struct ptlrpc_request_set *_set)
+		     int *__rcs, __u64 flags, struct ptlrpc_request_set *_set)
 {
 	struct obd_device *obd = class_exp2obd(exp);
 	struct ptlrpc_request_set *set = _set;
@@ -3006,7 +3094,8 @@ static int lmv_rmfid(struct obd_export *exp, struct fid_array *fa,
 		fat = fas[tgt->ltd_index];
 		if (!fat || fat->fa_nr == 0)
 			continue;
-		rc = md_rmfid(tgt->ltd_exp, fat, rcs[tgt->ltd_index], set);
+		rc = md_rmfid(tgt->ltd_exp, fat,
+			      rcs[tgt->ltd_index], flags, set);
 	}
 
 	rc = ptlrpc_set_wait(NULL, set);
@@ -3040,6 +3129,48 @@ out:
 out_fas:
 	if (fas)
 		OBD_FREE_PTR_ARRAY(fas, tgt_count);
+
+	RETURN(rc);
+}
+
+/* WBC lockless create/setattr/link operations. */
+static int lmv_reint_async(struct obd_export *exp, struct md_op_item *item,
+			   struct ptlrpc_request_set *set)
+{
+	struct md_op_data *op_data = &item->mop_data;
+	struct lookup_intent *it = &item->mop_it;
+	struct obd_device *obd = exp->exp_obd;
+	struct lmv_obd *lmv = &obd->u.lmv;
+	struct lmv_tgt_desc *tgt;
+	int rc;
+
+	ENTRY;
+
+	if (!lmv->lmv_mdt_descs.ltd_lmv_desc.ld_active_tgt_count)
+		RETURN(-EIO);
+
+	if (it->it_op == IT_CREAT) {
+		op_data->op_flags |= MF_MDC_CANCEL_FID1;
+		tgt = lmv_locate_tgt_create(obd, lmv, op_data);
+		if (IS_ERR(tgt))
+			RETURN(PTR_ERR(tgt));
+
+		if (!fid_is_sane(&op_data->op_fid2)) {
+			rc = lmv_fid_alloc(NULL, exp,
+					   &op_data->op_fid2, op_data);
+			if (rc)
+				RETURN(rc);
+		}
+	} else if (it->it_op == IT_SETATTR) {
+		op_data->op_flags |= MF_MDC_CANCEL_FID1;
+		tgt = lmv_fid2tgt(lmv, &op_data->op_fid1);
+		if (IS_ERR(tgt))
+			RETURN(PTR_ERR(tgt));
+	} else {
+		LBUG();
+	}
+
+	rc = md_reint_async(tgt->ltd_exp, item, set);
 
 	RETURN(rc);
 }
@@ -3162,6 +3293,8 @@ static inline int lmv_unpack_user_md(struct obd_export *exp,
 	lsm->lsm_md_stripe_count = le32_to_cpu(lmu->lum_stripe_count);
 	lsm->lsm_md_master_mdt_index = le32_to_cpu(lmu->lum_stripe_offset);
 	lsm->lsm_md_hash_type = le32_to_cpu(lmu->lum_hash_type);
+	lsm->lsm_md_max_inherit = lmu->lum_max_inherit;
+	lsm->lsm_md_max_inherit_rr = lmu->lum_max_inherit_rr;
 	lsm->lsm_md_pool_name[LOV_MAXPOOLNAME] = 0;
 
 	return 0;
@@ -3194,10 +3327,8 @@ static int lmv_unpackmd(struct obd_export *exp, struct lmv_stripe_md **lsmp,
 		}
 
 		if (lmv_dir_striped(lsm)) {
-			for (i = 0; i < lsm->lsm_md_stripe_count; i++) {
-				if (lsm->lsm_md_oinfo[i].lmo_root)
-					iput(lsm->lsm_md_oinfo[i].lmo_root);
-			}
+			for (i = 0; i < lsm->lsm_md_stripe_count; i++)
+				iput(lsm->lsm_md_oinfo[i].lmo_root);
 			lsm_size = lmv_stripe_md_size(lsm->lsm_md_stripe_count);
 		} else {
 			lsm_size = lmv_stripe_md_size(0);
@@ -3371,7 +3502,7 @@ lmv_lock_match(struct obd_export *exp, __u64 flags,
 }
 
 static int
-lmv_get_lustre_md(struct obd_export *exp, struct ptlrpc_request *req,
+lmv_get_lustre_md(struct obd_export *exp, struct req_capsule *pill,
 		  struct obd_export *dt_exp, struct obd_export *md_exp,
 		  struct lustre_md *md)
 {
@@ -3381,7 +3512,7 @@ lmv_get_lustre_md(struct obd_export *exp, struct ptlrpc_request *req,
 	if (!tgt || !tgt->ltd_exp)
 		return -EINVAL;
 
-	return md_get_lustre_md(tgt->ltd_exp, req, dt_exp, md_exp, md);
+	return md_get_lustre_md(tgt->ltd_exp, pill, dt_exp, md_exp, md);
 }
 
 static int lmv_free_lustre_md(struct obd_export *exp, struct lustre_md *md)
@@ -3439,9 +3570,9 @@ static int lmv_clear_open_replay_data(struct obd_export *exp,
 }
 
 static int lmv_intent_getattr_async(struct obd_export *exp,
-				    struct md_enqueue_info *minfo)
+				    struct md_op_item *item)
 {
-	struct md_op_data *op_data = &minfo->mi_data;
+	struct md_op_data *op_data = &item->mop_data;
 	struct obd_device *obd = exp->exp_obd;
 	struct lmv_obd *lmv = &obd->u.lmv;
 	struct lmv_tgt_desc *ptgt;
@@ -3468,7 +3599,7 @@ static int lmv_intent_getattr_async(struct obd_export *exp,
 	if (ctgt != ptgt)
 		RETURN(-EREMOTE);
 
-	rc = md_intent_getattr_async(ptgt->ltd_exp, minfo);
+	rc = md_intent_getattr_async(ptgt->ltd_exp, item);
 
 	RETURN(rc);
 }
@@ -3608,6 +3739,219 @@ static int lmv_merge_attr(struct obd_export *exp,
 	return 0;
 }
 
+static struct lu_batch *lmv_batch_create(struct obd_export *exp,
+					 enum lu_batch_flags flags,
+					 __u32 max_count)
+{
+	struct lu_batch *bh;
+	struct lmv_batch *lbh;
+
+	ENTRY;
+	OBD_ALLOC_PTR(lbh);
+	if (!lbh)
+		RETURN(ERR_PTR(-ENOMEM));
+
+	bh = &lbh->lbh_super;
+	bh->bh_flags = flags;
+	bh->bh_max_count = max_count;
+
+	if (flags & BATCH_FL_RQSET) {
+		bh->bh_rqset = ptlrpc_prep_set();
+		if (bh->bh_rqset == NULL) {
+			OBD_FREE_PTR(lbh);
+			RETURN(ERR_PTR(-ENOMEM));
+		}
+	}
+
+	INIT_LIST_HEAD(&lbh->lbh_sub_batch_list);
+	RETURN(bh);
+}
+
+static int lmv_batch_stop(struct obd_export *exp, struct lu_batch *bh)
+{
+	struct lmv_batch *lbh;
+	struct lmvsub_batch *sub;
+	struct lmvsub_batch *tmp;
+	int rc = 0;
+
+	ENTRY;
+
+	lbh = container_of(bh, struct lmv_batch, lbh_super);
+	list_for_each_entry_safe(sub, tmp, &lbh->lbh_sub_batch_list,
+				 sbh_sub_item) {
+		list_del(&sub->sbh_sub_item);
+		rc = md_batch_stop(sub->sbh_tgt->ltd_exp, sub->sbh_sub);
+		if (rc < 0) {
+			CERROR("Stop batch processing failed: rc = %d\n", rc);
+			if (bh->bh_result == 0)
+				bh->bh_result = rc;
+		}
+		OBD_FREE_PTR(sub);
+	}
+
+	if (bh->bh_flags & BATCH_FL_RQSET) {
+		rc = ptlrpc_set_wait(NULL, bh->bh_rqset);
+		ptlrpc_set_destroy(bh->bh_rqset);
+	}
+
+	OBD_FREE_PTR(lbh);
+	RETURN(rc);
+}
+
+static int lmv_batch_flush(struct obd_export *exp, struct lu_batch *bh,
+			   bool wait)
+{
+	struct lmv_batch *lbh;
+	struct lmvsub_batch *sub;
+	int rc = 0;
+	int rc1;
+
+	ENTRY;
+
+	lbh = container_of(bh, struct lmv_batch, lbh_super);
+	list_for_each_entry(sub, &lbh->lbh_sub_batch_list, sbh_sub_item) {
+		rc1 = md_batch_flush(sub->sbh_tgt->ltd_exp, sub->sbh_sub, wait);
+		if (rc1 < 0) {
+			CERROR("Stop batch processing failed: rc = %d\n", rc);
+			if (bh->bh_result == 0)
+				bh->bh_result = rc;
+
+			if (rc == 0)
+				rc = rc1;
+		}
+	}
+
+	if (wait && bh->bh_flags & BATCH_FL_RQSET) {
+		rc1 = ptlrpc_set_wait(NULL, bh->bh_rqset);
+		if (rc == 0)
+			rc = rc1;
+	}
+
+	RETURN(rc);
+}
+
+static inline struct lmv_tgt_desc *
+lmv_batch_locate_tgt(struct lmv_obd *lmv, struct md_op_item *item)
+{
+	struct md_op_data *op_data = &item->mop_data;
+	struct lmv_tgt_desc *tgt;
+
+	switch (item->mop_opc) {
+	case MD_OP_GETATTR: {
+		struct lmv_tgt_desc *ptgt;
+
+		if (!fid_is_sane(&op_data->op_fid2))
+			RETURN(ERR_PTR(-EINVAL));
+
+		ptgt = lmv_locate_tgt(lmv, op_data);
+		if (IS_ERR(ptgt))
+			RETURN(ptgt);
+
+		tgt = lmv_fid2tgt(lmv, &op_data->op_fid2);
+		if (IS_ERR(tgt))
+			RETURN(tgt);
+
+		/*
+		 * Remote object needs two RPCs to lookup and getattr,
+		 * considering the complexity don't support statahead for now.
+		 */
+		if (tgt != ptgt)
+			RETURN(ERR_PTR(-EREMOTE));
+
+		break;
+	}
+	case MD_OP_CREATE_LOCKLESS:
+	case MD_OP_CREATE_EXLOCK:
+		tgt = lmv_locate_tgt(lmv, op_data);
+		if (IS_ERR(tgt))
+			break;
+
+		tgt = lmv_fid2tgt(lmv, &op_data->op_fid2);
+		break;
+	case MD_OP_SETATTR_LOCKLESS:
+	case MD_OP_SETATTR_EXLOCK:
+	case MD_OP_EXLOCK_ONLY:
+		tgt = lmv_fid2tgt(lmv, &op_data->op_fid1);
+		break;
+	default:
+		tgt = ERR_PTR(-ENOTSUPP);
+	}
+
+	return tgt;
+}
+
+struct lu_batch *lmv_batch_lookup_sub(struct lmv_batch *lbh,
+				      struct lmv_tgt_desc *tgt)
+{
+	struct lmvsub_batch *sub;
+
+	list_for_each_entry(sub, &lbh->lbh_sub_batch_list, sbh_sub_item) {
+		if (sub->sbh_tgt == tgt)
+			return sub->sbh_sub;
+	}
+
+	return NULL;
+}
+
+struct lu_batch *lmv_batch_get_sub(struct lmv_batch *lbh,
+				   struct lmv_tgt_desc *tgt)
+{
+	struct lmvsub_batch *sbh;
+	struct lu_batch *child_bh;
+	struct lu_batch *bh;
+
+	ENTRY;
+
+	child_bh = lmv_batch_lookup_sub(lbh, tgt);
+	if (child_bh != NULL)
+		RETURN(child_bh);
+
+	OBD_ALLOC_PTR(sbh);
+	if (sbh == NULL)
+		RETURN(ERR_PTR(-ENOMEM));
+
+	INIT_LIST_HEAD(&sbh->sbh_sub_item);
+	sbh->sbh_tgt = tgt;
+
+	bh = &lbh->lbh_super;
+	child_bh = md_batch_create(tgt->ltd_exp, bh->bh_flags,
+				   bh->bh_max_count);
+	if (IS_ERR(child_bh)) {
+		OBD_FREE_PTR(sbh);
+		RETURN(child_bh);
+	}
+
+	child_bh->bh_rqset = bh->bh_rqset;
+	sbh->sbh_sub = child_bh;
+	list_add(&sbh->sbh_sub_item, &lbh->lbh_sub_batch_list);
+	RETURN(child_bh);
+}
+
+static int lmv_batch_add(struct obd_export *exp, struct lu_batch *bh,
+			 struct md_op_item *item)
+{
+	struct obd_device *obd = exp->exp_obd;
+	struct lmv_obd *lmv = &obd->u.lmv;
+	struct lmv_tgt_desc *tgt;
+	struct lmv_batch *lbh;
+	struct lu_batch *child_bh;
+	int rc;
+
+	ENTRY;
+
+	tgt = lmv_batch_locate_tgt(lmv, item);
+	if (IS_ERR(tgt))
+		RETURN(PTR_ERR(tgt));
+
+	lbh = container_of(bh, struct lmv_batch, lbh_super);
+	child_bh = lmv_batch_get_sub(lbh, tgt);
+	if (IS_ERR(child_bh))
+		RETURN(PTR_ERR(child_bh));
+
+	rc = md_batch_add(tgt->ltd_exp, child_bh, item);
+	RETURN(rc);
+}
+
 static const struct obd_ops lmv_obd_ops = {
         .o_owner                = THIS_MODULE,
         .o_setup                = lmv_setup,
@@ -3636,6 +3980,7 @@ static const struct md_ops lmv_md_ops = {
         .m_getxattr             = lmv_getxattr,
         .m_getattr_name         = lmv_getattr_name,
         .m_intent_lock          = lmv_intent_lock,
+	.m_intent_lock_async    = lmv_intent_lock_async,
         .m_link                 = lmv_link,
         .m_rename               = lmv_rename,
         .m_setattr              = lmv_setattr,
@@ -3658,11 +4003,16 @@ static const struct md_ops lmv_md_ops = {
 	.m_get_fid_from_lsm	= lmv_get_fid_from_lsm,
 	.m_unpackmd		= lmv_unpackmd,
 	.m_rmfid		= lmv_rmfid,
+	.m_batch_create		= lmv_batch_create,
+	.m_batch_add		= lmv_batch_add,
+	.m_batch_stop		= lmv_batch_stop,
+	.m_batch_flush		= lmv_batch_flush,
+	.m_reint_async		= lmv_reint_async,
 };
 
 static int __init lmv_init(void)
 {
-	return class_register_type(&lmv_obd_ops, &lmv_md_ops, true, NULL,
+	return class_register_type(&lmv_obd_ops, &lmv_md_ops, true,
 				   LUSTRE_LMV_NAME, NULL);
 }
 

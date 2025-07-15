@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/ptlrpc/sec.c
  *
@@ -492,14 +491,10 @@ int sptlrpc_req_ctx_switch(struct ptlrpc_request *req,
 			   struct ptlrpc_cli_ctx *oldctx,
 			   struct ptlrpc_cli_ctx *newctx)
 {
-	struct sptlrpc_flavor   old_flvr;
+	struct sptlrpc_flavor old_flvr;
 	char *reqmsg = NULL; /* to workaround old gcc */
 	int reqmsg_size;
 	int rc = 0;
-
-	LASSERT(req->rq_reqmsg);
-	LASSERT(req->rq_reqlen);
-	LASSERT(req->rq_replen);
 
 	CDEBUG(D_SEC,
 	       "req %p: switch ctx %p(%u->%s) -> %p(%u->%s), switch sec %p(%s) -> %p(%s)\n",
@@ -515,6 +510,7 @@ int sptlrpc_req_ctx_switch(struct ptlrpc_request *req,
 	/* save request message */
 	reqmsg_size = req->rq_reqlen;
 	if (reqmsg_size != 0) {
+		LASSERT(req->rq_reqmsg);
 		OBD_ALLOC_LARGE(reqmsg, reqmsg_size);
 		if (reqmsg == NULL)
 			return -ENOMEM;
@@ -793,7 +789,7 @@ again:
 	spin_unlock(&ctx->cc_lock);
 
 	if (timeout == 0)
-		RETURN(-EWOULDBLOCK);
+		RETURN(-EAGAIN);
 
 	/* Clear any flags that may be present from previous sends */
 	LASSERT(req->rq_receiving_reply == 0);
@@ -1063,7 +1059,8 @@ static int do_cli_unwrap_reply(struct ptlrpc_request *req)
 	rc = __lustre_unpack_msg(req->rq_repdata, req->rq_repdata_len);
 	switch (rc) {
 	case 1:
-		lustre_set_rep_swabbed(req, MSG_PTLRPC_HEADER_OFF);
+		req_capsule_set_rep_swabbed(&req->rq_pill,
+					    MSG_PTLRPC_HEADER_OFF);
 	case 0:
 		break;
 	default:
@@ -2235,7 +2232,8 @@ int sptlrpc_svc_unwrap_request(struct ptlrpc_request *req)
 	rc = __lustre_unpack_msg(msg, req->rq_reqdata_len);
 	switch (rc) {
 	case 1:
-		lustre_set_req_swabbed(req, MSG_PTLRPC_HEADER_OFF);
+		req_capsule_set_req_swabbed(&req->rq_pill,
+					    MSG_PTLRPC_HEADER_OFF);
 	case 0:
 		break;
 	default:

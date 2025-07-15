@@ -147,10 +147,13 @@ fid2archive()
 {
 	local fid="$1"
 
-	case "$HSMTOOL" in
-	*lhsmtool_posix)
-		printf "%s" "$(hsm_root)/*/*/*/*/*/*/$fid"
-		;;
+	case "$HSMTOOL_ARCHIVE_FORMAT" in
+		v1)
+			printf "%s" "$(hsm_root)/*/*/*/*/*/*/$fid"
+			;;
+		v2)
+			printf "%s" "$(hsm_root)/*/$fid"
+			;;
 	esac
 }
 
@@ -993,6 +996,18 @@ test_11b() {
 	[[ $? -eq 0 ]] || error "Restored file differs"
 }
 run_test 11b "Import a deleted file using its FID"
+
+test_11c() {
+	pool_add $TESTNAME || error "Pool creation failed"
+	pool_add_targets $TESTNAME 1 1 || error "pool_add_targets failed"
+
+	mkdir -p $DIR/$tdir
+	$LFS setstripe -p "$TESTNAME" $DIR/$tdir
+
+	copy2archive /etc/hosts $tdir/$tfile
+	copytool import $tdir/$tfile $DIR/$tdir/$tfile
+}
+run_test 11c "Import a file to a directory with a pool"
 
 test_12a() {
 	# test needs a running copytool
@@ -5122,6 +5137,9 @@ test_602() {
 	[ $MDS1_VERSION -lt $(version_code 2.10.58) ] &&
 		skip "need MDS version at least 2.10.58"
 
+	stack_trap "restore_opencache" EXIT
+	disable_opencache
+
 	mkdir -p $DIR/$tdir
 
 	local f=$DIR/$tdir/$tfile
@@ -5270,6 +5288,9 @@ test_605() {
 	[ $MDS1_VERSION -lt $(version_code 2.10.58) ] &&
 		skip "need MDS version at least 2.10.58"
 
+	stack_trap "restore_opencache" EXIT
+	disable_opencache
+
 	mkdir -p $DIR/$tdir
 
 	local f=$DIR/$tdir/$tfile
@@ -5375,8 +5396,9 @@ test_606() {
 	local entry
 
 	#remount mds1 as ldiskfs or zfs type
-	stack_trap "stop mds1; start mds1 $(mdsdevname 1) $MDS_MOUNT_OPTS" EXIT
 	stop mds1 || error "stop mds1 failed"
+	stack_trap "unmount_fstype mds1; start mds1 $(mdsdevname 1)\
+		$MDS_MOUNT_OPTS" EXIT
 	mount_fstype mds1 || error "remount mds1 failed"
 
 	for ((i = 0; i < 1; i++)); do

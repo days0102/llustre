@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #ifndef __LIBCFS_TRACEFILE_H__
@@ -54,11 +53,8 @@ void cfs_tracefile_exit(void);
 
 
 
-int cfs_trace_copyin_string(char *knl_buffer, int knl_buffer_nob,
-			    const char __user *usr_buffer, int usr_buffer_nob);
 int cfs_trace_copyout_string(char __user *usr_buffer, int usr_buffer_nob,
                              const char *knl_str, char *append);
-int cfs_trace_allocate_string_buffer(char **str, int nob);
 int cfs_trace_dump_debug_buffer_usrstr(void __user *usr_str, int usr_str_nob);
 int cfs_trace_daemon_command(char *str);
 int cfs_trace_daemon_command_usrstr(void __user *usr_str, int usr_str_nob);
@@ -157,16 +153,6 @@ struct page_collection {
 	 * only ->tcd_pages are spilled.
 	 */
 	int			pc_want_daemon_pages;
-};
-
-/* XXX nikita: this declaration is internal to tracefile.c and should probably
- * be moved there */
-struct tracefiled_ctl {
-	struct completion	tctl_start;
-	struct completion	tctl_stop;
-	wait_queue_head_t	tctl_waitq;
-	pid_t			tctl_pid;
-	atomic_t		tctl_shutdown;
 };
 
 /*

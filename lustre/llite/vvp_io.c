@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * Implementation of cl_io for VVP layer.
  *
@@ -40,6 +39,7 @@
 #include <obd.h>
 #include <linux/pagevec.h>
 #include <linux/memcontrol.h>
+#include <linux/falloc.h>
 
 #include "llite_internal.h"
 #include "vvp_internal.h"
@@ -352,8 +352,8 @@ static void vvp_io_fini(const struct lu_env *env, const struct cl_io_slice *ios)
 			/* today successful restore is the only possible
 			 * case */
 			/* restore was done, clear restoring state */
-			ll_file_clear_flag(ll_i2info(vvp_object_inode(obj)),
-					   LLIF_FILE_RESTORING);
+			clear_bit(LLIF_FILE_RESTORING,
+				  &ll_i2info(vvp_object_inode(obj))->lli_flags);
 		}
 		GOTO(out, 0);
 	}
@@ -368,7 +368,8 @@ static void vvp_io_fini(const struct lu_env *env, const struct cl_io_slice *ios)
 		io->ci_need_write_intent = 0;
 
 		LASSERT(io->ci_type == CIT_WRITE || cl_io_is_fallocate(io) ||
-			cl_io_is_trunc(io) || cl_io_is_mkwrite(io));
+			cl_io_is_trunc(io) || cl_io_is_mkwrite(io) ||
+			cl_io_is_fault_writable(io));
 
 		CDEBUG(D_VFSTRACE, DFID" write layout, type %u "DEXT"\n",
 		       PFID(lu_object_fid(&obj->co_lu)), io->ci_type,
@@ -464,17 +465,17 @@ static int vvp_mmap_locks(const struct lu_env *env,
 		addr = (unsigned long)iov.iov_base;
 		count = iov.iov_len;
 
-                if (count == 0)
-                        continue;
+		if (count == 0)
+			continue;
 
 		count += addr & ~PAGE_MASK;
 		addr &= PAGE_MASK;
 
-                down_read(&mm->mmap_sem);
-                while((vma = our_vma(mm, addr, count)) != NULL) {
+		mmap_read_lock(mm);
+		while ((vma = our_vma(mm, addr, count)) != NULL) {
 			struct dentry *de = file_dentry(vma->vm_file);
 			struct inode *inode = de->d_inode;
-                        int flags = CEF_MUST;
+			int flags = CEF_MUST;
 
 			if (ll_file_nolock(vma->vm_file)) {
 				/*
@@ -484,24 +485,24 @@ static int vvp_mmap_locks(const struct lu_env *env,
 				break;
 			}
 
-                        /*
-                         * XXX: Required lock mode can be weakened: CIT_WRITE
-                         * io only ever reads user level buffer, and CIT_READ
-                         * only writes on it.
-                         */
-                        policy_from_vma(&policy, vma, addr, count);
-                        descr->cld_mode = vvp_mode_from_vma(vma);
-                        descr->cld_obj = ll_i2info(inode)->lli_clob;
-                        descr->cld_start = cl_index(descr->cld_obj,
-                                                    policy.l_extent.start);
-                        descr->cld_end = cl_index(descr->cld_obj,
-                                                  policy.l_extent.end);
-                        descr->cld_enq_flags = flags;
-                        result = cl_io_lock_alloc_add(env, io, descr);
+			/*
+			 * XXX: Required lock mode can be weakened: CIT_WRITE
+			 * io only ever reads user level buffer, and CIT_READ
+			 * only writes on it.
+			 */
+			policy_from_vma(&policy, vma, addr, count);
+			descr->cld_mode = vvp_mode_from_vma(vma);
+			descr->cld_obj = ll_i2info(inode)->lli_clob;
+			descr->cld_start = cl_index(descr->cld_obj,
+						    policy.l_extent.start);
+			descr->cld_end = cl_index(descr->cld_obj,
+						  policy.l_extent.end);
+			descr->cld_enq_flags = flags;
+			result = cl_io_lock_alloc_add(env, io, descr);
 
-                        CDEBUG(D_VFSTRACE, "lock: %d: [%lu, %lu]\n",
-                               descr->cld_mode, descr->cld_start,
-                               descr->cld_end);
+			CDEBUG(D_VFSTRACE, "lock: %d: [%lu, %lu]\n",
+			       descr->cld_mode, descr->cld_start,
+			       descr->cld_end);
 
 			if (result < 0)
 				break;
@@ -512,7 +513,7 @@ static int vvp_mmap_locks(const struct lu_env *env,
 			count -= vma->vm_end - addr;
 			addr = vma->vm_end;
 		}
-		up_read(&mm->mmap_sem);
+		mmap_read_unlock(mm);
 		if (result < 0)
 			break;
 	}
@@ -661,7 +662,7 @@ static int vvp_io_setattr_lock(const struct lu_env *env,
 			enqflags = CEF_DISCARD_DATA;
 	} else if (cl_io_is_fallocate(io)) {
 		lock_start = io->u.ci_setattr.sa_falloc_offset;
-		lock_end = io->u.ci_setattr.sa_falloc_end;
+		lock_end = io->u.ci_setattr.sa_falloc_end - 1;
 	} else {
 		unsigned int valid = io->u.ci_setattr.sa_avalid;
 
@@ -729,17 +730,30 @@ static int vvp_io_setattr_time(const struct lu_env *env,
 static int vvp_io_setattr_start(const struct lu_env *env,
 				const struct cl_io_slice *ios)
 {
-	struct cl_io		*io    = ios->cis_io;
-	struct inode		*inode = vvp_object_inode(io->ci_obj);
-	struct ll_inode_info	*lli   = ll_i2info(inode);
+	struct cl_io *io = ios->cis_io;
+	struct inode *inode = vvp_object_inode(io->ci_obj);
+	struct ll_inode_info *lli = ll_i2info(inode);
+	int mode = io->u.ci_setattr.sa_falloc_mode;
 
 	if (cl_io_is_trunc(io)) {
 		trunc_sem_down_write(&lli->lli_trunc_sem);
 		mutex_lock(&lli->lli_setattr_mutex);
 		inode_dio_wait(inode);
 	} else if (cl_io_is_fallocate(io)) {
-		inode_lock(inode);
+		loff_t size;
+
+		trunc_sem_down_write(&lli->lli_trunc_sem);
+		mutex_lock(&lli->lli_setattr_mutex);
 		inode_dio_wait(inode);
+
+		ll_merge_attr(env, inode);
+		size = i_size_read(inode);
+		if (io->u.ci_setattr.sa_falloc_end > size &&
+		    !(mode & FALLOC_FL_KEEP_SIZE)) {
+			size = io->u.ci_setattr.sa_falloc_end;
+			io->u.ci_setattr.sa_avalid |= ATTR_SIZE;
+		}
+		io->u.ci_setattr.sa_attr.lvb_size = size;
 	} else {
 		mutex_lock(&lli->lli_setattr_mutex);
 	}
@@ -764,7 +778,8 @@ static void vvp_io_setattr_end(const struct lu_env *env,
 		mutex_unlock(&lli->lli_setattr_mutex);
 		trunc_sem_up_write(&lli->lli_trunc_sem);
 	} else if (cl_io_is_fallocate(io)) {
-		inode_unlock(inode);
+		mutex_unlock(&lli->lli_setattr_mutex);
+		trunc_sem_up_write(&lli->lli_trunc_sem);
 	} else {
 		mutex_unlock(&lli->lli_setattr_mutex);
 	}
@@ -780,7 +795,7 @@ static void vvp_io_setattr_fini(const struct lu_env *env,
 
 	if (restore_needed && !ios->cis_io->ci_restore_needed) {
 		/* restore finished, set data modified flag for HSM */
-		ll_file_set_flag(ll_i2info(inode), LLIF_DATA_MODIFIED);
+		set_bit(LLIF_DATA_MODIFIED, &ll_i2info(inode)->lli_flags);
 	}
 }
 
@@ -799,6 +814,7 @@ static int vvp_io_read_start(const struct lu_env *env,
 	int exceed = 0;
 	int result;
 	struct iov_iter iter;
+	pgoff_t page_offset;
 
 	ENTRY;
 
@@ -818,6 +834,12 @@ static int vvp_io_read_start(const struct lu_env *env,
 	if (!can_populate_pages(env, io, inode))
 		RETURN(0);
 
+	if (!(file->f_flags & O_DIRECT)) {
+		result = cl_io_lru_reserve(env, io, pos, cnt);
+		if (result)
+			RETURN(result);
+	}
+
 	/* Unless this is reading a sparse file, otherwise the lock has already
 	 * been acquired so vvp_prep_size() is an empty op. */
 	result = vvp_prep_size(env, obj, io, pos, cnt, &exceed);
@@ -834,14 +856,20 @@ static int vvp_io_read_start(const struct lu_env *env,
 	if (!vio->vui_ra_valid) {
 		vio->vui_ra_valid = true;
 		vio->vui_ra_start_idx = cl_index(obj, pos);
-		vio->vui_ra_pages = cl_index(obj, tot + PAGE_SIZE - 1);
-		/* If both start and end are unaligned, we read one more page
-		 * than the index math suggests. */
-		if ((pos & ~PAGE_MASK) != 0 && ((pos + tot) & ~PAGE_MASK) != 0)
+		vio->vui_ra_pages = 0;
+		page_offset = pos & ~PAGE_MASK;
+		if (page_offset) {
 			vio->vui_ra_pages++;
+			if (tot > PAGE_SIZE - page_offset)
+				tot -= (PAGE_SIZE - page_offset);
+			else
+				tot = 0;
+		}
+		vio->vui_ra_pages += (tot + PAGE_SIZE - 1) >> PAGE_SHIFT;
 
 		CDEBUG(D_READA, "tot %zu, ra_start %lu, ra_count %lu\n",
-		       tot, vio->vui_ra_start_idx, vio->vui_ra_pages);
+		       vio->vui_tot_count, vio->vui_ra_start_idx,
+		       vio->vui_ra_pages);
 	}
 
 	/* BUG: 5972 */
@@ -922,6 +950,21 @@ static int vvp_io_commit_sync(const struct lu_env *env, struct cl_io *io,
 }
 
 /*
+ * From kernel v4.19-rc5-248-g9b89a0355144 use XArrary
+ * Prior kernels use radix_tree for tags
+ */
+static inline void ll_page_tag_dirty(struct page *page,
+				     struct address_space *mapping)
+{
+#ifndef HAVE_RADIX_TREE_TAG_SET
+	__xa_set_mark(&mapping->i_pages, page_index(page), PAGECACHE_TAG_DIRTY);
+#else
+	radix_tree_tag_set(&mapping->page_tree, page_index(page),
+			   PAGECACHE_TAG_DIRTY);
+#endif
+}
+
+/*
  * Kernels 4.2 - 4.5 pass memcg argument to account_page_dirtied()
  * Kernel v5.2-5678-gac1c3e4 no longer exports account_page_dirtied
  */
@@ -938,21 +981,7 @@ static inline void ll_account_page_dirtied(struct page *page,
 #else
 	vvp_account_page_dirtied(page, mapping);
 #endif
-}
-
-/*
- * From kernel v4.19-rc5-248-g9b89a0355144 use XArrary
- * Prior kernels use radix_tree for tags
- */
-static inline void ll_page_tag_dirty(struct page *page,
-				     struct address_space *mapping)
-{
-#ifndef HAVE_RADIX_TREE_TAG_SET
-	__xa_set_mark(&mapping->i_pages, page_index(page), PAGECACHE_TAG_DIRTY);
-#else
-	radix_tree_tag_set(&mapping->page_tree, page_index(page),
-			   PAGECACHE_TAG_DIRTY);
-#endif
+	ll_page_tag_dirty(page, mapping);
 }
 
 /* Taken from kernel set_page_dirty, __set_page_dirty_nobuffers
@@ -1018,7 +1047,6 @@ void vvp_set_pagevec_dirty(struct pagevec *pvec)
 			 page, page->mapping, mapping);
 		WARN_ON_ONCE(!PagePrivate(page) && !PageUptodate(page));
 		ll_account_page_dirtied(page, mapping);
-		ll_page_tag_dirty(page, mapping);
 		dirtied++;
 		unlock_page_memcg(page);
 	}
@@ -1035,8 +1063,8 @@ void vvp_set_pagevec_dirty(struct pagevec *pvec)
 	EXIT;
 }
 
-static void write_commit_callback(const struct lu_env *env, struct cl_io *io,
-				  struct pagevec *pvec)
+void write_commit_callback(const struct lu_env *env, struct cl_io *io,
+			   struct pagevec *pvec)
 {
 	int count = 0;
 	int i = 0;
@@ -1233,6 +1261,12 @@ static int vvp_io_write_start(const struct lu_env *env,
 	if (OBD_FAIL_CHECK(OBD_FAIL_LLITE_IMUTEX_NOSEC) && lock_inode)
 		RETURN(-EINVAL);
 
+	if (!(file->f_flags & O_DIRECT)) {
+		result = cl_io_lru_reserve(env, io, pos, cnt);
+		if (result)
+			RETURN(result);
+	}
+
 	if (vio->vui_iter == NULL) {
 		/* from a temp io in ll_cl_init(). */
 		result = 0;
@@ -1301,7 +1335,7 @@ static int vvp_io_write_start(const struct lu_env *env,
 		vio->vui_iocb->ki_pos = pos + io->ci_nob - nob;
 	}
 	if (result > 0 || result == -EIOCBQUEUED) {
-		ll_file_set_flag(ll_i2info(inode), LLIF_DATA_MODIFIED);
+		set_bit(LLIF_DATA_MODIFIED, &ll_i2info(inode)->lli_flags);
 
 		if (result != -EIOCBQUEUED && result < cnt)
 			io->ci_continue = 0;

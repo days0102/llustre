@@ -128,6 +128,61 @@ test_0c() {
 }
 run_test 0c "Verify SEL comp stripe count limits"
 
+test_0d() {
+	local td=$DIR/$tdir
+	local tf=$td/$tfile
+	local comp_end
+	local stripe_size
+
+	# Create parent directory
+	test_mkdir $td
+
+	# Component end must be a multiple of stripe size
+	# and a multiple of 64KiB to align with the minimum
+	# stripe size value.
+	# Values below 4096 are assumed to be in KiB units.
+	$LFS setstripe -E 127 $tf-1 > /dev/null 2>&1 &&
+		error "creating $tf-1 with '-E 127' should fail"
+
+	$LFS setstripe -E 128 -S 512 $tf-1 > /dev/null 2>&1 &&
+		error "creating $tf-1 with '-E 128 -S 512' should fail"
+
+	$LFS setstripe -E 128 $tf-1 ||
+		error "creating $tf-1 failed"
+
+	yes | dd bs=1K count=129 iflag=fullblock of=$tf-1 &&
+		error "writing to $tf-1 should fail"
+
+	yes | dd bs=1K count=128 iflag=fullblock of=$tf-1 ||
+		error "writing to $tf-1 failed"
+
+	comp_end=$($LFS getstripe -I1 -E $tf-1)
+	stripe_size=$($LFS getstripe -I1 -S $tf-1)
+
+	[[ $comp_end == $((128 * 1024)) ]] ||
+		error "incorrect component end '$comp_end' for $tf-1"
+
+	[[ $stripe_size == $((128 * 1024)) ]] ||
+		error "incorrect stripe size '$stripe_size' for $tf-1"
+
+	rm $tf-1 || error "removing $tf-1 failed"
+
+	# The stripe size must be a multiple of 64KiB.
+	# Values below 4096 are assumed to be in KiB units.
+	$LFS setstripe -E -1 -S 2047 $tf-2 > /dev/null 2>&1 &&
+		error "creating $tf-2 with '-S 2047' should fail"
+
+	$LFS setstripe -E -1 -S 2048 $tf-2 ||
+		error "creating $tf-2 failed"
+
+	stripe_size=$($LFS getstripe -I1 -S $tf-2)
+	[[ $stripe_size == $((2048 * 1024)) ]] ||
+		error "incorrect stripe size '$stripe_size' for $tf-2"
+
+	rm $tf-2 || error "removing $tf-2 failed"
+}
+run_test 0d "Verify comp end and stripe size"
+
 test_1a() {
 	local comp_file=$DIR/$tdir/$tfile
 	local rw_len=$((3 * 1024 * 1024))	# 3M
@@ -221,15 +276,19 @@ test_1c() {
 }
 run_test 1c "Test overstriping w/max stripe count"
 
-test_2() {
+base_test_2() {
 	local comp_file=$DIR/$tdir/$tfile
 	local rw_len=$((5 * 1024 * 1024))	# 5M
+	local params=$1
 
 	test_mkdir $DIR/$tdir
 	rm -f $comp_file
 
-	$LFS setstripe -E 1m -S 1m $comp_file ||
-		error "Create $comp_file failed"
+	multiop $comp_file oO_RDWR:O_CREAT:O_LOV_DELAY_CREATE:c ||
+		error "create failed $comp_file"
+
+	$LFS setstripe --component-add $params $comp_file ||
+		error "Add component to $comp_file failed"
 
 	check_component_count $comp_file 1
 
@@ -257,7 +316,16 @@ test_2() {
 
 	rm -f $comp_file || error "Delete $comp_file failed"
 }
-run_test 2 "Add component to existing file"
+
+test_2a() {
+	base_test_2 "-E 1m -S 1m"
+}
+run_test 2a "Add components to existing file"
+
+test_2b () {
+	base_test_2 "-E 1m -L mdt"
+}
+run_test 2b "Add components w/DOM to existing file"
 
 del_comp_and_verify() {
 	local comp_file=$1
@@ -282,14 +350,14 @@ del_comp_and_verify() {
 	$CHECKSTAT -s $size $comp_file || error "size != $size"
 }
 
-test_3() {
+base_test_3() {
 	local comp_file=$DIR/$tdir/$tfile
+	local params=$1
 
 	test_mkdir $DIR/$tdir
 	rm -f $comp_file
 
-	$LFS setstripe -E 1M -S 1M -E 64M -c 2 -E -1 -c 3 $comp_file ||
-		error "Create $comp_file failed"
+	$LFS setstripe $params $comp_file || error "Create $comp_file failed"
 
 	check_component_count $comp_file 3
 
@@ -310,9 +378,17 @@ test_3() {
 	del_comp_and_verify $comp_file "^init" 1 0
 	del_comp_and_verify $comp_file "init" 0 0
 	rm -f $comp_file || error "Delete second $comp_file failed"
-
 }
-run_test 3 "Delete component from existing file"
+
+test_3a() {
+	base_test_3 "-E 1M -S 1M -E 64M -c 2 -E -1 -c 3"
+}
+run_test 3a "Delete components from existing file"
+
+test_3b() {
+	base_test_3 "-E 1M -L mdt -E 64M -S 1M -c 2 -E -1 -c 3"
+}
+run_test 3b "Delete components w/DOM from existing file"
 
 test_4() {
 	skip "Not supported in PFL"
@@ -2321,6 +2397,53 @@ test_24a() {
 	echo "FIEMAP on $file succeeded"
 }
 run_test 24a "FIEMAP upon PFL file"
+
+test_25() {
+	local pfl_f=$DIR/$tdir/"$tfile"_pfl
+	local dom_f=$DIR/$tdir/"$tfile"_dom
+	local common_f=$DIR/$tdir/"$tfile"_common
+	local stripe_count
+	local stripe_size
+
+	mkdir -p $DIR/$tdir || error "mkdir $DIR/$tdir failed"
+	$LFS setstripe -E 10M -S 64k -c -1 -E 20M -S 1M -E -1 -S 2M -c 1 \
+		$pfl_f || error "setstripe $pfl_f failed"
+	$LFS setstripe -E 256k -L mdt -E -1 -S 1M $dom_f ||
+		error "setstripe $dom_f failed"
+	$LFS setstripe -S 512K -c -1 $common_f ||
+		error "setstripe $common_f failed"
+
+	#verify lov_getstripe_old with PFL file
+	stripe_count=$(lov_getstripe_old $pfl_f |
+			awk '/stripe_count/ { print $2 }')
+	stripe_size=$(lov_getstripe_old $pfl_f |
+			awk '/stripe_size/ { print $2 }')
+	[ $stripe_count -eq 1 ] ||
+		error "stripe_count $stripe_count !=1 for $pfl_f"
+	[ $stripe_size -eq 2097152 ] ||
+		error "stripe_size $stripe_size != 2097152 for $pfl_f"
+
+	#verify lov_getstripe_old with DoM file
+	stripe_count=$(lov_getstripe_old $dom_f |
+			awk '/stripe_count/ { print $2 }')
+	stripe_size=$(lov_getstripe_old $dom_f |
+			awk '/stripe_size/ { print $2 }')
+	[ $stripe_count -eq 1 ] ||
+		error "stripe_count $stripe_count !=1 for $dom_f"
+	[ $stripe_size -eq 1048576 ] ||
+		error "stripe_size $stripe_size != 1048576 for $dom_f"
+
+	#verify lov_getstripe_old with common file
+	stripe_count=$(lov_getstripe_old $common_f |
+			awk '/stripe_count/ { print $2 }')
+	stripe_size=$(lov_getstripe_old $common_f |
+			awk '/stripe_size/ { print $2 }')
+	[ $stripe_count -eq $OSTCOUNT ] ||
+		error "stripe_count $stripe_count !=$OSTCOUNT for $common_f"
+	[ $stripe_size -eq 524288 ] ||
+		error "stripe_size $stripe_size != 524288 for $common_f"
+}
+run_test 25 "Verify old lov stripe API with PFL files"
 
 complete $SECONDS
 check_and_cleanup_lustre

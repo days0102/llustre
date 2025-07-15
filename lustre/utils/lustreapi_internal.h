@@ -57,8 +57,6 @@
 #endif
 
 int get_root_path(int want, char *fsname, int *outfd, char *path, int index);
-int root_ioctl(const char *mdtname, int opc, void *data, int *mdtidxp,
-	       int want_error);
 int llapi_ioctl_pack(struct obd_ioctl_data *data, char **pbuf, int max_len);
 int llapi_ioctl_unpack(struct obd_ioctl_data *data, char *pbuf, int max_len);
 int sattr_cache_get_defaults(const char *const fsname,
@@ -127,6 +125,37 @@ static inline bool llapi_stripe_index_is_valid(int64_t index)
 {
 	return index >= -1 && index <= LOV_V1_INSANE_STRIPE_COUNT;
 }
+
+static inline bool llapi_pool_name_is_valid(char **pool_name,
+					    const char *fsname)
+{
+	char *ptr;
+
+	if (*pool_name == NULL)
+		return false;
+
+	/**
+	 * in case user gives the full pool name <fsname>.<poolname>,
+	 * strip the fsname
+	 */
+	ptr = strchr(*pool_name, '.');
+	if (ptr != NULL) {
+		*ptr = '\0';
+		if (fsname != NULL && strcmp(*pool_name, fsname) != 0) {
+			*ptr = '.';
+			return false;
+		}
+		*pool_name = ptr + 1;
+	}
+
+	if (strlen(*pool_name) > LOV_MAXPOOLNAME)
+		return false;
+
+	return true;
+}
+
+
+int llapi_layout_search_ost(__u32 ost, char *pname, char *fsname);
 
 /* Compatibility macro for legacy llapi functions that use "offset"
  * terminology instead of the preferred "index". */

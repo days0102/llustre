@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lnet/include/lnet/lib-types.h
  *
@@ -46,6 +45,7 @@
 #include <linux/uio.h>
 #include <linux/semaphore.h>
 #include <linux/types.h>
+#include <linux/kref.h>
 
 #include <uapi/linux/lnet/lnet-dlc.h>
 #include <uapi/linux/lnet/lnetctl.h>
@@ -62,6 +62,7 @@
  * All local and peer NIs created have their health default to this value.
  */
 #define LNET_MAX_HEALTH_VALUE 1000
+#define LNET_MAX_SELECTION_PRIORITY UINT_MAX
 
 /* forward refs */
 struct lnet_libmd;
@@ -241,6 +242,21 @@ struct lnet_test_peer {
 #define LNET_COOKIE_TYPE_BITS  2
 #define LNET_COOKIE_MASK	((1ULL << LNET_COOKIE_TYPE_BITS) - 1ULL)
 
+struct netstrfns {
+	u32	nf_type;
+	char	*nf_name;
+	char	*nf_modname;
+	void	(*nf_addr2str)(u32 addr, char *str, size_t size);
+	int	(*nf_str2addr)(const char *str, int nob, u32 *addr);
+	int	(*nf_parse_addrlist)(char *str, int len,
+				     struct list_head *list);
+	int	(*nf_print_addrlist)(char *buffer, int count,
+				     struct list_head *list);
+	int	(*nf_match_addr)(u32 addr, struct list_head *list);
+	int	(*nf_min_max)(struct list_head *nidlist, u32 *min_nid,
+			      u32 *max_nid);
+};
+
 struct lnet_ni;					 /* forward ref */
 struct socket;
 
@@ -369,14 +385,17 @@ struct lnet_net {
 	 * lnet/include/lnet/nidstr.h */
 	__u32			net_id;
 
-	/* priority of the network */
-	__u32			net_prio;
+	/* round robin selection */
+	__u32			net_seq;
 
 	/* total number of CPTs in the array */
 	__u32			net_ncpts;
 
 	/* cumulative CPTs of all NIs in this net */
 	__u32			*net_cpts;
+
+	/* relative net selection priority */
+	__u32			net_sel_priority;
 
 	/* network tunables */
 	struct lnet_ioctl_config_lnd_cmn_tunables net_tunables;
@@ -404,6 +423,9 @@ struct lnet_net {
 
 	/* protects access to net_last_alive */
 	spinlock_t		net_lock;
+
+	/* list of router nids preferred for this network */
+	struct list_head	net_rtr_pref_nids;
 };
 
 struct lnet_ni {
@@ -451,6 +473,13 @@ struct lnet_ni {
 	/* Recovery state. Protected by lnet_ni_lock() */
 	__u32			ni_recovery_state;
 
+	/* When to send the next recovery ping */
+	time64_t                ni_next_ping;
+	/* How many pings sent during current recovery period did not receive
+	 * a reply. NB: reset whenever _any_ message arrives on this NI
+	 */
+	unsigned int		ni_ping_count;
+
 	/* per NI LND tunables */
 	struct lnet_lnd_tunables ni_lnd_tunables;
 
@@ -483,11 +512,13 @@ struct lnet_ni {
 	 */
 	atomic_t		ni_fatal_error_on;
 
+	/* the relative selection priority of this NI */
+	__u32			ni_sel_priority;
+
 	/*
-	 * equivalent interfaces to use
-	 * This is an array because socklnd bonding can still be configured
+	 * equivalent interface to use
 	 */
-	char			*ni_interfaces[LNET_INTERFACES_NUM];
+	char			*ni_interface;
 	struct net		*ni_net_ns;     /* original net namespace */
 };
 
@@ -513,6 +544,11 @@ struct lnet_ping_buffer {
 
 #define LNET_PING_INFO_TO_BUFFER(PINFO)	\
 	container_of((PINFO), struct lnet_ping_buffer, pb_info)
+
+struct lnet_nid_list {
+	struct list_head nl_list;
+	lnet_nid_t nl_nid;
+};
 
 struct lnet_peer_ni {
 	/* chain on lpn_peer_nis */
@@ -551,11 +587,17 @@ struct lnet_peer_ni {
 	/* peer's NID */
 	lnet_nid_t		lpni_nid;
 	/* # refs */
-	atomic_t		lpni_refcount;
+	struct kref		lpni_kref;
 	/* health value for the peer */
 	atomic_t		lpni_healthv;
 	/* recovery ping mdh */
 	struct lnet_handle_md	lpni_recovery_ping_mdh;
+	/* When to send the next recovery ping */
+	time64_t		lpni_next_ping;
+	/* How many pings sent during current recovery period did not receive
+	 * a reply. NB: reset whenever _any_ message arrives from this peer NI
+	 */
+	unsigned int		lpni_ping_count;
 	/* CPT this peer attached on */
 	int			lpni_cpt;
 	/* state flags -- protected by lpni_lock */
@@ -573,8 +615,12 @@ struct lnet_peer_ni {
 	/* preferred local nids: if only one, use lpni_pref.nid */
 	union lpni_pref {
 		lnet_nid_t	nid;
-		lnet_nid_t	*nids;
+		struct list_head nids;
 	} lpni_pref;
+	/* list of router nids preferred for this peer NI */
+	struct list_head	lpni_rtr_pref_nids;
+	/* The relative selection priority of this peer NI */
+	__u32			lpni_sel_priority;
 	/* number of preferred NIDs in lnpi_pref_nids */
 	__u32			lpni_pref_nnids;
 };
@@ -745,6 +791,8 @@ struct lnet_peer {
 
 /* peer is marked for deletion */
 #define LNET_PEER_MARK_DELETION		BIT(18)
+/* lnet_peer_del()/lnet_peer_del_locked() has been called on the peer */
+#define LNET_PEER_MARK_DELETED		BIT(19)
 
 struct lnet_peer_net {
 	/* chain on lp_peer_nets */
@@ -762,11 +810,14 @@ struct lnet_peer_net {
 	/* peer net health */
 	int			lpn_healthv;
 
-	/* time of last router net check attempt */
-	time64_t		lpn_rtrcheck_timestamp;
+	/* time of next router ping on this net */
+	time64_t		lpn_next_ping;
 
 	/* selection sequence number */
 	__u32			lpn_seq;
+
+	/* relative peer net selection priority */
+	__u32			lpn_sel_priority;
 
 	/* reference count */
 	atomic_t		lpn_refcount;
@@ -817,7 +868,7 @@ struct lnet_route {
 	int			lr_seq;		/* sequence for round-robin */
 	__u32			lr_hops;	/* how far I am */
 	unsigned int		lr_priority;	/* route priority */
-	bool			lr_alive;	/* cached route aliveness */
+	atomic_t		lr_alive;	/* cached route aliveness */
 	bool			lr_single_hop;  /* this route is single-hop */
 };
 
@@ -977,6 +1028,49 @@ struct lnet_msg_container {
 	void			**msc_finalizers;
 	/* threads doing resends */
 	void			**msc_resenders;
+};
+
+/* This UDSP structures need to match the user space liblnetconfig structures
+ * in order for the marshall and unmarshall functions to be common.
+ */
+
+/* Net is described as a
+ *  1. net type
+ *  2. num range
+ */
+struct lnet_ud_net_descr {
+	__u32 udn_net_type;
+	struct list_head udn_net_num_range;
+};
+
+/* each NID range is defined as
+ *  1. net descriptor
+ *  2. address range descriptor
+ */
+struct lnet_ud_nid_descr {
+	struct lnet_ud_net_descr ud_net_id;
+	struct list_head ud_addr_range;
+	__u32 ud_mem_size;
+};
+
+/* a UDSP rule can have up to three user defined NID descriptors
+ *	- src: defines the local NID range for the rule
+ *	- dst: defines the peer NID range for the rule
+ *	- rte: defines the router NID range for the rule
+ *
+ * An action union defines the action to take when the rule
+ * is matched
+ */
+struct lnet_udsp {
+	struct list_head udsp_on_list;
+	__u32 udsp_idx;
+	struct lnet_ud_nid_descr udsp_src;
+	struct lnet_ud_nid_descr udsp_dst;
+	struct lnet_ud_nid_descr udsp_rte;
+	enum lnet_udsp_action_type udsp_action_type;
+	union {
+		__u32 udsp_priority;
+	} udsp_action;
 };
 
 /* Peer Discovery states */
@@ -1154,6 +1248,8 @@ struct lnet {
 	 * work loops
 	 */
 	struct completion		ln_started;
+	/* UDSP list */
+	struct list_head		ln_udsp_list;
 };
 
 #endif

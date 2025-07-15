@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #include <linux/fs.h>
@@ -54,11 +53,17 @@ static void free_dentry_data(struct rcu_head *head)
 static void ll_release(struct dentry *de)
 {
         struct ll_dentry_data *lld;
+
         ENTRY;
+
         LASSERT(de != NULL);
         lld = ll_d2d(de);
         if (lld == NULL) /* NFS copies the de->d_op methods (bug 4655) */
                 RETURN_EXIT;
+
+	/* Whoa, we are throwing away yet uncommitted change? */
+	if (de->d_inode)
+		LASSERT(!wbc_inode_has_protected(ll_i2wbci(de->d_inode)));
 
 	de->d_fsdata = NULL;
 	call_rcu(&lld->lld_rcu_head, free_dentry_data);
@@ -128,7 +133,7 @@ static int ll_ddelete(const struct dentry *de)
 	LASSERT(de);
 
 	CDEBUG(D_DENTRY, "%s dentry %pd (%p, parent %p, inode %p) %s%s\n",
-	       d_lustre_invalid((struct dentry *)de) ? "deleting" : "keeping",
+	       d_lustre_invalid(de) ? "deleting" : "keeping",
 	       de, de, de->d_parent, de->d_inode,
 	       d_unhashed((struct dentry *)de) ? "" : "hashed,",
 	       list_empty(&de->d_subdirs) ? "" : "subdirs");
@@ -136,7 +141,10 @@ static int ll_ddelete(const struct dentry *de)
 	/* kernel >= 2.6.38 last refcount is decreased after this function. */
 	LASSERT(ll_d_count(de) == 1);
 
-	if (d_lustre_invalid((struct dentry *)de))
+	if (de->d_inode && wbc_inode_reserved(ll_i2wbci(de->d_inode)))
+		RETURN(1);
+
+	if (d_lustre_invalid(de))
 		RETURN(1);
 	RETURN(0);
 }
@@ -159,6 +167,7 @@ int ll_d_init(struct dentry *de)
 			if (likely(de->d_fsdata == NULL)) {
 				de->d_fsdata = lld;
 				__d_lustre_invalidate(de);
+				wbc_dentry_init(de);
 			} else {
 				OBD_FREE_PTR(lld);
 			}
@@ -239,44 +248,41 @@ void ll_prune_aliases(struct inode *inode)
 }
 
 int ll_revalidate_it_finish(struct ptlrpc_request *request,
-                            struct lookup_intent *it,
-                            struct dentry *de)
+			    struct lookup_intent *it,
+			    struct dentry *de)
 {
-        int rc = 0;
+	int rc = 0;
+
         ENTRY;
 
-        if (!request)
-                RETURN(0);
+	if (!request)
+		RETURN(0);
 
-        if (it_disposition(it, DISP_LOOKUP_NEG))
-                RETURN(-ENOENT);
+	if (it_disposition(it, DISP_LOOKUP_NEG))
+		RETURN(-ENOENT);
 
-        rc = ll_prep_inode(&de->d_inode, request, NULL, it);
+	rc = ll_prep_inode(&de->d_inode, &request->rq_pill, NULL, it);
 
-        RETURN(rc);
+	RETURN(rc);
 }
 
 void ll_lookup_finish_locks(struct lookup_intent *it, struct dentry *dentry)
 {
-        LASSERT(it != NULL);
-        LASSERT(dentry != NULL);
+	LASSERT(it != NULL);
+	LASSERT(dentry != NULL);
 
 	if (it->it_lock_mode && dentry->d_inode != NULL) {
-                struct inode *inode = dentry->d_inode;
-                struct ll_sb_info *sbi = ll_i2sbi(dentry->d_inode);
+		struct inode *inode = dentry->d_inode;
+		struct ll_sb_info *sbi = ll_i2sbi(inode);
 
 		CDEBUG(D_DLMTRACE, "setting l_data to inode "DFID"(%p)\n",
 		       PFID(ll_inode2fid(inode)), inode);
-                ll_set_lock_data(sbi->ll_md_exp, inode, it, NULL);
-        }
+		ll_set_lock_data(sbi->ll_md_exp, inode, it, NULL);
+	}
 
-        /* drop lookup or getattr locks immediately */
-        if (it->it_op == IT_LOOKUP || it->it_op == IT_GETATTR) {
-                /* on 2.6 there are situation when several lookups and
-                 * revalidations may be requested during single operation.
-                 * therefore, we don't release intent here -bzzz */
-                ll_intent_drop_lock(it);
-        }
+	/* drop lookup or getattr locks immediately */
+	if (it->it_op == IT_LOOKUP || it->it_op == IT_GETATTR)
+		ll_intent_drop_lock(it);
 }
 
 static int ll_revalidate_dentry(struct dentry *dentry,
@@ -294,12 +300,18 @@ static int ll_revalidate_dentry(struct dentry *dentry,
 		return 1;
 
 	/* Symlink - always valid as long as the dentry was found */
-#ifdef HAVE_IOP_GET_LINK
-	if (dentry->d_inode && dentry->d_inode->i_op->get_link)
-#else
-	if (dentry->d_inode && dentry->d_inode->i_op->follow_link)
-#endif
-		return 1;
+	/* only special case is to prevent ELOOP error from VFS during open
+	 * of a foreign symlink file/dir with O_NOFOLLOW, like it happens for
+	 * real symlinks. This will allow to open foreign symlink file/dir
+	 * for get[dir]stripe/unlock ioctl()s.
+	 */
+	if (d_is_symlink(dentry)) {
+		if (!S_ISLNK(dentry->d_inode->i_mode) &&
+		    !(lookup_flags & LOOKUP_FOLLOW))
+			return 0;
+		else
+			return 1;
+	}
 
 	/*
 	 * VFS warns us that this is the second go around and previous

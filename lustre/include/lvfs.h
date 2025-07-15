@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/include/lvfs.h
  *
@@ -52,7 +51,6 @@ struct dt_device;
 struct lvfs_run_ctxt {
 	struct vfsmount		*pwdmnt;
 	struct dentry		*pwd;
-	mm_segment_t		 fs;
 	int			 umask;
 	struct dt_device	*dt;
 #ifdef OBD_CTXT_DEBUG

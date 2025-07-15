@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/llite/llite_lib.c
  *
@@ -48,7 +47,6 @@
 #include <linux/user_namespace.h>
 #include <linux/delay.h>
 #include <linux/uidgid.h>
-#include <linux/security.h>
 #include <linux/fs_struct.h>
 
 #ifndef HAVE_CPUS_READ_LOCK
@@ -86,7 +84,7 @@ static inline unsigned int ll_get_ra_async_max_active(void)
 	return cfs_cpt_weight(cfs_cpt_tab, CFS_CPT_ANY) >> 1;
 }
 
-static struct ll_sb_info *ll_init_sbi(void)
+static struct ll_sb_info *ll_init_sbi(struct super_block *sb)
 {
 	struct ll_sb_info *sbi = NULL;
 	unsigned long pages;
@@ -105,6 +103,10 @@ static struct ll_sb_info *ll_init_sbi(void)
 	if (rc < 0)
 		GOTO(out_sbi, rc);
 
+	rc = wbc_super_init(&sbi->ll_wbc_super, sb);
+	if (rc)
+		GOTO(out_pcc, rc);
+
 	spin_lock_init(&sbi->ll_lock);
 	mutex_init(&sbi->ll_lco.lco_lock);
 	spin_lock_init(&sbi->ll_pp_extent_lock);
@@ -122,12 +124,31 @@ static struct ll_sb_info *ll_init_sbi(void)
 				       0, CFS_CPT_ANY,
 				       sbi->ll_ra_info.ra_async_max_active);
 	if (IS_ERR(sbi->ll_ra_info.ll_readahead_wq))
-		GOTO(out_pcc, rc = PTR_ERR(sbi->ll_ra_info.ll_readahead_wq));
+		GOTO(out_wbc, rc = PTR_ERR(sbi->ll_ra_info.ll_readahead_wq));
 
 	/* initialize ll_cache data */
 	sbi->ll_cache = cl_cache_init(lru_page_max);
 	if (sbi->ll_cache == NULL)
 		GOTO(out_destroy_ra, rc = -ENOMEM);
+
+	/* initialize foreign symlink prefix path */
+	OBD_ALLOC(sbi->ll_foreign_symlink_prefix, sizeof("/mnt/"));
+	if (sbi->ll_foreign_symlink_prefix == NULL)
+		GOTO(out_destroy_ra, rc = -ENOMEM);
+	memcpy(sbi->ll_foreign_symlink_prefix, "/mnt/", sizeof("/mnt/"));
+	sbi->ll_foreign_symlink_prefix_size = sizeof("/mnt/");
+
+	/* initialize foreign symlink upcall path, none by default */
+	OBD_ALLOC(sbi->ll_foreign_symlink_upcall, sizeof("none"));
+	if (sbi->ll_foreign_symlink_upcall == NULL)
+		GOTO(out_destroy_ra, rc = -ENOMEM);
+	memcpy(sbi->ll_foreign_symlink_upcall, "none", sizeof("none"));
+	sbi->ll_foreign_symlink_upcall_items = NULL;
+	sbi->ll_foreign_symlink_upcall_nb_items = 0;
+	init_rwsem(&sbi->ll_foreign_symlink_sem);
+	/* foreign symlink support (LL_SBI_FOREIGN_SYMLINK in ll_flags)
+	 * not enabled by default
+	 */
 
 	sbi->ll_ra_info.ra_max_pages =
 		min(pages / 32, SBI_DEFAULT_READ_AHEAD_MAX);
@@ -162,6 +183,7 @@ static struct ll_sb_info *ll_init_sbi(void)
 
 	/* metadata statahead is enabled by default */
 	sbi->ll_sa_running_max = LL_SA_RUNNING_DEF;
+	sbi->ll_sa_batch_max = LL_SA_BATCH_DEF;
 	sbi->ll_sa_max = LL_SA_RPC_DEF;
 	atomic_set(&sbi->ll_sa_total, 0);
 	atomic_set(&sbi->ll_sa_wrong, 0);
@@ -181,9 +203,22 @@ static struct ll_sb_info *ll_init_sbi(void)
 	/* Per-filesystem file heat */
 	sbi->ll_heat_decay_weight = SBI_DEFAULT_HEAT_DECAY_WEIGHT;
 	sbi->ll_heat_period_second = SBI_DEFAULT_HEAT_PERIOD_SECOND;
+
+	/* Per-fs open heat level before requesting open lock */
+	sbi->ll_oc_thrsh_count = SBI_DEFAULT_OPENCACHE_THRESHOLD_COUNT;
+	sbi->ll_oc_max_ms = SBI_DEFAULT_OPENCACHE_THRESHOLD_MAX_MS;
+	sbi->ll_oc_thrsh_ms = SBI_DEFAULT_OPENCACHE_THRESHOLD_MS;
 	RETURN(sbi);
 out_destroy_ra:
+	if (sbi->ll_foreign_symlink_prefix)
+		OBD_FREE(sbi->ll_foreign_symlink_prefix, sizeof("/mnt/"));
+	if (sbi->ll_cache) {
+		cl_cache_decref(sbi->ll_cache);
+		sbi->ll_cache = NULL;
+	}
 	destroy_workqueue(sbi->ll_ra_info.ll_readahead_wq);
+out_wbc:
+	wbc_super_fini(&sbi->ll_wbc_super);
 out_pcc:
 	pcc_super_fini(&sbi->ll_pcc_super);
 out_sbi:
@@ -205,6 +240,33 @@ static void ll_free_sbi(struct super_block *sb)
 			cl_cache_decref(sbi->ll_cache);
 			sbi->ll_cache = NULL;
 		}
+		if (sbi->ll_foreign_symlink_prefix) {
+			OBD_FREE(sbi->ll_foreign_symlink_prefix,
+				 sbi->ll_foreign_symlink_prefix_size);
+			sbi->ll_foreign_symlink_prefix = NULL;
+		}
+		if (sbi->ll_foreign_symlink_upcall) {
+			OBD_FREE(sbi->ll_foreign_symlink_upcall,
+				 strlen(sbi->ll_foreign_symlink_upcall) +
+				       1);
+			sbi->ll_foreign_symlink_upcall = NULL;
+		}
+		if (sbi->ll_foreign_symlink_upcall_items) {
+			int i;
+			int nb_items = sbi->ll_foreign_symlink_upcall_nb_items;
+			struct ll_foreign_symlink_upcall_item *items =
+				sbi->ll_foreign_symlink_upcall_items;
+
+			for (i = 0 ; i < nb_items; i++)
+				if (items[i].type == STRING_TYPE)
+					OBD_FREE(items[i].string,
+						       items[i].size);
+
+			OBD_FREE_LARGE(items, nb_items *
+				sizeof(struct ll_foreign_symlink_upcall_item));
+			sbi->ll_foreign_symlink_upcall_items = NULL;
+		}
+		wbc_super_fini(&sbi->ll_wbc_super);
 		pcc_super_fini(&sbi->ll_pcc_super);
 		OBD_FREE(sbi, sizeof(*sbi));
 	}
@@ -281,7 +343,9 @@ static int client_common_fill_super(struct super_block *sb, char *md, char *dt)
 				   OBD_CONNECT2_PCC |
 				   OBD_CONNECT2_CRUSH | OBD_CONNECT2_LSEEK |
 				   OBD_CONNECT2_GETATTR_PFID |
-				   OBD_CONNECT2_DOM_LVB;
+				   OBD_CONNECT2_DOM_LVB |
+				   OBD_CONNECT2_REP_MBITS |
+				   OBD_CONNECT2_BATCH_RPC;
 
 #ifdef HAVE_LRU_RESIZE_SUPPORT
         if (sbi->ll_flags & LL_SBI_LRU_RESIZE)
@@ -310,13 +374,7 @@ static int client_common_fill_super(struct super_block *sb, char *md, char *dt)
 	 */
 	sb->s_flags |= SB_NOSEC;
 #endif
-
-	if (sbi->ll_flags & LL_SBI_FLOCK)
-		sbi->ll_fop = &ll_file_operations_flock;
-	else if (sbi->ll_flags & LL_SBI_LOCALFLOCK)
-		sbi->ll_fop = &ll_file_operations;
-	else
-		sbi->ll_fop = &ll_file_operations_noflock;
+	sbi->ll_fop = ll_select_file_operations(sbi);
 
 	/* always ping even if server suppress_pings */
 	if (sbi->ll_flags & LL_SBI_ALWAYS_PING)
@@ -479,7 +537,8 @@ static int client_common_fill_super(struct super_block *sb, char *md, char *dt)
 				  OBD_CONNECT_BULK_MBITS | OBD_CONNECT_SHORTIO |
 				  OBD_CONNECT_FLAGS2 | OBD_CONNECT_GRANT_SHRINK;
 	data->ocd_connect_flags2 = OBD_CONNECT2_LOCKAHEAD |
-				   OBD_CONNECT2_INC_XID | OBD_CONNECT2_LSEEK;
+				   OBD_CONNECT2_INC_XID | OBD_CONNECT2_LSEEK |
+				   OBD_CONNECT2_REP_MBITS;
 
 	if (!OBD_FAIL_CHECK(OBD_FAIL_OSC_CONNECT_GRANT_PARAM))
 		data->ocd_connect_flags |= OBD_CONNECT_GRANT_PARAM;
@@ -613,8 +672,8 @@ static int client_common_fill_super(struct super_block *sb, char *md, char *dt)
 		GOTO(out_lock_cn_cb, err);
 	}
 
-	err = md_get_lustre_md(sbi->ll_md_exp, request, sbi->ll_dt_exp,
-			       sbi->ll_md_exp, &lmd);
+	err = md_get_lustre_md(sbi->ll_md_exp, &request->rq_pill,
+			       sbi->ll_dt_exp, sbi->ll_md_exp, &lmd);
 	if (err) {
 		CERROR("failed to understand root inode md: rc = %d\n", err);
 		ptlrpc_req_finished(request);
@@ -698,8 +757,7 @@ static int client_common_fill_super(struct super_block *sb, char *md, char *dt)
 
 	RETURN(err);
 out_root:
-	if (root)
-		iput(root);
+	iput(root);
 out_lock_cn_cb:
 	obd_fid_fini(sbi->ll_dt_exp->exp_obd);
 out_dt:
@@ -836,6 +894,8 @@ void ll_kill_super(struct super_block *sb)
 		while (atomic_read(&sbi->ll_sa_running) > 0)
 			schedule_timeout_uninterruptible(
 				cfs_time_seconds(1) >> 3);
+
+		(void) wbc_super_shrink_roots(&sbi->ll_wbc_super);
 	}
 
 	EXIT;
@@ -988,6 +1048,58 @@ static int ll_options(char *options, struct ll_sb_info *sbi)
 #endif
 			goto next;
 		}
+		tmp = ll_set_opt("foreign_symlink", s1, LL_SBI_FOREIGN_SYMLINK);
+		if (tmp) {
+			int prefix_pos = sizeof("foreign_symlink=") - 1;
+			int equal_pos = sizeof("foreign_symlink=") - 2;
+
+			/* non-default prefix provided ? */
+			if (strlen(s1) >= sizeof("foreign_symlink=") &&
+			    *(s1 + equal_pos) == '=') {
+				char *old = sbi->ll_foreign_symlink_prefix;
+				size_t old_len =
+					sbi->ll_foreign_symlink_prefix_size;
+
+				/* path must be absolute */
+				if (*(s1 + sizeof("foreign_symlink=")
+				      - 1) != '/') {
+					LCONSOLE_ERROR_MSG(0x152,
+						"foreign prefix '%s' must be an absolute path\n",
+						s1 + prefix_pos);
+					RETURN(-EINVAL);
+				}
+				/* last option ? */
+				s2 = strchrnul(s1 + prefix_pos, ',');
+
+				if (sbi->ll_foreign_symlink_prefix) {
+					sbi->ll_foreign_symlink_prefix = NULL;
+					sbi->ll_foreign_symlink_prefix_size = 0;
+				}
+				/* alloc for path length and '\0' */
+				OBD_ALLOC(sbi->ll_foreign_symlink_prefix,
+						s2 - (s1 + prefix_pos) + 1);
+				if (!sbi->ll_foreign_symlink_prefix) {
+					/* restore previous */
+					sbi->ll_foreign_symlink_prefix = old;
+					sbi->ll_foreign_symlink_prefix_size =
+						old_len;
+					RETURN(-ENOMEM);
+				}
+				if (old)
+					OBD_FREE(old, old_len);
+				strncpy(sbi->ll_foreign_symlink_prefix,
+					s1 + prefix_pos,
+					s2 - (s1 + prefix_pos));
+				sbi->ll_foreign_symlink_prefix_size =
+					s2 - (s1 + prefix_pos) + 1;
+			} else {
+				LCONSOLE_ERROR_MSG(0x152,
+						   "invalid %s option\n", s1);
+			}
+			/* enable foreign symlink support */
+			*flags |= tmp;
+			goto next;
+		}
                 LCONSOLE_ERROR_MSG(0x152, "Unknown option '%s', won't mount.\n",
                                    s1);
                 RETURN(-EINVAL);
@@ -1058,6 +1170,7 @@ void ll_lli_init(struct ll_inode_info *lli)
 	}
 	mutex_init(&lli->lli_layout_mutex);
 	memset(lli->lli_jobid, 0, sizeof(lli->lli_jobid));
+	wbc_inode_init(ll_info2i(lli));
 }
 
 #define MAX_STRING_SIZE 128
@@ -1120,12 +1233,14 @@ int ll_fill_super(struct super_block *sb)
 	CDEBUG(D_VFSTRACE, "VFS Op: cfg_instance %s-%016lx (sb %p)\n",
 	       profilenm, cfg_instance, sb);
 
+	OBD_RACE(OBD_FAIL_LLITE_RACE_MOUNT);
+
 	OBD_ALLOC_PTR(cfg);
 	if (cfg == NULL)
 		GOTO(out_free_cfg, err = -ENOMEM);
 
 	/* client additional sb info */
-	lsi->lsi_llsbi = sbi = ll_init_sbi();
+	lsi->lsi_llsbi = sbi = ll_init_sbi(sb);
 	if (IS_ERR(sbi))
 		GOTO(out_free_cfg, err = PTR_ERR(sbi));
 
@@ -1329,8 +1444,6 @@ out_no_sbi:
 
 	cl_env_cache_purge(~0);
 
-	module_put(THIS_MODULE);
-
 	EXIT;
 } /* client_put_super */
 
@@ -1492,30 +1605,27 @@ static void ll_update_default_lsm_md(struct inode *inode, struct lustre_md *md)
 			}
 			up_write(&lli->lli_lsm_sem);
 		}
-	} else if (lli->lli_default_lsm_md) {
-		/* update default lsm if it changes */
+		return;
+	}
+
+	if (lli->lli_default_lsm_md) {
+		/* do nonthing if default lsm isn't changed */
 		down_read(&lli->lli_lsm_sem);
 		if (lli->lli_default_lsm_md &&
-		    !lsm_md_eq(lli->lli_default_lsm_md, md->default_lmv)) {
+		    lsm_md_eq(lli->lli_default_lsm_md, md->default_lmv)) {
 			up_read(&lli->lli_lsm_sem);
-			down_write(&lli->lli_lsm_sem);
-			if (lli->lli_default_lsm_md)
-				lmv_free_memmd(lli->lli_default_lsm_md);
-			lli->lli_default_lsm_md = md->default_lmv;
-			lsm_md_dump(D_INODE, md->default_lmv);
-			md->default_lmv = NULL;
-			up_write(&lli->lli_lsm_sem);
-		} else {
-			up_read(&lli->lli_lsm_sem);
+			return;
 		}
-	} else {
-		/* init default lsm */
-		down_write(&lli->lli_lsm_sem);
-		lli->lli_default_lsm_md = md->default_lmv;
-		lsm_md_dump(D_INODE, md->default_lmv);
-		md->default_lmv = NULL;
-		up_write(&lli->lli_lsm_sem);
+		up_read(&lli->lli_lsm_sem);
 	}
+
+	down_write(&lli->lli_lsm_sem);
+	if (lli->lli_default_lsm_md)
+		lmv_free_memmd(lli->lli_default_lsm_md);
+	lli->lli_default_lsm_md = md->default_lmv;
+	lsm_md_dump(D_INODE, md->default_lmv);
+	md->default_lmv = NULL;
+	up_write(&lli->lli_lsm_sem);
 }
 
 static int ll_update_lsm_md(struct inode *inode, struct lustre_md *md)
@@ -1708,7 +1818,8 @@ static int ll_md_setattr(struct dentry *dentry, struct md_op_data *op_data)
 			    !S_ISDIR(inode->i_mode)) {
 				ia_valid = op_data->op_attr.ia_valid;
 				op_data->op_attr.ia_valid &= ~TIMES_SET_FLAGS;
-				rc = simple_setattr(dentry, &op_data->op_attr);
+				rc = simple_setattr_no_dirty(dentry,
+							     &op_data->op_attr);
 				op_data->op_attr.ia_valid = ia_valid;
 			}
 		} else if (rc != -EPERM && rc != -EACCES && rc != -ETXTBSY) {
@@ -1717,8 +1828,8 @@ static int ll_md_setattr(struct dentry *dentry, struct md_op_data *op_data)
 		RETURN(rc);
 	}
 
-        rc = md_get_lustre_md(sbi->ll_md_exp, request, sbi->ll_dt_exp,
-                              sbi->ll_md_exp, &md);
+	rc = md_get_lustre_md(sbi->ll_md_exp, &request->rq_pill, sbi->ll_dt_exp,
+			      sbi->ll_md_exp, &md);
         if (rc) {
                 ptlrpc_req_finished(request);
                 RETURN(rc);
@@ -1730,7 +1841,7 @@ static int ll_md_setattr(struct dentry *dentry, struct md_op_data *op_data)
 	op_data->op_attr.ia_valid &= ~(TIMES_SET_FLAGS | ATTR_SIZE);
 	if (S_ISREG(inode->i_mode))
 		inode_lock(inode);
-	rc = simple_setattr(dentry, &op_data->op_attr);
+	rc = simple_setattr_no_dirty(dentry, &op_data->op_attr);
 	if (S_ISREG(inode->i_mode))
 		inode_unlock(inode);
 	op_data->op_attr.ia_valid = ia_valid;
@@ -1951,7 +2062,7 @@ int ll_setattr_raw(struct dentry *dentry, struct iattr *attr,
 	/* POSIX: check before ATTR_*TIME_SET set (from inode_change_ok) */
 	if (attr->ia_valid & TIMES_SET_FLAGS) {
 		if ((!uid_eq(current_fsuid(), inode->i_uid)) &&
-		    !cfs_capable(CFS_CAP_FOWNER))
+		    !capable(CAP_FOWNER))
 			RETURN(-EPERM);
 	}
 
@@ -1993,7 +2104,7 @@ int ll_setattr_raw(struct dentry *dentry, struct iattr *attr,
 		 */
 		xvalid |= OP_XVALID_OWNEROVERRIDE;
 		op_data->op_bias |= MDS_DATA_MODIFIED;
-		ll_file_clear_flag(lli, LLIF_DATA_MODIFIED);
+		clear_bit(LLIF_DATA_MODIFIED, &lli->lli_flags);
 	}
 
 	if (attr->ia_valid & ATTR_FILE) {
@@ -2005,6 +2116,7 @@ int ll_setattr_raw(struct dentry *dentry, struct iattr *attr,
 
 	op_data->op_attr = *attr;
 	op_data->op_xvalid = xvalid;
+	op_data->op_bias |= wbc_md_op_bias(ll_i2wbci(inode));
 
 	rc = ll_md_setattr(dentry, op_data);
 	if (rc)
@@ -2078,7 +2190,7 @@ int ll_setattr_raw(struct dentry *dentry, struct iattr *attr,
 	 * LLIF_DATA_MODIFIED is not set(see vvp_io_setattr_fini()).
 	 * This way we can save an RPC for common open + trunc
 	 * operation. */
-	if (ll_file_test_and_clear_flag(lli, LLIF_DATA_MODIFIED)) {
+	if (test_and_clear_bit(LLIF_DATA_MODIFIED, &lli->lli_flags)) {
 		struct hsm_state_set hss = {
 			.hss_valid = HSS_SETMASK,
 			.hss_setmask = HS_DIRTY,
@@ -2319,15 +2431,15 @@ void ll_inode_size_unlock(struct inode *inode)
 	mutex_unlock(&lli->lli_size_mutex);
 }
 
-void ll_update_inode_flags(struct inode *inode, int ext_flags)
+void ll_update_inode_flags(struct inode *inode, unsigned int ext_flags)
 {
 	/* do not clear encryption flag */
 	ext_flags |= ll_inode_to_ext_flags(inode->i_flags) & LUSTRE_ENCRYPT_FL;
 	inode->i_flags = ll_ext_to_inode_flags(ext_flags);
 	if (ext_flags & LUSTRE_PROJINHERIT_FL)
-		ll_file_set_flag(ll_i2info(inode), LLIF_PROJECT_INHERIT);
+		set_bit(LLIF_PROJECT_INHERIT, &ll_i2info(inode)->lli_flags);
 	else
-		ll_file_clear_flag(ll_i2info(inode), LLIF_PROJECT_INHERIT);
+		clear_bit(LLIF_PROJECT_INHERIT, &ll_i2info(inode)->lli_flags);
 }
 
 int ll_update_inode(struct inode *inode, struct lustre_md *md)
@@ -2400,7 +2512,8 @@ int ll_update_inode(struct inode *inode, struct lustre_md *md)
 		inode->i_gid = make_kgid(&init_user_ns, body->mbo_gid);
 	if (body->mbo_valid & OBD_MD_FLPROJID)
 		lli->lli_projid = body->mbo_projid;
-	if (body->mbo_valid & OBD_MD_FLNLINK)
+	if (body->mbo_valid & OBD_MD_FLNLINK &&
+	    !wbc_inode_has_protected(ll_i2wbci(inode)))
 		set_nlink(inode, body->mbo_nlink);
 	if (body->mbo_valid & OBD_MD_FLRDEV)
 		inode->i_rdev = old_decode_dev(body->mbo_rdev);
@@ -2421,7 +2534,16 @@ int ll_update_inode(struct inode *inode, struct lustre_md *md)
 	LASSERT(fid_seq(&lli->lli_fid) != 0);
 
 	lli->lli_attr_valid = body->mbo_valid;
-	if (body->mbo_valid & OBD_MD_FLSIZE) {
+	/*
+	 * Don't update size for a WBC cached directory and regular file as
+	 * the size management is charged by the client.
+	 * i.e. for Data On PCC (DOP), the metadata object is in HSM released
+	 * state, the size returned from MDT is strict correct with 0. However,
+	 * we can not update the file size here if the data is not committed
+	 * into PCC backend yet.
+	 */
+	if (body->mbo_valid & OBD_MD_FLSIZE &&
+	    !wbc_inode_has_protected(ll_i2wbci(inode))) {
 		i_size_write(inode, body->mbo_size);
 
 		CDEBUG(D_VFSTRACE, "inode="DFID", updating i_size %llu\n",
@@ -2443,12 +2565,40 @@ int ll_update_inode(struct inode *inode, struct lustre_md *md)
 		 * glimpsing updated attrs
 		 */
 		if (body->mbo_t_state & MS_RESTORE)
-			ll_file_set_flag(lli, LLIF_FILE_RESTORING);
+			set_bit(LLIF_FILE_RESTORING, &lli->lli_flags);
 		else
-			ll_file_clear_flag(lli, LLIF_FILE_RESTORING);
+			clear_bit(LLIF_FILE_RESTORING, &lli->lli_flags);
 	}
 
 	return 0;
+}
+
+void ll_truncate_inode_pages_final(struct inode *inode)
+{
+	struct address_space *mapping = &inode->i_data;
+	unsigned long nrpages;
+	unsigned long flags;
+
+	truncate_inode_pages_final(mapping);
+
+	/* Workaround for LU-118: Note nrpages may not be totally updated when
+	 * truncate_inode_pages() returns, as there can be a page in the process
+	 * of deletion (inside __delete_from_page_cache()) in the specified
+	 * range. Thus mapping->nrpages can be non-zero when this function
+	 * returns even after truncation of the whole mapping.  Only do this if
+	 * npages isn't already zero.
+	 */
+	nrpages = mapping->nrpages;
+	if (nrpages) {
+		ll_xa_lock_irqsave(&mapping->i_pages, flags);
+		nrpages = mapping->nrpages;
+		ll_xa_unlock_irqrestore(&mapping->i_pages, flags);
+	} /* Workaround end */
+
+	LASSERTF(nrpages == 0, "%s: inode="DFID"(%p) nrpages=%lu, "
+		 "see https://jira.whamcloud.com/browse/LU-118\n",
+		 ll_i2sbi(inode)->ll_fsname,
+		 PFID(ll_inode2fid(inode)), inode, nrpages);
 }
 
 int ll_read_inode2(struct inode *inode, void *opaque)
@@ -2507,14 +2657,9 @@ int ll_read_inode2(struct inode *inode, void *opaque)
 
 void ll_delete_inode(struct inode *inode)
 {
-	struct ll_inode_info *lli = ll_i2info(inode);
-	struct address_space *mapping = &inode->i_data;
-	unsigned long nrpages;
-	unsigned long flags;
-
 	ENTRY;
 
-	if (S_ISREG(inode->i_mode) && lli->lli_clob != NULL) {
+	if (S_ISREG(inode->i_mode)) {
 		/* It is last chance to write out dirty pages,
 		 * otherwise we may lose data while umount.
 		 *
@@ -2522,30 +2667,19 @@ void ll_delete_inode(struct inode *inode)
 		 * local inode gets i_nlink 0 from server only for the last
 		 * unlink, so that file is not opened somewhere else
 		 */
-		cl_sync_file_range(inode, 0, OBD_OBJECT_EOF, inode->i_nlink ?
-				   CL_FSYNC_LOCAL : CL_FSYNC_DISCARD, 1);
+		if (ll_data_in_lustre(inode))
+			cl_sync_file_range(inode, 0, OBD_OBJECT_EOF,
+					   inode->i_nlink ? CL_FSYNC_LOCAL :
+					   CL_FSYNC_DISCARD, 1);
+		else
+			wbc_free_inode_pages_final(inode, &inode->i_data);
+
+		wbc_inode_data_lru_del(inode);
 	}
-	truncate_inode_pages_final(mapping);
 
-	/* Workaround for LU-118: Note nrpages may not be totally updated when
-	 * truncate_inode_pages() returns, as there can be a page in the process
-	 * of deletion (inside __delete_from_page_cache()) in the specified
-	 * range. Thus mapping->nrpages can be non-zero when this function
-	 * returns even after truncation of the whole mapping.  Only do this if
-	 * npages isn't already zero.
-	 */
-	nrpages = mapping->nrpages;
-	if (nrpages) {
-		ll_xa_lock_irqsave(&mapping->i_pages, flags);
-		nrpages = mapping->nrpages;
-		ll_xa_unlock_irqrestore(&mapping->i_pages, flags);
-	} /* Workaround end */
+	ll_truncate_inode_pages_final(inode);
 
-	LASSERTF(nrpages == 0, "%s: inode="DFID"(%p) nrpages=%lu, "
-		 "see https://jira.whamcloud.com/browse/LU-118\n",
-		 ll_i2sbi(inode)->ll_fsname,
-		 PFID(ll_inode2fid(inode)), inode, nrpages);
-
+	wbc_free_inode(inode);
 	ll_clear_inode(inode);
 	clear_inode(inode);
 
@@ -2669,6 +2803,8 @@ void ll_umount_begin(struct super_block *sb)
 	CDEBUG(D_VFSTRACE, "VFS Op: superblock %p count %d active %d\n", sb,
 	       sb->s_count, atomic_read(&sb->s_active));
 
+	(void) wbc_super_shrink_roots(&sbi->ll_wbc_super);
+
 	obd = class_exp2obd(sbi->ll_md_exp);
 	if (obd == NULL) {
 		CERROR("Invalid MDC connection handle %#llx\n",
@@ -2759,7 +2895,7 @@ int ll_remount_fs(struct super_block *sb, int *flags, char *data)
  * \param[in] sb	super block for this file-system
  * \param[in] open_req	pointer to the original open request
  */
-void ll_open_cleanup(struct super_block *sb, struct ptlrpc_request *open_req)
+void ll_open_cleanup(struct super_block *sb, struct req_capsule *pill)
 {
 	struct mdt_body			*body;
 	struct md_op_data		*op_data;
@@ -2767,7 +2903,7 @@ void ll_open_cleanup(struct super_block *sb, struct ptlrpc_request *open_req)
 	struct obd_export		*exp	   = ll_s2sbi(sb)->ll_md_exp;
 	ENTRY;
 
-	body = req_capsule_server_get(&open_req->rq_pill, &RMF_MDT_BODY);
+	body = req_capsule_server_get(pill, &RMF_MDT_BODY);
 	OBD_ALLOC_PTR(op_data);
 	if (op_data == NULL) {
 		CWARN("%s: cannot allocate op_data to release open handle for "
@@ -2786,7 +2922,7 @@ void ll_open_cleanup(struct super_block *sb, struct ptlrpc_request *open_req)
 	EXIT;
 }
 
-int ll_prep_inode(struct inode **inode, struct ptlrpc_request *req,
+int ll_prep_inode(struct inode **inode, struct req_capsule *pill,
 		  struct super_block *sb, struct lookup_intent *it)
 {
 	struct ll_sb_info *sbi = NULL;
@@ -2798,7 +2934,7 @@ int ll_prep_inode(struct inode **inode, struct ptlrpc_request *req,
 
 	LASSERT(*inode || sb);
 	sbi = sb ? ll_s2sbi(sb) : ll_i2sbi(*inode);
-	rc = md_get_lustre_md(sbi->ll_md_exp, req, sbi->ll_dt_exp,
+	rc = md_get_lustre_md(sbi->ll_md_exp, pill, sbi->ll_dt_exp,
 			      sbi->ll_md_exp, &md);
 	if (rc != 0)
 		GOTO(out, rc);
@@ -2873,6 +3009,13 @@ int ll_prep_inode(struct inode **inode, struct ptlrpc_request *req,
 	if (default_lmv_deleted)
 		ll_update_default_lsm_md(*inode, &md);
 
+	/* we may want to apply some policy for foreign file/dir */
+	if (ll_sbi_has_foreign_symlink(sbi)) {
+		rc = ll_manage_foreign(*inode, &md);
+		if (rc < 0)
+			GOTO(out, rc);
+	}
+
 	GOTO(out, rc = 0);
 
 out:
@@ -2881,7 +3024,7 @@ out:
 
 	if (rc != 0 && it != NULL && it->it_op & IT_OPEN) {
 		ll_intent_drop_lock(it);
-		ll_open_cleanup(sb != NULL ? sb : (*inode)->i_sb, req);
+		ll_open_cleanup(sb != NULL ? sb : (*inode)->i_sb, pill);
 	}
 
 	return rc;
@@ -2889,44 +3032,44 @@ out:
 
 int ll_obd_statfs(struct inode *inode, void __user *arg)
 {
-        struct ll_sb_info *sbi = NULL;
-        struct obd_export *exp;
-        char *buf = NULL;
-        struct obd_ioctl_data *data = NULL;
-        __u32 type;
-        int len = 0, rc;
+	struct ll_sb_info *sbi = NULL;
+	struct obd_export *exp;
+	struct obd_ioctl_data *data = NULL;
+	__u32 type;
+	int len = 0, rc;
 
-        if (!inode || !(sbi = ll_i2sbi(inode)))
-                GOTO(out_statfs, rc = -EINVAL);
+	if (inode)
+		sbi = ll_i2sbi(inode);
+	if (!sbi)
+		GOTO(out_statfs, rc = -EINVAL);
 
-        rc = obd_ioctl_getdata(&buf, &len, arg);
-        if (rc)
-                GOTO(out_statfs, rc);
+	rc = obd_ioctl_getdata(&data, &len, arg);
+	if (rc)
+		GOTO(out_statfs, rc);
 
-        data = (void*)buf;
-        if (!data->ioc_inlbuf1 || !data->ioc_inlbuf2 ||
-            !data->ioc_pbuf1 || !data->ioc_pbuf2)
-                GOTO(out_statfs, rc = -EINVAL);
+	if (!data->ioc_inlbuf1 || !data->ioc_inlbuf2 ||
+	    !data->ioc_pbuf1 || !data->ioc_pbuf2)
+		GOTO(out_statfs, rc = -EINVAL);
 
-        if (data->ioc_inllen1 != sizeof(__u32) ||
-            data->ioc_inllen2 != sizeof(__u32) ||
-            data->ioc_plen1 != sizeof(struct obd_statfs) ||
-            data->ioc_plen2 != sizeof(struct obd_uuid))
-                GOTO(out_statfs, rc = -EINVAL);
+	if (data->ioc_inllen1 != sizeof(__u32) ||
+	    data->ioc_inllen2 != sizeof(__u32) ||
+	    data->ioc_plen1 != sizeof(struct obd_statfs) ||
+	    data->ioc_plen2 != sizeof(struct obd_uuid))
+		GOTO(out_statfs, rc = -EINVAL);
 
-        memcpy(&type, data->ioc_inlbuf1, sizeof(__u32));
+	memcpy(&type, data->ioc_inlbuf1, sizeof(__u32));
 	if (type & LL_STATFS_LMV)
-                exp = sbi->ll_md_exp;
+		exp = sbi->ll_md_exp;
 	else if (type & LL_STATFS_LOV)
-                exp = sbi->ll_dt_exp;
-        else
-                GOTO(out_statfs, rc = -ENODEV);
+		exp = sbi->ll_dt_exp;
+	else
+		GOTO(out_statfs, rc = -ENODEV);
 
-	rc = obd_iocontrol(IOC_OBD_STATFS, exp, len, buf, NULL);
-        if (rc)
-                GOTO(out_statfs, rc);
+	rc = obd_iocontrol(IOC_OBD_STATFS, exp, len, data, NULL);
+	if (rc)
+		GOTO(out_statfs, rc);
 out_statfs:
-	OBD_FREE_LARGE(buf, len);
+	OBD_FREE_LARGE(data, len);
 	return rc;
 }
 
@@ -3030,8 +3173,8 @@ struct md_op_data *ll_prep_md_op_data(struct md_op_data *op_data,
 void ll_finish_md_op_data(struct md_op_data *op_data)
 {
 	ll_unlock_md_op_lsm(op_data);
-	security_release_secctx(op_data->op_file_secctx,
-				op_data->op_file_secctx_size);
+	ll_security_release_secctx(op_data->op_file_secctx,
+				   op_data->op_file_secctx_size);
 	llcrypt_free_ctx(op_data->op_file_encctx, op_data->op_file_encctx_size);
 	OBD_FREE_PTR(op_data);
 }
@@ -3077,6 +3220,11 @@ int ll_show_options(struct seq_file *seq, struct dentry *dentry)
 	else
 		seq_puts(seq, ",noencrypt");
 
+	if (sbi->ll_flags & LL_SBI_FOREIGN_SYMLINK) {
+		seq_puts(seq, ",foreign_symlink=");
+		seq_puts(seq, sbi->ll_foreign_symlink_prefix);
+	}
+
 	RETURN(0);
 }
 
@@ -3089,7 +3237,7 @@ int ll_get_obd_name(struct inode *inode, unsigned int cmd, unsigned long arg)
         struct obd_device *obd;
         ENTRY;
 
-        if (cmd == OBD_IOC_GETDTNAME)
+	if (cmd == OBD_IOC_GETNAME_OLD || cmd == OBD_IOC_GETDTNAME)
                 obd = class_exp2obd(sbi->ll_dt_exp);
         else if (cmd == OBD_IOC_GETMDNAME)
                 obd = class_exp2obd(sbi->ll_md_exp);
@@ -3279,7 +3427,7 @@ int ll_getparent(struct file *file, struct getparent __user *arg)
 
 	ENTRY;
 
-	if (!cfs_capable(CFS_CAP_DAC_READ_SEARCH) &&
+	if (!capable(CAP_DAC_READ_SEARCH) &&
 	    !(ll_i2sbi(inode)->ll_flags & LL_SBI_USER_FID2PATH))
 		RETURN(-EPERM);
 

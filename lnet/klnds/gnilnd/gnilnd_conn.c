@@ -868,7 +868,7 @@ kgnilnd_unpack_connreq(kgn_dgram_t *dgram)
 		rc = kgnilnd_find_net(connreq->gncr_dstnid, &net);
 
 		if (rc == -ESHUTDOWN) {
-			CERROR("Looking up network: device is in shutdown");
+			CERROR("Looking up network: device is in shutdown\n");
 			return rc;
 		} else if (rc == -ENONET) {
 			CERROR("Connection data from %s: she sent "
@@ -2537,7 +2537,7 @@ kgnilnd_dgram_mover(void *arg)
 		    !kgnilnd_data.kgn_quiesce_trigger) {
 			CDEBUG(D_INFO, "schedule timeout %ld (%lu sec)\n",
 			       timeout, cfs_duration_sec(timeout));
-			wake_up_all(&dev->gnd_dgping_waitq);
+			wake_up(&dev->gnd_dgping_waitq);
 			schedule();
 			CDEBUG(D_INFO, "awake after schedule\n");
 			deadline = jiffies + cfs_time_seconds(*kgnilnd_tunables.kgn_dgram_timeout);

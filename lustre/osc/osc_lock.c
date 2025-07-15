@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * Implementation of cl_lock for OSC layer.
  *
@@ -309,7 +308,7 @@ static int osc_lock_upcall(void *cookie, struct lustre_handle *lockh,
 		/* Hide the error. */
 		rc = 0;
 	} else if (rc < 0 && oscl->ols_flags & LDLM_FL_NDELAY) {
-		rc = -EWOULDBLOCK;
+		rc = -EAGAIN;
 	}
 
 	if (oscl->ols_owner != NULL)
@@ -1044,6 +1043,11 @@ enqueue_base:
 		if (osc_lock_is_lockless(oscl)) {
 			oio->oi_lockless = 1;
 		} else if (!async) {
+			if (OBD_FAIL_PRECHECK(OBD_FAIL_PTLRPC_IDLE_RACE)) {
+				OBD_RACE(OBD_FAIL_PTLRPC_IDLE_RACE);
+				set_current_state(TASK_UNINTERRUPTIBLE);
+				schedule_timeout(cfs_time_seconds(1) / 2);
+			}
 			LASSERT(oscl->ols_state == OLS_GRANTED);
 			LASSERT(oscl->ols_hold);
 			LASSERT(oscl->ols_dlmlock != NULL);
@@ -1189,6 +1193,9 @@ void osc_lock_set_writer(const struct lu_env *env, const struct cl_io *io,
 		io_start = cl_index(obj, io->u.ci_rw.crw_pos);
 		io_end = cl_index(obj, io->u.ci_rw.crw_pos +
 						io->u.ci_rw.crw_count - 1);
+	} else if (io->ci_type == CIT_MISC) {
+		io_start = descr->cld_start;
+		io_end = descr->cld_end;
 	} else {
 		LASSERT(cl_io_is_mkwrite(io));
 		io_start = io_end = io->u.ci_fault.ft_index;
@@ -1251,7 +1258,8 @@ int osc_lock_init(const struct lu_env *env,
 	if (oscl->ols_locklessable && !(enqflags & CEF_DISCARD_DATA))
 		oscl->ols_flags |= LDLM_FL_DENY_ON_CONTENTION;
 
-	if (io->ci_type == CIT_WRITE || cl_io_is_mkwrite(io))
+	if (io->ci_type == CIT_WRITE || cl_io_is_mkwrite(io) ||
+	    (io->ci_type == CIT_MISC && lock->cll_descr.cld_mode == CLM_WRITE))
 		osc_lock_set_writer(env, io, obj, oscl);
 
 	LDLM_DEBUG_NOLOCK("lock %p, osc lock %p, flags %#llx",

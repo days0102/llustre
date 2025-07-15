@@ -3,6 +3,7 @@ AM_CFLAGS := -fPIC -D_GNU_SOURCE \
 	     -D_LARGEFILE64_SOURCE=1 -D_FILE_OFFSET_BITS=64
 
 DIST_SUBDIRS = mpi
+DIST_SUBDIRS += lutf
 
 noinst_DATA = disk2_4-ldiskfs.tar.bz2 disk2_4-zfs.tar.bz2
 noinst_DATA += disk2_7-ldiskfs.tar.bz2 disk2_7-zfs.tar.bz2
@@ -39,6 +40,7 @@ noinst_SCRIPTS += sanity-lfsck.sh lfsck-performance.sh
 noinst_SCRIPTS += resolveip
 noinst_SCRIPTS += sanity-hsm.sh sanity-lsnapshot.sh sanity-pfl.sh sanity-flr.sh
 noinst_SCRIPTS += sanity-dom.sh sanity-pcc.sh dom-performance.sh sanity-lnet.sh
+noinst_SCRIPTS += sanity-wbc.sh
 nobase_noinst_SCRIPTS = cfg/local.sh
 nobase_noinst_SCRIPTS += test-groups/regression test-groups/regression-mpi
 nobase_noinst_SCRIPTS += acl/make-tree acl/run cfg/ncli.sh
@@ -77,6 +79,7 @@ THETESTS += swap_lock_test lockahead_test mirror_io mmap_mknod_test
 THETESTS += create_foreign_file parse_foreign_file
 THETESTS += create_foreign_dir parse_foreign_dir
 THETESTS += check_fallocate splice-test lseek_test expand_truncate_test
+THETESTS += foreign_symlink_striping lov_getstripe_old
 
 if LIBAIO
 THETESTS += aiocp
@@ -86,6 +89,15 @@ if TESTS
 if MPITESTS
 SUBDIRS = mpi
 endif
+
+# Build LUTF only if the packages are available
+if BUILD_LUTF
+if MPITESTS
+SUBDIRS += lutf
+else
+SUBDIRS = lutf
+endif
+endif # BUILD_LUTF
 
 bin_PROGRAMS = mcreate munlink statx
 testdir = $(libdir)/lustre/tests
@@ -111,6 +123,7 @@ rwv_LDADD = $(LIBLUSTREAPI)
 lockahead_test_LDADD = $(LIBLUSTREAPI)
 mirror_io_LDADD = $(LIBLUSTREAPI)
 ll_dirstripe_verify_LDADD = $(LIBLUSTREAPI)
+lov_getstripe_old_LDADD = $(LIBLUSTREAPI)
 flocks_test_LDADD = $(LIBLUSTREAPI) $(PTHREAD_LIBS)
 create_foreign_dir_LDADD = $(LIBLUSTREAPI)
 check_fallocate_LDADD = $(LIBLUSTREAPI)

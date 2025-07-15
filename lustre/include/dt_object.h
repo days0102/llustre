@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #ifndef __LUSTRE_DT_OBJECT_H
@@ -298,17 +297,6 @@ struct dt_device_operations {
 		       struct dt_device *dev);
 
 	/**
-	 * Wait pending quota update finish
-	 *
-	 * There might be a window that quota usage has been updated,
-	 * but commit callback to reduce pending write have not been
-	 * finished, this is used to wait all pending update done.
-	 *
-	 * \param[in] dev	dt device
-	 */
-	void (*dt_wait_quota_pending)(struct dt_device *dev);
-
-	/**
 	 * Start transaction commit asynchronously.
 	 *
 
@@ -400,8 +388,10 @@ struct dt_allocation_hint {
 	struct dt_object	*dah_parent;
 	const void		*dah_eadata;
 	int			dah_eadata_len;
+	int			dah_acl_len;
 	__u32			dah_mode;
 	int			dah_append_stripes;
+	bool			dah_can_block;
 	char			*dah_append_pool;
 };
 
@@ -1061,6 +1051,18 @@ struct dt_object_operations {
 	 * \retval negative	negated errno on error
 	 */
 	int   (*do_invalidate)(const struct lu_env *env, struct dt_object *dt);
+
+	/**
+	 * Check object stale state.
+	 *
+	 * OSP only.
+	 *
+	 * \param[in] dt	object
+	 *
+	 * \retval true		for stale object
+	 * \retval false	for not stale object
+	 */
+	bool (*do_check_stale)(struct dt_object *dt);
 
 	/**
 	 * Declare intention to instaintiate extended layout component.
@@ -2386,6 +2388,15 @@ static inline int dt_write_locked(const struct lu_env *env,
         return dt->do_ops->do_write_locked(env, dt);
 }
 
+static inline bool dt_object_stale(struct dt_object *dt)
+{
+	LASSERT(dt);
+	LASSERT(dt->do_ops);
+	LASSERT(dt->do_ops->do_check_stale);
+
+	return dt->do_ops->do_check_stale(dt);
+}
+
 static inline int dt_declare_attr_get(const struct lu_env *env,
 				      struct dt_object *dt)
 {
@@ -2708,14 +2719,6 @@ static inline int dt_ro(const struct lu_env *env, struct dt_device *dev)
         LASSERT(dev->dd_ops);
         LASSERT(dev->dd_ops->dt_ro);
         return dev->dd_ops->dt_ro(env, dev);
-}
-
-static inline void dt_wait_quota_pending(struct dt_device *dev)
-{
-	LASSERT(dev);
-	LASSERT(dev->dd_ops);
-	if (dev->dd_ops->dt_wait_quota_pending)
-		dev->dd_ops->dt_wait_quota_pending(dev);
 }
 
 static inline int dt_declare_insert(const struct lu_env *env,

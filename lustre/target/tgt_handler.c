@@ -622,8 +622,14 @@ static struct tgt_handler *tgt_handler_find_check(struct ptlrpc_request *req)
 
 	/* opcode was not found in slice */
 	if (unlikely(s->tos_hs == NULL)) {
-		CERROR("%s: no handlers for opcode 0x%x\n", tgt_name(tgt),
-		       opc);
+		static bool printed;
+
+		/* don't spew error messages for unhandled RPCs */
+		if (!printed) {
+			CERROR("%s: no handler for opcode 0x%x from %s\n",
+			       tgt_name(tgt), opc, libcfs_id2str(req->rq_peer));
+			printed = true;
+		}
 		RETURN(ERR_PTR(-ENOTSUPP));
 	}
 
@@ -967,7 +973,7 @@ int tgt_adapt_sptlrpc_conf(struct lu_target *tgt)
 	int			 rc;
 
 	if (unlikely(tgt == NULL)) {
-		CERROR("No target passed");
+		CERROR("No target passed\n");
 		return -EINVAL;
 	}
 
@@ -1304,14 +1310,14 @@ EXPORT_SYMBOL(tgt_sync);
  * \retval	0 on success
  * \retval	negative number on error
  */
-static int tgt_blocking_ast(struct ldlm_lock *lock, struct ldlm_lock_desc *desc,
-			    void *data, int flag)
+int tgt_blocking_ast(struct ldlm_lock *lock, struct ldlm_lock_desc *desc,
+		     void *data, int flag)
 {
-	struct lu_env		 env;
-	struct lu_target	*tgt;
-	struct dt_object	*obj = NULL;
-	struct lu_fid		 fid;
-	int			 rc = 0;
+	struct lu_env env;
+	struct lu_target *tgt;
+	struct dt_object *obj = NULL;
+	struct lu_fid fid;
+	int rc = 0;
 
 	ENTRY;
 
@@ -1370,6 +1376,7 @@ err:
 	rc = ldlm_server_blocking_ast(lock, desc, data, flag);
 	RETURN(rc);
 }
+EXPORT_SYMBOL(tgt_blocking_ast);
 
 static struct ldlm_callback_suite tgt_dlm_cbs = {
 	.lcs_completion	= ldlm_server_completion_ast,
@@ -1388,8 +1395,8 @@ int tgt_enqueue(struct tgt_session_info *tsi)
 	 * tsi->tsi_dlm_cbs was set by the *_req_handle() function.
 	 */
 	LASSERT(tsi->tsi_dlm_req != NULL);
-	rc = ldlm_handle_enqueue0(tsi->tsi_exp->exp_obd->obd_namespace, req,
-				  tsi->tsi_dlm_req, &tgt_dlm_cbs);
+	rc = ldlm_handle_enqueue(tsi->tsi_exp->exp_obd->obd_namespace,
+				 &req->rq_pill, tsi->tsi_dlm_req, &tgt_dlm_cbs);
 	if (rc)
 		RETURN(err_serious(rc));
 
@@ -1882,9 +1889,8 @@ static void dump_all_bulk_pages(struct obdo *oa, int count,
 	 * file/fid, not during the resends/retries. */
 	snprintf(dbgcksum_file_name, sizeof(dbgcksum_file_name),
 		 "%s-checksum_dump-ost-"DFID":[%llu-%llu]-%x-%x",
-		 (strncmp(libcfs_debug_file_path_arr, "NONE", 4) != 0 ?
-		  libcfs_debug_file_path_arr :
-		  LIBCFS_DEBUG_FILE_PATH_DEFAULT),
+		 (strncmp(libcfs_debug_file_path, "NONE", 4) != 0 ?
+		  libcfs_debug_file_path : LIBCFS_DEBUG_FILE_PATH_DEFAULT),
 		 oa->o_valid & OBD_MD_FLFID ? oa->o_parent_seq : (__u64)0,
 		 oa->o_valid & OBD_MD_FLFID ? oa->o_parent_oid : 0,
 		 oa->o_valid & OBD_MD_FLFID ? oa->o_parent_ver : 0,
@@ -2074,6 +2080,7 @@ static int tgt_checksum_niobuf_t10pi(struct lu_target *tgt,
 		 * whole page
 		 */
 		if (t10_cksum_type && opc == OST_READ &&
+		    local_nb[i].lnb_len == PAGE_SIZE &&
 		    local_nb[i].lnb_guard_disk) {
 			used = DIV_ROUND_UP(local_nb[i].lnb_len, sector_size);
 			if (used > (guard_number - used_number)) {

@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/mdt/mdt_reint.c
  *
@@ -43,6 +42,7 @@
 #define DEBUG_SUBSYSTEM S_MDS
 
 #include <lprocfs_status.h>
+#include <lustre_mds.h>
 #include "mdt_internal.h"
 #include <lustre_lmv.h>
 
@@ -470,6 +470,80 @@ unlock_parent:
 	return rc;
 }
 
+static int mdt_intent_lock_grant(struct mdt_thread_info *info,
+				 struct mdt_object *child,
+				 struct ldlm_reply *dlmrep,
+				 struct mdt_lock_handle *lhc,
+				 bool cos_incompat)
+{
+	__u64 child_bits;
+	int rc;
+
+	mdt_set_disposition(info, dlmrep, DISP_LOOKUP_NEG);
+	rc = mdt_check_resent_lock(info, child, lhc);
+	/*
+	 * rc < 0 is error and we fall right back through,
+	 * rc == 0 is the open lock might already be gotten in
+	 * ldlm_handle_enqueue due to this being a resend.
+	 */
+	if (rc <= 0)
+		return rc;
+
+	/*
+	 * This is an intent request to grant the EX child lock to the client.
+	 * XXX It actually does not need to return the EX child lockvfor a file
+	 * other than a regular file or a directory. So it could check the file
+	 * mode and skip it if not supported.
+	 */
+	if (info->mti_exlock_update) {
+		struct md_attr *ma = &info->mti_attr;
+
+		/*
+		 * We always return EX UPDATE lock to protect the directory,
+		 * cannot return PW lock since it is compatible with CR.
+		 * It still needs to return LAYOUT bits lock to the client to
+		 * protect the data content for a regular file.
+		 */
+		child_bits = /* MDS_INODELOCK_LOOKUP |*/ MDS_INODELOCK_UPDATE |
+			     MDS_INODELOCK_PERM;
+		if (S_ISREG(ma->ma_attr.la_mode))
+			child_bits |= MDS_INODELOCK_LAYOUT;
+		mdt_lock_reg_init(lhc, LCK_EX);
+		rc = mdt_reint_object_lock(info, child, lhc, child_bits,
+					   cos_incompat);
+	} else {
+		/*
+		 * For normal intent create (mkdir):
+		 * - Grant LOOKUP lock with CR mode to the client at least.
+		 * - Grant the lock similar to getattr();
+		 *   lock mode: PR;
+		 *   inodebits: LOOKUP | UPDATE | PERM [| LAYOUT | DOM];
+		 * - Grant the lock similar to setattr();
+		 *   lock mode: PW;
+		 *   inodebits: LOOKUP | UPDATE | PERM [| LAYOUT | DOM];
+		 *
+		 * However, it can not grant LCK_CR to the client as during the
+		 * setting of LMV layout for a directory from a client, it will
+		 * acquire LCK_PW mode lock which is compat with LCK_CR lock
+		 * mode, this may result that the cached LMV layout on a client
+		 * will not released when set (default) LMV layout on a
+		 * directory.
+		 * The solution may be to change LCK_PW to LCK_EX mode when set
+		 * or change LMV layout on a directory.
+		 * Due to the above reason, it should grant a lock with LCK_PR
+		 * mode at least to the client.
+		 * Currently it grants PR mode LOOKUP | UPDATE | PERM ibits lock
+		 * to the client.
+		 */
+		mdt_lock_reg_init(lhc, LCK_PR);
+		child_bits = MDS_INODELOCK_LOOKUP | MDS_INODELOCK_UPDATE |
+			     MDS_INODELOCK_PERM;
+		rc = mdt_object_lock(info, child, lhc, child_bits);
+	}
+
+	return rc;
+}
+
 /*
  * VBR: we save three versions in reply:
  * 0 - parent. Check that parent version is the same during replay.
@@ -478,7 +552,7 @@ unlock_parent:
  * 2 - child. Version of child by FID. Must be ENOENT. It is mostly sanity
  * check.
  */
-static int mdt_create(struct mdt_thread_info *info)
+static int mdt_create(struct mdt_thread_info *info, struct mdt_lock_handle *lhc)
 {
 	struct mdt_device *mdt = info->mti_mdt;
 	struct mdt_object *parent;
@@ -488,7 +562,9 @@ static int mdt_create(struct mdt_thread_info *info)
 	struct md_attr *ma = &info->mti_attr;
 	struct mdt_reint_record *rr = &info->mti_rr;
 	struct md_op_spec *spec = &info->mti_spec;
+	struct ldlm_reply *dlmrep = NULL;
 	bool restripe = false;
+	bool lockless;
 	int rc;
 
 	ENTRY;
@@ -526,17 +602,30 @@ static int mdt_create(struct mdt_thread_info *info)
 		    LMV_HASH_TYPE_CRUSH)
 			RETURN(-EPROTO);
 
-		if (!md_capable(uc, CFS_CAP_SYS_ADMIN) &&
+		if (!md_capable(uc, CAP_SYS_ADMIN) &&
 		    uc->uc_gid != mdt->mdt_enable_remote_dir_gid &&
 		    mdt->mdt_enable_remote_dir_gid != -1)
 			RETURN(-EPERM);
 
-		/* restripe if later found dir exists */
-		if (le32_to_cpu(lum->lum_stripe_offset) == LMV_OFFSET_DEFAULT)
+		/* restripe if later found dir exists, MDS_OPEN_CREAT means
+		 * this is create only, don't try restripe.
+		 */
+		if (mdt->mdt_enable_dir_restripe &&
+		    le32_to_cpu(lum->lum_stripe_offset) == LMV_OFFSET_DEFAULT &&
+		    !(spec->sp_cr_flags & MDS_OPEN_CREAT))
 			restripe = true;
 	}
 
 	repbody = req_capsule_server_get(info->mti_pill, &RMF_MDT_BODY);
+	/*
+	 * TODO: rewrite ll_mknod(), ll_create_nd(), ll_symlink(),
+	 * ll_dir_setdirstripe() to all use intent lock.
+	 */
+	if (info->mti_intent_lock) {
+		dlmrep = req_capsule_server_get(info->mti_pill, &RMF_DLM_REP);
+		mdt_set_disposition(info, dlmrep,
+				    DISP_IT_EXECD | DISP_LOOKUP_EXECD);
+	}
 
 	parent = mdt_object_find(info->mti_env, info->mti_mdt, rr->rr_fid1);
 	if (IS_ERR(parent))
@@ -545,6 +634,8 @@ static int mdt_create(struct mdt_thread_info *info)
 	if (!mdt_object_exists(parent))
 		GOTO(put_parent, rc = -ENOENT);
 
+	lockless = info->mti_parent_locked ||
+		   ma->ma_attr_flags & MDS_WBC_LOCKLESS;
 	/*
 	 * LU-10235: check if name exists locklessly first to avoid massive
 	 * lock recalls on existing directories.
@@ -552,11 +643,32 @@ static int mdt_create(struct mdt_thread_info *info)
 	rc = mdt_lookup_version_check(info, parent, &rr->rr_name,
 				      &info->mti_tmp_fid1, 1);
 	if (rc == 0) {
-		if (!restripe)
-			GOTO(put_parent, rc = -EEXIST);
+		if (lockless) {
+			struct lu_fid *child_fid = &info->mti_tmp_fid1;
 
-		rc = mdt_restripe(info, parent, &rr->rr_name, rr->rr_fid2, spec,
-				  ma);
+			/*
+			 * Conflict with delay removal. Unlink the child
+			 * object aready deleted here.
+			 * FIXME: handle remote object in DNE env.
+			 */
+			if (!fid_is_md_operative(child_fid))
+				GOTO(put_parent, rc = -EPERM);
+
+			ma->ma_need = MA_INODE;
+			ma->ma_valid = 0;
+			rc = mdo_unlink(info->mti_env, mdt_object_child(parent),
+					NULL, &rr->rr_name, ma, 0);
+			if (rc)
+				GOTO(put_parent, rc);
+
+			rc = -ENOENT;
+		} else {
+			if (!restripe)
+				GOTO(put_parent, rc = -EEXIST);
+
+			rc = mdt_restripe(info, parent, &rr->rr_name,
+					  rr->rr_fid2, spec, ma);
+		}
 	}
 
 	/* -ENOENT is expected here */
@@ -569,16 +681,21 @@ static int mdt_create(struct mdt_thread_info *info)
 	OBD_RACE(OBD_FAIL_MDS_CREATE_RACE);
 
 	lh = &info->mti_lh[MDT_LH_PARENT];
-	mdt_lock_pdo_init(lh, LCK_PW, &rr->rr_name);
-	rc = mdt_object_lock(info, parent, lh, MDS_INODELOCK_UPDATE);
-	if (rc)
-		GOTO(put_parent, rc);
-
-	if (!mdt_object_remote(parent)) {
-		rc = mdt_version_get_check_save(info, parent, 0);
+	if (!lockless) {
+		mdt_lock_pdo_init(lh, LCK_PW, &rr->rr_name);
+		rc = mdt_object_lock(info, parent, lh, MDS_INODELOCK_UPDATE);
 		if (rc)
-			GOTO(unlock_parent, rc);
+			GOTO(put_parent, rc);
+
+		if (!mdt_object_remote(parent)) {
+			rc = mdt_version_get_check_save(info, parent, 0);
+			if (rc)
+				GOTO(unlock_parent, rc);
+		}
 	}
+
+	if (info->mti_intent_lock)
+		mdt_set_disposition(info, dlmrep, DISP_OPEN_CREATE);
 
 	child = mdt_object_new(info->mti_env, mdt, rr->rr_fid2);
 	if (unlikely(IS_ERR(child)))
@@ -608,31 +725,79 @@ static int mdt_create(struct mdt_thread_info *info)
 
 	rc = mdo_create(info->mti_env, mdt_object_child(parent), &rr->rr_name,
 			mdt_object_child(child), &info->mti_spec, ma);
-	if (rc == 0)
-		rc = mdt_attr_get_complex(info, child, ma);
-
 	if (rc < 0)
 		GOTO(put_child, rc);
 
-	/*
-	 * On DNE, we need to eliminate dependey between 'mkdir a' and
-	 * 'mkdir a/b' if b is a striped directory, to achieve this, two
-	 * things are done below:
-	 * 1. save child and slaves lock.
-	 * 2. if the child is a striped directory, relock parent so to
-	 *    compare against with COS locks to ensure parent was
-	 *    committed to disk.
-	 */
-	if (mdt_slc_is_enabled(mdt) && S_ISDIR(ma->ma_attr.la_mode)) {
-		struct mdt_lock_handle *lhc;
+	if (info->mti_intent_lock ||
+	    md_should_create(info->mti_spec.sp_cr_flags))
+		mdt_prep_ma_buf_from_rep(info, child, ma);
+	rc = mdt_attr_get_complex(info, child, ma);
+	if (rc)
+		GOTO(put_child, rc);
+
+	if (ma->ma_valid & MA_LOV) {
+		LASSERT(ma->ma_lmm_size != 0);
+		repbody->mbo_eadatasize = ma->ma_lmm_size;
+		if (S_ISREG(ma->ma_attr.la_mode))
+			repbody->mbo_valid |= OBD_MD_FLEASIZE;
+		else if (S_ISDIR(ma->ma_attr.la_mode))
+			repbody->mbo_valid |= OBD_MD_FLDIREA;
+	}
+
+	if (ma->ma_valid & MA_LMV) {
+		LASSERT(ma->ma_lmv_size != 0);
+		repbody->mbo_eadatasize = ma->ma_lmv_size;
+		LASSERT(S_ISDIR(ma->ma_attr.la_mode));
+		repbody->mbo_valid |= OBD_MD_FLDIREA | OBD_MD_MEA;
+	}
+
+	if (ma->ma_valid & MA_LMV_DEF) {
+		/* Return -ENOTSUPP for old client. */
+		if (!mdt_is_striped_client(mdt_info_req(info)->rq_export))
+			GOTO(put_child, rc = -ENOTSUPP);
+
+		LASSERT(S_ISDIR(ma->ma_attr.la_mode));
+		repbody->mbo_valid |= OBD_MD_FLDIREA | OBD_MD_DEFAULT_MEA;
+	}
+
+	if (info->mti_parent_locked && ma->ma_attr_flags & MDS_WBC_LOCKLESS) {
+		mdt_set_disposition(info, dlmrep, DISP_LOOKUP_NEG);
+	} else if (info->mti_intent_lock) {
+		/*
+		 * FIXME: Need to do disk commit to eliminate dependence between
+		 * distributed modify transcations.
+		 * Currently it can not grant MDS_INODELOCK_UPDATE lock to the
+		 * client in DNE environment with 'sync_lock_cancel' enabled as
+		 * the previous obtained LCK_PW lock will keep the lock
+		 * referenced until client ACK.
+		 */
+		rc = mdt_intent_lock_grant(info, child, dlmrep, lhc, false);
+		if (rc)
+			GOTO(put_child, rc);
+	} else if (mdt_slc_is_enabled(mdt) && S_ISDIR(ma->ma_attr.la_mode)) {
+		struct mdt_lock_handle *lhc2;
 		struct ldlm_enqueue_info *einfo = &info->mti_einfo[0];
 		bool cos_incompat;
 
+		/*
+		 * On DNE, we need to eliminate dependey between 'mkdir a' and
+		 * 'mkdir a/b' if b is a striped directory, to achieve this,
+		 * two things are done below:
+		 * 1. save child and slaves lock.
+		 * 2. if the child is a striped directory, relock parent so to
+		 *    compare against with COS locks to ensure parent was
+		 *    committed to disk.
+		 *
+		 * The above operations is unnecessary for mkdir() with intent
+		 * lock as it will grant and return lock to the client issuing
+		 * the intent lock request.
+		 */
 		rc = mdt_object_striped(info, child);
 		if (rc < 0)
 			GOTO(put_child, rc);
 
 		cos_incompat = rc;
+		/* striped object */
 		if (cos_incompat) {
 			if (!mdt_object_remote(parent)) {
 				mdt_object_unlock(info, parent, lh, 1);
@@ -645,16 +810,16 @@ static int mdt_create(struct mdt_thread_info *info)
 			}
 		}
 
-		lhc = &info->mti_lh[MDT_LH_CHILD];
-		mdt_lock_handle_init(lhc);
-		mdt_lock_reg_init(lhc, LCK_PW);
-		rc = mdt_reint_striped_lock(info, child, lhc,
+		lhc2 = &info->mti_lh[MDT_LH_CHILD];
+		mdt_lock_handle_init(lhc2);
+		mdt_lock_reg_init(lhc2, LCK_PW);
+		rc = mdt_reint_striped_lock(info, child, lhc2,
 					    MDS_INODELOCK_UPDATE, einfo,
 					    cos_incompat);
 		if (rc)
 			GOTO(put_child, rc);
 
-		mdt_reint_striped_unlock(info, child, lhc, einfo, rc);
+		mdt_reint_striped_unlock(info, child, lhc2, einfo, rc);
 	}
 
 	/* Return fid & attr to client. */
@@ -665,49 +830,23 @@ static int mdt_create(struct mdt_thread_info *info)
 put_child:
 	mdt_object_put(info->mti_env, child);
 unlock_parent:
-	mdt_object_unlock(info, parent, lh, rc);
+	if (!lockless)
+		mdt_object_unlock(info, parent, lh, rc);
+	if (rc && dlmrep)
+		mdt_clear_disposition(info, dlmrep, DISP_OPEN_CREATE);
 put_parent:
 	mdt_object_put(info->mti_env, parent);
 	return rc;
 }
 
-static int mdt_attr_set(struct mdt_thread_info *info, struct mdt_object *mo,
-			struct md_attr *ma)
+static int mdt_attr_set_locked(struct mdt_thread_info *info,
+			       struct mdt_object *mo, struct md_attr *ma)
 {
-	struct mdt_lock_handle  *lh;
 	int do_vbr = ma->ma_attr.la_valid &
 			(LA_MODE | LA_UID | LA_GID | LA_PROJID | LA_FLAGS);
-	__u64 lockpart = MDS_INODELOCK_UPDATE;
-	struct ldlm_enqueue_info *einfo = &info->mti_einfo[0];
-	bool cos_incompat;
 	int rc;
 
 	ENTRY;
-	rc = mdt_object_striped(info, mo);
-	if (rc < 0)
-		RETURN(rc);
-
-	cos_incompat = rc;
-
-	lh = &info->mti_lh[MDT_LH_PARENT];
-	mdt_lock_reg_init(lh, LCK_PW);
-
-	/* Even though the new MDT will grant PERM lock to the old
-	 * client, but the old client will almost ignore that during
-	 * So it needs to revoke both LOOKUP and PERM lock here, so
-	 * both new and old client can cancel the dcache
-	 */
-	if (ma->ma_attr.la_valid & (LA_MODE|LA_UID|LA_GID))
-		lockpart |= MDS_INODELOCK_LOOKUP | MDS_INODELOCK_PERM;
-
-	rc = mdt_reint_striped_lock(info, mo, lh, lockpart, einfo,
-				    cos_incompat);
-	if (rc != 0)
-		RETURN(rc);
-
-	/* all attrs are packed into mti_attr in unpack_setattr */
-	mdt_fail_write(info->mti_env, info->mti_mdt->mdt_bottom,
-		       OBD_FAIL_MDS_REINT_SETATTR_WRITE);
 
 	/* VBR: update version if attr changed are important for recovery */
 	if (do_vbr) {
@@ -715,7 +854,7 @@ static int mdt_attr_set(struct mdt_thread_info *info, struct mdt_object *mo,
 		tgt_vbr_obj_set(info->mti_env, mdt_obj2dt(mo));
 		rc = mdt_version_get_check_save(info, mo, 0);
 		if (rc)
-			GOTO(out_unlock, rc);
+			RETURN(rc);
 	}
 
 	/* Ensure constant striping during chown(). See LU-2789. */
@@ -728,6 +867,90 @@ static int mdt_attr_set(struct mdt_thread_info *info, struct mdt_object *mo,
 	if (ma->ma_attr.la_valid & (LA_UID|LA_GID|LA_PROJID))
 		mutex_unlock(&mo->mot_lov_mutex);
 
+	RETURN(rc);
+}
+
+static int mdt_intent_attr_set(struct mdt_thread_info *info,
+			       struct mdt_object *mo, struct md_attr *ma,
+			       struct mdt_lock_handle *lhc)
+{
+	__u64 bits;
+	int rc;
+
+	ENTRY;
+
+	rc = mdt_check_resent_lock(info, mo, lhc);
+	if (rc <= 0)
+		RETURN(rc);
+
+	if (info->mti_exlock_update) {
+		if (!info->mti_parent_locked)
+			RETURN(-EPROTO);
+
+		bits = MDS_INODELOCK_UPDATE;
+		if (S_ISREG(lu_object_attr(&mo->mot_obj)))
+			bits |= MDS_INODELOCK_LAYOUT;
+		mdt_lock_reg_init(lhc, LCK_EX);
+		rc = mdt_object_lock(info, mo, lhc, bits);
+	} else {
+		/* TODO: normal intent setattr. */
+	}
+
+	rc = mdt_attr_set_locked(info, mo, ma);
+	if (rc && info->mti_exlock_update)
+		mdt_object_unlock(info, mo, lhc, rc);
+
+	RETURN(rc);
+}
+
+static int mdt_attr_set(struct mdt_thread_info *info, struct mdt_object *mo,
+			struct md_attr *ma, struct mdt_lock_handle *lhc)
+{
+	struct mdt_lock_handle  *lh;
+	__u64 lockpart = MDS_INODELOCK_UPDATE;
+	struct ldlm_enqueue_info *einfo = &info->mti_einfo[0];
+	bool cos_incompat;
+	int rc;
+
+	ENTRY;
+
+	if (ma->ma_attr_flags & MDS_WBC_LOCKLESS)
+		RETURN(mdt_attr_set_locked(info, mo, ma));
+
+	if (info->mti_intent_lock)
+		RETURN(mdt_intent_attr_set(info, mo, ma, lhc));
+
+	rc = mdt_object_striped(info, mo);
+	if (rc < 0)
+		RETURN(rc);
+
+	cos_incompat = rc;
+
+	lh = &info->mti_lh[MDT_LH_PARENT];
+	mdt_lock_reg_init(lh, LCK_PW);
+
+	/* Even though the new MDT will grant PERM lock to the old
+	 * client, but the old client will almost ignore that during
+	 * So it needs to revoke both LOOKUP and PERM lock here, so
+	 * both new and old client can cancel the dcache.
+	 * When mkdir() is implemented using intent lock, it will grant
+	 * both LOOKUP and PERM lock to the client. Thus here it needs
+	 * to revoke both LOOKUP and PERM lock for project setting, so
+	 * the client can cancel the dcache.
+	 */
+	if (ma->ma_attr.la_valid & (LA_MODE | LA_UID | LA_GID | LA_PROJID))
+		lockpart |= MDS_INODELOCK_LOOKUP | MDS_INODELOCK_PERM;
+
+	rc = mdt_reint_striped_lock(info, mo, lh, lockpart, einfo,
+				    cos_incompat);
+	if (rc != 0)
+		RETURN(rc);
+
+	/* all attrs are packed into mti_attr in unpack_setattr */
+	mdt_fail_write(info->mti_env, info->mti_mdt->mdt_bottom,
+		       OBD_FAIL_MDS_REINT_SETATTR_WRITE);
+
+	rc = mdt_attr_set_locked(info, mo, ma);
 	if (rc != 0)
 		GOTO(out_unlock, rc);
 	mdt_dom_obj_lvb_update(info->mti_env, mo, false);
@@ -769,7 +992,7 @@ int mdt_add_dirty_flag(struct mdt_thread_info *info, struct mdt_object *mo,
 		 * set the HSM state to dirty.
 		 */
 		cap_saved = uc->uc_cap;
-		uc->uc_cap |= MD_CAP_TO_MASK(CFS_CAP_FOWNER);
+		uc->uc_cap |= MD_CAP_TO_MASK(CAP_FOWNER);
 		rc = mdt_hsm_attr_set(info, mo, &ma->ma_hsm);
 		uc->uc_cap = cap_saved;
 		if (rc)
@@ -787,6 +1010,8 @@ static int mdt_reint_setattr(struct mdt_thread_info *info,
 	struct md_attr *ma = &info->mti_attr;
 	struct mdt_reint_record *rr = &info->mti_rr;
 	struct ptlrpc_request *req = mdt_info_req(info);
+	bool lockless = ma->ma_attr_flags & MDS_WBC_LOCKLESS ||
+			info->mti_parent_locked;
 	struct mdt_object *mo;
 	struct mdt_body *repbody;
 	ktime_t kstart = ktime_get();
@@ -819,6 +1044,7 @@ static int mdt_reint_setattr(struct mdt_thread_info *info,
 		     atomic_read(&mo->mot_lease_count) > 0)) {
 		down_read(&mo->mot_open_sem);
 
+		/* TODO: WBC lockless handling for the lease open. */
 		if (atomic_read(&mo->mot_lease_count) > 0) { /* lease exists */
 			lhc = &info->mti_lh[MDT_LH_LOCAL];
 			mdt_lock_reg_init(lhc, LCK_CW);
@@ -889,16 +1115,18 @@ static int mdt_reint_setattr(struct mdt_thread_info *info,
 			}
 		}
 
-		rc = mdt_attr_set(info, mo, ma);
+		rc = mdt_attr_set(info, mo, ma, lhc);
 		if (rc)
 			GOTO(out_put, rc);
 	} else if ((ma->ma_valid & (MA_LOV | MA_LMV)) &&
 		   (ma->ma_valid & MA_INODE)) {
 		struct lu_buf *buf = &info->mti_buf;
 		struct lu_ucred *uc = mdt_ucred(info);
-		struct mdt_lock_handle *lh;
+		struct mdt_lock_handle *lh = &info->mti_lh[MDT_LH_PARENT];
 		const char *name;
 		__u64 lockpart = MDS_INODELOCK_XATTR;
+
+		LASSERT(!(info->mti_parent_locked || info->mti_exlock_update));
 
 		/* reject if either remote or striped dir is disabled */
 		if (ma->ma_valid & MA_LMV) {
@@ -906,7 +1134,7 @@ static int mdt_reint_setattr(struct mdt_thread_info *info,
 			    !mdt->mdt_enable_striped_dir)
 				GOTO(out_put, rc = -EPERM);
 
-			if (!md_capable(uc, CFS_CAP_SYS_ADMIN) &&
+			if (!md_capable(uc, CAP_SYS_ADMIN) &&
 			    uc->uc_gid != mdt->mdt_enable_remote_dir_gid &&
 			    mdt->mdt_enable_remote_dir_gid != -1)
 				GOTO(out_put, rc = -EPERM);
@@ -932,17 +1160,18 @@ static int mdt_reint_setattr(struct mdt_thread_info *info,
 			lockpart |= MDS_INODELOCK_LOOKUP;
 		}
 
-		lh = &info->mti_lh[MDT_LH_PARENT];
-		mdt_lock_reg_init(lh, LCK_PW);
-
-		rc = mdt_object_lock(info, mo, lh, lockpart);
-		if (rc != 0)
-			GOTO(out_put, rc);
+		if (!lockless) {
+			mdt_lock_reg_init(lh, LCK_PW);
+			rc = mdt_object_lock(info, mo, lh, lockpart);
+			if (rc != 0)
+				GOTO(out_put, rc);
+		}
 
 		rc = mo_xattr_set(info->mti_env, mdt_object_child(mo), buf,
 				  name, 0);
 
-		mdt_object_unlock(info, mo, lh, rc);
+		if (!lockless)
+			mdt_object_unlock(info, mo, lh, rc);
 		if (rc)
 			GOTO(out_put, rc);
 	} else {
@@ -1010,7 +1239,7 @@ static int mdt_reint_create(struct mdt_thread_info *info,
 		RETURN(err_serious(-EOPNOTSUPP));
 	}
 
-	rc = mdt_create(info);
+	rc = mdt_create(info, lhc);
 	if (rc == 0) {
 		if ((info->mti_attr.ma_attr.la_mode & S_IFMT) == S_IFDIR)
 			mdt_counter_incr(req, LPROC_MDT_MKDIR,
@@ -1037,9 +1266,10 @@ static int mdt_reint_unlink(struct mdt_thread_info *info,
 	struct lu_fid *child_fid = &info->mti_tmp_fid1;
 	struct mdt_object *mp;
 	struct mdt_object *mc;
-	struct mdt_lock_handle *parent_lh;
-	struct mdt_lock_handle *child_lh;
+	struct mdt_lock_handle *parent_lh = NULL;
+	struct mdt_lock_handle *child_lh = NULL;
 	struct ldlm_enqueue_info *einfo = &info->mti_einfo[0];
+	bool lockless = ma->ma_attr_flags & MDS_WBC_LOCKLESS;
 	__u64 lock_ibits;
 	bool cos_incompat = false;
 	int no_name = 0;
@@ -1074,12 +1304,14 @@ static int mdt_reint_unlink(struct mdt_thread_info *info,
 	OBD_RACE(OBD_FAIL_MDS_REINT_OPEN);
 	OBD_RACE(OBD_FAIL_MDS_REINT_OPEN2);
 relock:
-	parent_lh = &info->mti_lh[MDT_LH_PARENT];
-	mdt_lock_pdo_init(parent_lh, LCK_PW, &rr->rr_name);
-	rc = mdt_reint_object_lock(info, mp, parent_lh, MDS_INODELOCK_UPDATE,
-				   cos_incompat);
-	if (rc != 0)
-		GOTO(put_parent, rc);
+	if (!lockless) {
+		parent_lh = &info->mti_lh[MDT_LH_PARENT];
+		mdt_lock_pdo_init(parent_lh, LCK_PW, &rr->rr_name);
+		rc = mdt_reint_object_lock(info, mp, parent_lh,
+					   MDS_INODELOCK_UPDATE, cos_incompat);
+		if (rc != 0)
+			GOTO(put_parent, rc);
+	}
 
 	/* lookup child object along with version checking */
 	fid_zero(child_fid);
@@ -1125,13 +1357,17 @@ relock:
 		cos_incompat = rc;
 		if (cos_incompat) {
 			mdt_object_put(info->mti_env, mc);
-			mdt_object_unlock(info, mp, parent_lh, -EAGAIN);
+			if (!lockless)
+				mdt_object_unlock(info, mp, parent_lh, -EAGAIN);
 			goto relock;
 		}
 	}
 
-	child_lh = &info->mti_lh[MDT_LH_CHILD];
-	mdt_lock_reg_init(child_lh, LCK_EX);
+	if (!lockless) {
+		child_lh = &info->mti_lh[MDT_LH_CHILD];
+		mdt_lock_reg_init(child_lh, LCK_EX);
+	}
+
 	if (info->mti_spec.sp_rm_entry) {
 		struct lu_ucred *uc  = mdt_ucred(info);
 
@@ -1139,7 +1375,7 @@ relock:
 			/* Return -ENOTSUPP for old client */
 			GOTO(put_child, rc = -ENOTSUPP);
 
-		if (!md_capable(uc, CFS_CAP_SYS_ADMIN))
+		if (!md_capable(uc, CAP_SYS_ADMIN))
 			GOTO(put_child, rc = -EPERM);
 
 		ma->ma_need = MA_INODE;
@@ -1166,13 +1402,16 @@ relock:
 			/* Return -ENOTSUPP for old client */
 			GOTO(put_child, rc = -ENOTSUPP);
 
-		/* Revoke the LOOKUP lock of the remote object granted by
+		/*
+		 * Revoke the LOOKUP lock of the remote object granted by
 		 * this MDT. Since the unlink will happen on another MDT,
 		 * it will release the LOOKUP lock right away. Then What
 		 * would happen if another client try to grab the LOOKUP
 		 * lock at the same time with unlink XXX
 		 */
-		mdt_object_lock(info, mc, child_lh, MDS_INODELOCK_LOOKUP);
+		if (!lockless)
+			mdt_object_lock(info, mc, child_lh,
+					MDS_INODELOCK_LOOKUP);
 		repbody = req_capsule_server_get(info->mti_pill, &RMF_MDT_BODY);
 		LASSERT(repbody != NULL);
 		repbody->mbo_fid1 = *mdt_object_fid(mc);
@@ -1183,23 +1422,27 @@ relock:
 	 * this now because a running HSM restore on the child (unlink
 	 * victim) will hold the layout lock. See LU-4002.
 	 */
-	lock_ibits = MDS_INODELOCK_LOOKUP | MDS_INODELOCK_UPDATE;
-	if (mdt_object_remote(mp)) {
-		/* Enqueue lookup lock from parent MDT */
-		rc = mdt_remote_object_lock(info, mp, mdt_object_fid(mc),
-					    &child_lh->mlh_rreg_lh,
-					    child_lh->mlh_rreg_mode,
-					    MDS_INODELOCK_LOOKUP, false);
-		if (rc != ELDLM_OK)
+	if (!lockless) {
+		lock_ibits = MDS_INODELOCK_LOOKUP | MDS_INODELOCK_UPDATE;
+		if (mdt_object_remote(mp)) {
+			/* Enqueue lookup lock from parent MDT */
+			rc = mdt_remote_object_lock(info, mp,
+						    mdt_object_fid(mc),
+						    &child_lh->mlh_rreg_lh,
+						    child_lh->mlh_rreg_mode,
+						    MDS_INODELOCK_LOOKUP,
+						    false);
+			if (rc != ELDLM_OK)
+				GOTO(put_child, rc);
+
+			lock_ibits &= ~MDS_INODELOCK_LOOKUP;
+		}
+
+		rc = mdt_reint_striped_lock(info, mc, child_lh, lock_ibits,
+					    einfo, cos_incompat);
+		if (rc != 0)
 			GOTO(put_child, rc);
-
-		lock_ibits &= ~MDS_INODELOCK_LOOKUP;
 	}
-
-	rc = mdt_reint_striped_lock(info, mc, child_lh, lock_ibits, einfo,
-				    cos_incompat);
-	if (rc != 0)
-		GOTO(put_child, rc);
 
 	/*
 	 * Now we can only make sure we need MA_INODE, in mdd layer, will check
@@ -1256,11 +1499,13 @@ out_stat:
 	EXIT;
 
 unlock_child:
-	mdt_reint_striped_unlock(info, mc, child_lh, einfo, rc);
+	if (!lockless)
+		mdt_reint_striped_unlock(info, mc, child_lh, einfo, rc);
 put_child:
 	mdt_object_put(info->mti_env, mc);
 unlock_parent:
-	mdt_object_unlock(info, mp, parent_lh, rc);
+	if (!lockless)
+		mdt_object_unlock(info, mp, parent_lh, rc);
 put_parent:
 	mdt_object_put(info->mti_env, mp);
 	CFS_RACE_WAKEUP(OBD_FAIL_OBD_ZERO_NLINK_RACE);
@@ -1292,7 +1537,8 @@ static int mdt_reint_link(struct mdt_thread_info *info,
 	if (OBD_FAIL_CHECK(OBD_FAIL_MDS_REINT_LINK))
 		RETURN(err_serious(-ENOENT));
 
-	if (OBD_FAIL_PRECHECK(OBD_FAIL_PTLRPC_RESEND_RACE)) {
+	if (OBD_FAIL_PRECHECK(OBD_FAIL_PTLRPC_RESEND_RACE) ||
+	    OBD_FAIL_PRECHECK(OBD_FAIL_PTLRPC_ENQ_RESEND)) {
 		req->rq_no_reply = 1;
 		RETURN(err_serious(-ENOENT));
 	}
@@ -2176,7 +2422,7 @@ int mdt_reint_migrate(struct mdt_thread_info *info,
 	if (!mdt->mdt_enable_remote_dir || !mdt->mdt_enable_dir_migration)
 		RETURN(-EPERM);
 
-	if (uc && !md_capable(uc, CFS_CAP_SYS_ADMIN) &&
+	if (uc && !md_capable(uc, CAP_SYS_ADMIN) &&
 	    uc->uc_gid != mdt->mdt_enable_remote_dir_gid &&
 	    mdt->mdt_enable_remote_dir_gid != -1)
 		RETURN(-EPERM);
@@ -2604,11 +2850,22 @@ static int mdt_reint_rename(struct mdt_thread_info *info,
 		    mdt_object_remote(msrcdir))
 			GOTO(out_put_tgtdir, rc = -EXDEV);
 
-		rc = mdt_rename_lock(info, &rename_lh);
-		if (rc != 0) {
-			CERROR("%s: can't lock FS for rename: rc = %d\n",
-			       mdt_obd_name(mdt), rc);
-			GOTO(out_put_tgtdir, rc);
+		/* This might be further relaxed in the future for regular file
+		 * renames in different source and target parents. Start with
+		 * only same-directory renames for simplicity and because this
+		 * is by far the most the common use case.
+		 */
+		if (msrcdir != mtgtdir) {
+			rc = mdt_rename_lock(info, &rename_lh);
+			if (rc != 0) {
+				CERROR("%s: cannot lock for rename: rc = %d\n",
+				       mdt_obd_name(mdt), rc);
+				GOTO(out_put_tgtdir, rc);
+			}
+		} else {
+			CDEBUG(D_INFO, "%s: samedir rename "DFID"/"DNAME"\n",
+			       mdt_obd_name(mdt), PFID(rr->rr_fid1),
+			       PNAME(&rr->rr_name));
 		}
 	}
 

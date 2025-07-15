@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #ifndef _MDC_INTERNAL_H
@@ -37,38 +36,38 @@
 
 int mdc_tunables_init(struct obd_device *obd);
 
-void mdc_pack_body(struct ptlrpc_request *req, const struct lu_fid *fid,
+void mdc_pack_body(struct req_capsule *pill, const struct lu_fid *fid,
 		   u64 valid, size_t ea_size, u32 suppgid, u32 flags);
-void mdc_swap_layouts_pack(struct ptlrpc_request *req,
+void mdc_swap_layouts_pack(struct req_capsule *pill,
 			   struct md_op_data *op_data);
-void mdc_readdir_pack(struct ptlrpc_request *req, __u64 pgoff, size_t size,
+void mdc_readdir_pack(struct req_capsule *pill, __u64 pgoff, size_t size,
 		      const struct lu_fid *fid);
-void mdc_getattr_pack(struct ptlrpc_request *req, __u64 valid, __u32 flags,
+void mdc_getattr_pack(struct req_capsule *pill, __u64 valid, __u32 flags,
 		      struct md_op_data *data, size_t ea_size);
-void mdc_setattr_pack(struct ptlrpc_request *req, struct md_op_data *op_data,
+void mdc_setattr_pack(struct req_capsule *pill, struct md_op_data *op_data,
 		      void *ea, size_t ealen);
-void mdc_create_pack(struct ptlrpc_request *req, struct md_op_data *op_data,
+void mdc_create_pack(struct req_capsule *pill, struct md_op_data *op_data,
 		     const void *data, size_t datalen, umode_t mode,
-		     uid_t uid, gid_t gid, cfs_cap_t capability, __u64 rdev);
-void mdc_open_pack(struct ptlrpc_request *req, struct md_op_data *op_data,
+		     uid_t uid, gid_t gid, cfs_cap_t capability, __u64 rdev,
+		     __u64 flags);
+void mdc_open_pack(struct req_capsule *pill, struct md_op_data *op_data,
 		   umode_t mode, __u64 rdev, __u64 flags,
 		   const void *data, size_t datalen);
-void mdc_file_secctx_pack(struct ptlrpc_request *req,
+void mdc_file_secctx_pack(struct req_capsule *pill,
 			  const char *secctx_name,
 			  const void *secctx, size_t secctx_size);
-void mdc_file_encctx_pack(struct ptlrpc_request *req,
+void mdc_file_encctx_pack(struct req_capsule *pill,
 			  const void *encctx, size_t encctx_size);
-void mdc_file_sepol_pack(struct ptlrpc_request *req);
+void mdc_file_sepol_pack(struct req_capsule *pill);
 
-void mdc_unlink_pack(struct ptlrpc_request *req, struct md_op_data *op_data);
-void mdc_getxattr_pack(struct ptlrpc_request *req, struct md_op_data *op_data);
-void mdc_link_pack(struct ptlrpc_request *req, struct md_op_data *op_data);
-void mdc_rename_pack(struct ptlrpc_request *req, struct md_op_data *op_data,
+void mdc_unlink_pack(struct req_capsule *pill, struct md_op_data *op_data);
+void mdc_link_pack(struct req_capsule *pill, struct md_op_data *op_data);
+void mdc_rename_pack(struct req_capsule *pill, struct md_op_data *op_data,
 		     const char *old, size_t oldlen,
 		     const char *new, size_t newlen);
-void mdc_migrate_pack(struct ptlrpc_request *req, struct md_op_data *op_data,
+void mdc_migrate_pack(struct req_capsule *pill, struct md_op_data *op_data,
 			const char *name, size_t namelen);
-void mdc_close_pack(struct ptlrpc_request *req, struct md_op_data *op_data);
+void mdc_close_pack(struct req_capsule *pill, struct md_op_data *op_data);
 
 /* mdc/mdc_locks.c */
 int mdc_set_lock_data(struct obd_export *exp,
@@ -83,6 +82,14 @@ int mdc_intent_lock(struct obd_export *exp,
 		    struct ptlrpc_request **reqp,
 		    ldlm_blocking_callback cb_blocking,
 		    __u64 extra_lock_flags);
+
+int mdc_intent_lock_async(struct obd_export *exp,
+			  struct md_op_item *item,
+			  struct ptlrpc_request_set *rqset);
+
+int mdc_reint_async(struct obd_export *exp,
+		    struct md_op_item *item,
+		    struct ptlrpc_request_set *rqset);
 
 int mdc_enqueue(struct obd_export *exp, struct ldlm_enqueue_info *einfo,
 		const union ldlm_policy_data *policy,
@@ -102,25 +109,17 @@ int mdc_setup(struct obd_device *obd, struct lustre_cfg *cfg);
 
 struct obd_client_handle;
 
-int mdc_get_lustre_md(struct obd_export *md_exp, struct ptlrpc_request *req,
-                      struct obd_export *dt_exp, struct obd_export *lmv_exp,
-                      struct lustre_md *md);
-
-int mdc_free_lustre_md(struct obd_export *exp, struct lustre_md *md);
-
 int mdc_set_open_replay_data(struct obd_export *exp,
 			     struct obd_client_handle *och,
 			     struct lookup_intent *it);
 
-int mdc_clear_open_replay_data(struct obd_export *exp,
-                               struct obd_client_handle *och);
 void mdc_commit_open(struct ptlrpc_request *req);
 void mdc_replay_open(struct ptlrpc_request *req);
 
 int mdc_create(struct obd_export *exp, struct md_op_data *op_data,
 		const void *data, size_t datalen,
 		umode_t mode, uid_t uid, gid_t gid,
-		cfs_cap_t capability, __u64 rdev,
+		cfs_cap_t capability, __u64 rdev, __u64 cr_flags,
 		struct ptlrpc_request **request);
 int mdc_link(struct obd_export *exp, struct md_op_data *op_data,
              struct ptlrpc_request **request);
@@ -139,8 +138,14 @@ int mdc_cancel_unused(struct obd_export *exp, const struct lu_fid *fid,
 int mdc_revalidate_lock(struct obd_export *exp, struct lookup_intent *it,
                         struct lu_fid *fid, __u64 *bits);
 
-int mdc_intent_getattr_async(struct obd_export *exp,
-			     struct md_enqueue_info *minfo);
+int mdc_intent_getattr_async(struct obd_export *exp, struct md_op_item *item);
+
+struct lu_batch *mdc_batch_create(struct obd_export *exp,
+				  enum lu_batch_flags flags, __u32 max_count);
+int mdc_batch_stop(struct obd_export *exp, struct lu_batch *bh);
+int mdc_batch_flush(struct obd_export *exp, struct lu_batch *bh, bool wait);
+int mdc_batch_add(struct obd_export *exp, struct lu_batch *bh,
+		  struct md_op_item *item);
 
 enum ldlm_mode mdc_lock_match(struct obd_export *exp, __u64 flags,
 			      const struct lu_fid *fid, enum ldlm_type type,
@@ -167,10 +172,10 @@ static inline int mdc_prep_elc_req(struct obd_export *exp,
 }
 
 #ifdef CONFIG_LUSTRE_FS_POSIX_ACL
-int mdc_unpack_acl(struct ptlrpc_request *req, struct lustre_md *md);
+int mdc_unpack_acl(struct req_capsule *pill, struct lustre_md *md);
 #else
 static inline
-int mdc_unpack_acl(struct ptlrpc_request *req, struct lustre_md *md)
+int mdc_unpack_acl(struct req_capsule *pill, struct lustre_md *md)
 {
 	return 0;
 }
@@ -199,7 +204,13 @@ extern struct lu_device_type mdc_device_type;
 int mdc_ldlm_blocking_ast(struct ldlm_lock *dlmlock,
 			  struct ldlm_lock_desc *new, void *data, int flag);
 int mdc_ldlm_glimpse_ast(struct ldlm_lock *dlmlock, void *data);
-int mdc_fill_lvb(struct ptlrpc_request *req, struct ost_lvb *lvb);
+int mdc_fill_lvb(struct req_capsule *pill, struct ost_lvb *lvb);
+
+int mdc_finish_enqueue(struct obd_export *exp,
+		       struct req_capsule *pill,
+		       struct ldlm_enqueue_info *einfo,
+		       struct lookup_intent *it,
+		       struct lustre_handle *lockh, int rc);
 
 /* the minimum inline repsize should be PAGE_SIZE at least */
 #define MDC_DOM_DEF_INLINE_REPSIZE max(8192UL, PAGE_SIZE)

@@ -573,12 +573,12 @@ static int mdc_lock_upcall(void *cookie, struct lustre_handle *lockh,
 }
 
 /* This is needed only for old servers (before 2.14) support */
-int mdc_fill_lvb(struct ptlrpc_request *req, struct ost_lvb *lvb)
+int mdc_fill_lvb(struct req_capsule *pill, struct ost_lvb *lvb)
 {
 	struct mdt_body *body;
 
 	/* get LVB data from mdt_body otherwise */
-	body = req_capsule_server_get(&req->rq_pill, &RMF_MDT_BODY);
+	body = req_capsule_server_get(pill, &RMF_MDT_BODY);
 	if (!body)
 		RETURN(-EPROTO);
 
@@ -602,7 +602,7 @@ int mdc_enqueue_fini(struct obd_export *exp, struct ptlrpc_request *req,
 
 	/* needed only for glimpse from an old server (< 2.14) */
 	if (glimpse && !exp_connect_dom_lvb(exp))
-		rc = mdc_fill_lvb(req, &ols->ols_lvb);
+		rc = mdc_fill_lvb(&req->rq_pill, &ols->ols_lvb);
 
 	if (glimpse && errcode == ELDLM_LOCK_ABORTED) {
 		struct ldlm_reply *rep;
@@ -685,8 +685,8 @@ int mdc_enqueue_interpret(const struct lu_env *env, struct ptlrpc_request *req,
 	OBD_FAIL_TIMEOUT(OBD_FAIL_OSC_CP_ENQ_RACE, 1);
 
 	/* Complete obtaining the lock procedure. */
-	rc = ldlm_cli_enqueue_fini(aa->oa_exp, req, &einfo, 1, aa->oa_flags,
-				   aa->oa_lvb, aa->oa_lvb ?
+	rc = ldlm_cli_enqueue_fini(aa->oa_exp, &req->rq_pill, &einfo, 1,
+				   aa->oa_flags, aa->oa_lvb, aa->oa_lvb ?
 				   sizeof(*aa->oa_lvb) : 0, lockh, rc);
 	/* Complete mdc stuff. */
 	rc = mdc_enqueue_fini(aa->oa_exp, req, aa->oa_upcall, aa->oa_cookie,
@@ -1067,6 +1067,9 @@ static int mdc_io_setattr_start(const struct lu_env *env,
 			return rc;
 	}
 
+	if (cl_io_is_fallocate(io))
+		return -EOPNOTSUPP;
+
 	if (oio->oi_lockless == 0) {
 		cl_object_attr_lock(obj);
 		rc = cl_object_attr_get(env, obj, attr);
@@ -1135,6 +1138,7 @@ static int mdc_io_read_ahead(const struct lu_env *env,
 			     pgoff_t start, struct cl_read_ahead *ra)
 {
 	struct osc_object *osc = cl2osc(ios->cis_obj);
+	struct osc_io *oio = cl2osc_io(env, ios);
 	struct ldlm_lock *dlmlock;
 
 	ENTRY;
@@ -1143,6 +1147,7 @@ static int mdc_io_read_ahead(const struct lu_env *env,
 	if (dlmlock == NULL)
 		RETURN(-ENODATA);
 
+	oio->oi_is_readahead = 1;
 	if (dlmlock->l_req_mode != LCK_PR) {
 		struct lustre_handle lockh;
 
@@ -1154,7 +1159,8 @@ static int mdc_io_read_ahead(const struct lu_env *env,
 	ra->cra_rpc_pages = osc_cli(osc)->cl_max_pages_per_rpc;
 	ra->cra_end_idx = CL_PAGE_EOF;
 	ra->cra_release = osc_read_ahead_release;
-	ra->cra_cbdata = dlmlock;
+	ra->cra_dlmlock = dlmlock;
+	ra->cra_oio = oio;
 
 	RETURN(0);
 }
@@ -1314,15 +1320,15 @@ static void mdc_io_data_version_end(const struct lu_env *env,
 	EXIT;
 }
 
-static struct cl_io_operations mdc_io_ops = {
+static const struct cl_io_operations mdc_io_ops = {
 	.op = {
 		[CIT_READ] = {
-			.cio_iter_init = osc_io_rw_iter_init,
+			.cio_iter_init = osc_io_iter_init,
 			.cio_iter_fini = osc_io_rw_iter_fini,
 			.cio_start     = osc_io_read_start,
 		},
 		[CIT_WRITE] = {
-			.cio_iter_init = osc_io_rw_iter_init,
+			.cio_iter_init = osc_io_iter_init,
 			.cio_iter_fini = osc_io_rw_iter_fini,
 			.cio_start     = osc_io_write_start,
 			.cio_end       = osc_io_end,
@@ -1353,8 +1359,10 @@ static struct cl_io_operations mdc_io_ops = {
 		},
 	},
 	.cio_read_ahead   = mdc_io_read_ahead,
+	.cio_lru_reserve  = osc_io_lru_reserve,
 	.cio_submit	  = osc_io_submit,
 	.cio_commit_async = osc_io_commit_async,
+	.cio_extent_release = osc_io_extent_release,
 };
 
 int mdc_io_init(const struct lu_env *env, struct cl_object *obj,

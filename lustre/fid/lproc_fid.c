@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/fid/lproc_fid.c
  *
@@ -327,7 +326,7 @@ static int fldb_seq_show(struct seq_file *p, void *v)
 	return rc;
 }
 
-struct seq_operations fldb_sops = {
+static const struct seq_operations fldb_sops = {
 	.start = fldb_seq_start,
 	.stop = fldb_seq_stop,
 	.next = fldb_seq_next,

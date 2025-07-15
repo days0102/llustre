@@ -672,9 +672,21 @@ enum {
 };
 
 #include <lustre_nrs_fifo.h>
+/**
+ * Binary heap node.
+ *
+ * Objects of this type are embedded into objects of the ordered set that is to
+ * be maintained by a \e struct binheap instance.
+ */
+struct binheap_node {
+	/** Index into the binary tree */
+	unsigned int	chn_index;
+};
+#ifdef HAVE_SERVER_SUPPORT
 #include <lustre_nrs_tbf.h>
 #include <lustre_nrs_crr.h>
 #include <lustre_nrs_orr.h>
+#endif /* HAVE_SERVER_SUPPORT */
 #include <lustre_nrs_delay.h>
 
 /**
@@ -701,7 +713,7 @@ struct ptlrpc_nrs_request {
 	unsigned			nr_enqueued:1;
 	unsigned			nr_started:1;
 	unsigned			nr_finalized:1;
-	struct cfs_binheap_node		nr_node;
+	struct binheap_node		nr_node;
 
 	/**
 	 * Policy-specific fields, used for determining a request's scheduling
@@ -712,6 +724,7 @@ struct ptlrpc_nrs_request {
 		 * Fields for the FIFO policy
 		 */
 		struct nrs_fifo_req	fifo;
+#ifdef HAVE_SERVER_SUPPORT
 		/**
 		 * CRR-N request defintion
 		 */
@@ -722,6 +735,7 @@ struct ptlrpc_nrs_request {
 		 * TBF request definition
 		 */
 		struct nrs_tbf_req	tbf;
+#endif /* HAVE_SERVER_SUPPORT */
 		/**
 		 * Fields for the delay policy
 		 */

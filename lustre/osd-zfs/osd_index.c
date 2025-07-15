@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/osd-zfs/osd_index.c
  *
@@ -623,10 +622,9 @@ trigger:
 	if (osd->od_auto_scrub_interval != AS_NEVER && ++once == 1) {
 		rc = osd_scrub_start(env, osd, SS_AUTO_FULL |
 				     SS_CLEAR_DRYRUN | SS_CLEAR_FAILOUT);
-		CDEBUG(D_LFSCK | D_CONSOLE | D_WARNING,
-		       "%s: trigger partial OI scrub for RPC inconsistency "
-		       "checking FID "DFID": rc = %d\n",
-		       osd_name(osd), PFID(fid), rc);
+		CDEBUG_LIMIT(D_LFSCK | D_CONSOLE | D_WARNING,
+			     "%s: trigger partial OI scrub for RPC inconsistency, checking FID "DFID"/%#llx): rc = %d\n",
+			     osd_name(osd), PFID(fid), oid, rc);
 		if (!rc)
 			goto again;
 	}
@@ -815,7 +813,7 @@ int osd_add_to_remote_parent(const struct lu_env *env,
 
 	osd_fid2str(name, fid, sizeof(info->oti_str));
 	zde->lzd_reg.zde_dnode = obj->oo_dn->dn_object;
-	zde->lzd_reg.zde_type = IFTODT(S_IFDIR);
+	zde->lzd_reg.zde_type = S_DT(S_IFDIR);
 	zde->lzd_fid = *fid;
 
 	rc = osd_zap_add(osd, osd->od_remote_parent_dir, NULL,
@@ -1042,7 +1040,7 @@ static int osd_dir_insert(const struct lu_env *env, struct dt_object *dt,
 	BUILD_BUG_ON(sizeof(*zde) % 8 != 0);
 
 	memset(&zde->lzd_reg, 0, sizeof(zde->lzd_reg));
-	zde->lzd_reg.zde_type = IFTODT(rec1->rec_type & S_IFMT);
+	zde->lzd_reg.zde_type = S_DT(rec1->rec_type & S_IFMT);
 	zde->lzd_fid = *fid;
 
 	if (idc->oic_remote) {
@@ -1502,7 +1500,7 @@ static int osd_dir_it_rec(const struct lu_env *env, const struct dt_it *di,
 			      lu_object_fid(&it->ozi_obj->oo_dt.do_lu));
 		lde->lde_attrs = LUDA_FID;
 		/* append lustre attributes */
-		osd_it_append_attrs(lde, attr, 1, IFTODT(S_IFDIR));
+		osd_it_append_attrs(lde, attr, 1, S_DT(S_IFDIR));
 		lde->lde_reclen = cpu_to_le16(lu_dirent_calc_size(1, attr));
 		it->ozi_pos = OZI_POS_DOT;
 		RETURN(0);
@@ -1521,7 +1519,7 @@ static int osd_dir_it_rec(const struct lu_env *env, const struct dt_it *di,
 		}
 
 		/* append lustre attributes */
-		osd_it_append_attrs(lde, attr, 2, IFTODT(S_IFDIR));
+		osd_it_append_attrs(lde, attr, 2, S_DT(S_IFDIR));
 		lde->lde_reclen = cpu_to_le16(lu_dirent_calc_size(2, attr));
 		RETURN(0);
 	}
@@ -1568,7 +1566,8 @@ static int osd_dir_it_rec(const struct lu_env *env, const struct dt_it *di,
 				lde->lde_attrs |= LUDA_UNKNOWN;
 		}
 
-		GOTO(pack_attr, rc = 0);
+		if (!(attr & (LUDA_VERIFY | LUDA_VERIFY_DRYRUN)))
+			GOTO(pack_attr, rc = 0);
 	}
 
 	if (OBD_FAIL_CHECK(OBD_FAIL_FID_LOOKUP))
@@ -1579,6 +1578,10 @@ static int osd_dir_it_rec(const struct lu_env *env, const struct dt_it *di,
 		lde->lde_attrs = LUDA_UNKNOWN;
 		GOTO(pack_attr, rc = 0);
 	}
+
+	if (za->za_num_integers >= 3 && fid_is_sane(&zde->lzd_fid) &&
+	    lu_fid_eq(&zde->lzd_fid, fid))
+		GOTO(pack_attr, rc = 0);
 
 	if (!(attr & LUDA_VERIFY)) {
 		fid_cpu_to_le(&lde->lde_fid, fid);
@@ -1700,7 +1703,7 @@ static int osd_dir_it_load(const struct lu_env *env,
 	RETURN(rc);
 }
 
-struct dt_index_operations osd_dir_ops = {
+const struct dt_index_operations osd_dir_ops = {
 	.dio_lookup         = osd_dir_lookup,
 	.dio_declare_insert = osd_declare_dir_insert,
 	.dio_insert         = osd_dir_insert,
@@ -1997,7 +2000,7 @@ static int osd_index_it_load(const struct lu_env *env, const struct dt_it *di,
 	RETURN(rc);
 }
 
-static struct dt_index_operations osd_index_ops = {
+static const struct dt_index_operations osd_index_ops = {
 	.dio_lookup		= osd_index_lookup,
 	.dio_declare_insert	= osd_declare_index_insert,
 	.dio_insert		= osd_index_insert,

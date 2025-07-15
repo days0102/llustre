@@ -87,8 +87,8 @@ void lod_putref(struct lod_device *lod, struct lod_tgt_descs *ltd)
 				continue;
 
 			list_add(&tgt_desc->ltd_kill, &kill);
-			tgt_pool_remove(&ltd->ltd_tgt_pool,
-					tgt_desc->ltd_index);
+			lu_tgt_pool_remove(&ltd->ltd_tgt_pool,
+					   tgt_desc->ltd_index);
 			ltd_del_tgt(ltd, tgt_desc);
 			ltd->ltd_death_row--;
 		}
@@ -252,7 +252,7 @@ int lod_add_device(const struct lu_env *env, struct lod_device *lod,
 	if (rc)
 		GOTO(out_del_tgt, rc);
 
-	rc = tgt_pool_add(&ltd->ltd_tgt_pool, index,
+	rc = lu_tgt_pool_add(&ltd->ltd_tgt_pool, index,
 			  ltd->ltd_lov_desc.ld_tgt_count);
 	if (rc) {
 		CERROR("%s: can't set up pool, failed with %d\n",
@@ -288,7 +288,7 @@ out_fini_llog:
 out_ltd:
 	down_write(&ltd->ltd_rw_sem);
 	mutex_lock(&ltd->ltd_mutex);
-	tgt_pool_remove(&ltd->ltd_tgt_pool, index);
+	lu_tgt_pool_remove(&ltd->ltd_tgt_pool, index);
 out_del_tgt:
 	ltd_del_tgt(ltd, tgt_desc);
 out_mutex:
@@ -607,7 +607,7 @@ int lod_fill_mirrors(struct lod_object *lo)
 
 		if (mirror_id_of(lod_comp->llc_id) == mirror_id) {
 			lo->ldo_mirrors[mirror_idx].lme_stale |= stale;
-			lo->ldo_mirrors[mirror_idx].lme_primary |= preferred;
+			lo->ldo_mirrors[mirror_idx].lme_prefer |= preferred;
 			lo->ldo_mirrors[mirror_idx].lme_end = i;
 			continue;
 		}
@@ -621,7 +621,7 @@ int lod_fill_mirrors(struct lod_object *lo)
 
 		lo->ldo_mirrors[mirror_idx].lme_id = mirror_id;
 		lo->ldo_mirrors[mirror_idx].lme_stale = stale;
-		lo->ldo_mirrors[mirror_idx].lme_primary = preferred;
+		lo->ldo_mirrors[mirror_idx].lme_prefer = preferred;
 		lo->ldo_mirrors[mirror_idx].lme_start = i;
 		lo->ldo_mirrors[mirror_idx].lme_end = i;
 	}
@@ -958,7 +958,7 @@ repeat:
  * \retval			0 if the index is present
  * \retval			-EINVAL if not
  */
-static int validate_lod_and_idx(struct lod_device *md, __u32 idx)
+int validate_lod_and_idx(struct lod_device *md, __u32 idx)
 {
 	if (unlikely(idx >= md->lod_ost_descs.ltd_tgts_size ||
 		     !test_bit(idx, md->lod_ost_bitmap))) {
@@ -1126,10 +1126,7 @@ int lod_parse_striping(const struct lu_env *env, struct lod_object *lo,
 	    magic != LOV_MAGIC_SEL)
 		GOTO(out, rc = -EINVAL);
 
-	if (lo->ldo_is_foreign)
-		lod_free_foreign_lov(lo);
-	else
-		lod_free_comp_entries(lo);
+	lod_striping_free_nolock(env, lo);
 
 	if (magic == LOV_MAGIC_COMP_V1 || magic == LOV_MAGIC_SEL) {
 		comp_v1 = (struct lov_comp_md_v1 *)lmm;
@@ -1138,9 +1135,12 @@ int lod_parse_striping(const struct lu_env *env, struct lod_object *lo,
 			GOTO(out, rc = -EINVAL);
 		lo->ldo_layout_gen = le32_to_cpu(comp_v1->lcm_layout_gen);
 		lo->ldo_is_composite = 1;
-		lo->ldo_flr_state = le16_to_cpu(comp_v1->lcm_flags) &
-					LCM_FL_FLR_MASK;
 		mirror_cnt = le16_to_cpu(comp_v1->lcm_mirror_count) + 1;
+		if (mirror_cnt > 1)
+			lo->ldo_flr_state = le16_to_cpu(comp_v1->lcm_flags) &
+							LCM_FL_FLR_MASK;
+		else
+			lo->ldo_flr_state = LCM_FL_NONE;
 	} else if (magic == LOV_MAGIC_FOREIGN) {
 		size_t length;
 
@@ -1183,7 +1183,26 @@ int lod_parse_striping(const struct lu_env *env, struct lod_object *lo,
 			ext = &comp_v1->lcm_entries[i].lcme_extent;
 			lod_comp->llc_extent.e_start =
 				le64_to_cpu(ext->e_start);
+			if (lod_comp->llc_extent.e_start &
+			    (LOV_MIN_STRIPE_SIZE - 1)) {
+				CDEBUG(D_LAYOUT,
+				       "extent start %llu is not a multiple of min size %u\n",
+				       lod_comp->llc_extent.e_start,
+				       LOV_MIN_STRIPE_SIZE);
+				GOTO(out, rc = -EINVAL);
+			}
+
 			lod_comp->llc_extent.e_end = le64_to_cpu(ext->e_end);
+			if (lod_comp->llc_extent.e_end != LUSTRE_EOF &&
+			    lod_comp->llc_extent.e_end &
+			    (LOV_MIN_STRIPE_SIZE - 1)) {
+				CDEBUG(D_LAYOUT,
+				       "extent end %llu is not a multiple of min size %u\n",
+				       lod_comp->llc_extent.e_end,
+				       LOV_MIN_STRIPE_SIZE);
+				GOTO(out, rc = -EINVAL);
+			}
+
 			lod_comp->llc_flags =
 				le32_to_cpu(comp_v1->lcm_entries[i].lcme_flags);
 			if (lod_comp->llc_flags & LCME_FL_NOSYNC)
@@ -1440,7 +1459,6 @@ int lod_striping_reload(const struct lu_env *env, struct lod_object *lo,
 	ENTRY;
 
 	mutex_lock(&lo->ldo_layout_mutex);
-	lod_striping_free_nolock(env, lo);
 	rc = lod_parse_striping(env, lo, buf);
 	mutex_unlock(&lo->ldo_layout_mutex);
 
@@ -1911,7 +1929,10 @@ recheck:
 	for_each_comp_entry_v1(comp_v1, ent) {
 		ext = &ent->lcme_extent;
 
-		if (le64_to_cpu(ext->e_start) > le64_to_cpu(ext->e_end)) {
+		if (le64_to_cpu(ext->e_start) > le64_to_cpu(ext->e_end) ||
+		    le64_to_cpu(ext->e_start) & (LOV_MIN_STRIPE_SIZE - 1) ||
+		    (le64_to_cpu(ext->e_end) != LUSTRE_EOF &&
+		    le64_to_cpu(ext->e_end) & (LOV_MIN_STRIPE_SIZE - 1))) {
 			CDEBUG(D_LAYOUT, "invalid extent "DEXT"\n",
 			       le64_to_cpu(ext->e_start),
 			       le64_to_cpu(ext->e_end));
@@ -2016,7 +2037,7 @@ recheck:
 		if (rc)
 			RETURN(rc);
 
-		if (prev_end == LUSTRE_EOF)
+		if (prev_end == LUSTRE_EOF || ext->e_start == prev_end)
 			continue;
 
 		/* extent end must be aligned with the stripe_size */
@@ -2193,30 +2214,30 @@ int lod_pools_init(struct lod_device *lod, struct lustre_cfg *lcfg)
 
 	INIT_LIST_HEAD(&lod->lod_pool_list);
 	lod->lod_pool_count = 0;
-	rc = tgt_pool_init(&lod->lod_mdt_descs.ltd_tgt_pool, 0);
+	rc = lu_tgt_pool_init(&lod->lod_mdt_descs.ltd_tgt_pool, 0);
 	if (rc)
 		GOTO(out_hash, rc);
 
-	rc = tgt_pool_init(&lod->lod_mdt_descs.ltd_qos.lq_rr.lqr_pool, 0);
+	rc = lu_tgt_pool_init(&lod->lod_mdt_descs.ltd_qos.lq_rr.lqr_pool, 0);
 	if (rc)
 		GOTO(out_mdt_pool, rc);
 
-	rc = tgt_pool_init(&lod->lod_ost_descs.ltd_tgt_pool, 0);
+	rc = lu_tgt_pool_init(&lod->lod_ost_descs.ltd_tgt_pool, 0);
 	if (rc)
 		GOTO(out_mdt_rr_pool, rc);
 
-	rc = tgt_pool_init(&lod->lod_ost_descs.ltd_qos.lq_rr.lqr_pool, 0);
+	rc = lu_tgt_pool_init(&lod->lod_ost_descs.ltd_qos.lq_rr.lqr_pool, 0);
 	if (rc)
 		GOTO(out_ost_pool, rc);
 
 	RETURN(0);
 
 out_ost_pool:
-	tgt_pool_free(&lod->lod_ost_descs.ltd_tgt_pool);
+	lu_tgt_pool_free(&lod->lod_ost_descs.ltd_tgt_pool);
 out_mdt_rr_pool:
-	tgt_pool_free(&lod->lod_mdt_descs.ltd_qos.lq_rr.lqr_pool);
+	lu_tgt_pool_free(&lod->lod_mdt_descs.ltd_qos.lq_rr.lqr_pool);
 out_mdt_pool:
-	tgt_pool_free(&lod->lod_mdt_descs.ltd_tgt_pool);
+	lu_tgt_pool_free(&lod->lod_mdt_descs.ltd_tgt_pool);
 out_hash:
 	lod_pool_hash_destroy(&lod->lod_pools_hash_body);
 
@@ -2246,10 +2267,10 @@ int lod_pools_fini(struct lod_device *lod)
 	}
 
 	lod_pool_hash_destroy(&lod->lod_pools_hash_body);
-	tgt_pool_free(&lod->lod_ost_descs.ltd_qos.lq_rr.lqr_pool);
-	tgt_pool_free(&lod->lod_ost_descs.ltd_tgt_pool);
-	tgt_pool_free(&lod->lod_mdt_descs.ltd_qos.lq_rr.lqr_pool);
-	tgt_pool_free(&lod->lod_mdt_descs.ltd_tgt_pool);
+	lu_tgt_pool_free(&lod->lod_ost_descs.ltd_qos.lq_rr.lqr_pool);
+	lu_tgt_pool_free(&lod->lod_ost_descs.ltd_tgt_pool);
+	lu_tgt_pool_free(&lod->lod_mdt_descs.ltd_qos.lq_rr.lqr_pool);
+	lu_tgt_pool_free(&lod->lod_mdt_descs.ltd_tgt_pool);
 
 	RETURN(0);
 }

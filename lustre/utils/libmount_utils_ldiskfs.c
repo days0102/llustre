@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/utils/mount_utils_ldiskfs.c
  *
@@ -510,6 +509,9 @@ static int enable_default_ext4_features(struct mkfs_opts *mop, char *anchor,
 	/* Enable quota by default */
 	if (is_e2fsprogs_feature_supp("-O quota")) {
 		append_unique(anchor, ",", "quota", NULL, maxbuflen);
+		/* Enable project quota by default */
+		if (is_e2fsprogs_feature_supp("-O project"))
+			append_unique(anchor, ",", "project", NULL, maxbuflen);
 	} else {
 		fatal();
 		fprintf(stderr, "\"-O quota\" must be supported by "

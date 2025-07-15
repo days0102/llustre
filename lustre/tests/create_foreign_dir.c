@@ -15,7 +15,7 @@ int main(int argc, char **argv)
 	char *dir = "foreign_dir", *end;
 	char *xval = "UUID@UUID";
 	mode_t mode = 0700;
-	__u32 type = LU_FOREIGN_TYPE_DAOS, flags = 0;
+	__u32 type = LU_FOREIGN_TYPE_SYMLINK, flags = 0xda05;
 	int c, rc;
 
 	while ((c = getopt(argc, argv, "hd:f:m:t:x:")) != -1) {
@@ -36,8 +36,10 @@ int main(int argc, char **argv)
 			}
 			break;
 		case 'f':
+			errno = 0;
 			flags = strtoul(optarg, &end, 0);
-			if (*end != '\0') {
+			if (errno != 0 || *end != '\0' ||
+			    flags >= UINT32_MAX) {
 				fprintf(stderr,
 					"%s: invalid flags '%s'\n", argv[0],
 					optarg);

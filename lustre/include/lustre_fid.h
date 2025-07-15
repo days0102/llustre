@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/include/lustre_fid.h
  *
@@ -307,6 +306,13 @@ static inline int fid_is_name_llog(const struct lu_fid *fid)
 	return fid_seq(fid) == FID_SEQ_LLOG_NAME;
 }
 
+static inline int fid_seq_in_fldb(u64 seq)
+{
+	return fid_seq_is_igif(seq) || fid_seq_is_norm(seq) ||
+	       fid_seq_is_root(seq) || fid_seq_is_dot(seq);
+}
+
+#ifdef HAVE_SERVER_SUPPORT
 static inline int fid_is_namespace_visible(const struct lu_fid *fid)
 {
 	const __u64 seq = fid_seq(fid);
@@ -316,12 +322,6 @@ static inline int fid_is_namespace_visible(const struct lu_fid *fid)
 	return (!fid_is_last_id(fid) &&
 		(fid_seq_is_norm(seq) || fid_seq_is_igif(seq))) ||
 	       fid_is_root(fid) || fid_seq_is_dot(seq);
-}
-
-static inline int fid_seq_in_fldb(__u64 seq)
-{
-	return fid_seq_is_igif(seq) || fid_seq_is_norm(seq) ||
-	       fid_seq_is_root(seq) || fid_seq_is_dot(seq);
 }
 
 static inline void ost_layout_cpu_to_le(struct ost_layout *dst,
@@ -375,6 +375,7 @@ static inline void filter_fid_le_to_cpu(struct filter_fid *dst,
 
 	/* XXX: Add more if filter_fid is enlarged in the future. */
 }
+#endif /* HAVE_SERVER_SUPPORT */
 
 static inline void lu_last_id_fid(struct lu_fid *fid, __u64 seq, __u32 ost_idx)
 {
@@ -410,25 +411,25 @@ struct lu_server_seq;
 
 /* Client sequence manager interface. */
 struct lu_client_seq {
-        /* Sequence-controller export. */
-        struct obd_export      *lcs_exp;
+	/* Sequence-controller export. */
+	struct obd_export	*lcs_exp;
 	struct mutex		lcs_mutex;
 
-        /*
-         * Range of allowed for allocation sequeces. When using lu_client_seq on
-         * clients, this contains meta-sequence range. And for servers this
-         * contains super-sequence range.
-         */
-        struct lu_seq_range         lcs_space;
+	/*
+	 * Range of allowed for allocation sequeces. When using lu_client_seq on
+	 * clients, this contains meta-sequence range. And for servers this
+	 * contains super-sequence range.
+	 */
+	struct lu_seq_range	lcs_space;
 
 	/* Seq related debugfs */
 	struct dentry		*lcs_debugfs_entry;
 
-        /* This holds last allocated fid in last obtained seq */
-        struct lu_fid           lcs_fid;
+	/* This holds last allocated fid in last obtained seq */
+	struct lu_fid		lcs_fid;
 
-        /* LUSTRE_SEQ_METADATA or LUSTRE_SEQ_DATA */
-        enum lu_cli_type        lcs_type;
+	/* LUSTRE_SEQ_METADATA or LUSTRE_SEQ_DATA */
+	enum lu_cli_type	lcs_type;
 
 	/*
 	 * Service uuid, passed from MDT + seq name to form unique seq name to
@@ -436,18 +437,14 @@ struct lu_client_seq {
 	 */
 	char			lcs_name[LUSTRE_MDT_MAXNAMELEN];
 
-        /*
-         * Sequence width, that is how many objects may be allocated in one
-         * sequence. Default value for it is LUSTRE_SEQ_MAX_WIDTH.
-         */
-        __u64                   lcs_width;
+	/*
+	 * Sequence width, that is how many objects may be allocated in one
+	 * sequence. Default value for it is LUSTRE_SEQ_MAX_WIDTH.
+	 */
+	__u64			lcs_width;
 
-        /* Seq-server for direct talking */
-        struct lu_server_seq   *lcs_srv;
-
-	/* wait queue for fid allocation and update indicator */
-	wait_queue_head_t       lcs_waitq;
-	int                     lcs_update;
+	/* Seq-server for direct talking */
+	struct lu_server_seq	*lcs_srv;
 };
 
 /* server sequence manager interface */

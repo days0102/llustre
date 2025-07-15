@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/mdt/mdt_lproc.c
  *
@@ -440,7 +439,8 @@ lprocfs_mds_evict_client_seq_write(struct file *file, const char __user *buf,
 	 */
 	if (copy_from_user(kbuf, buf, min_t(unsigned long, BUFLEN - 1, count)))
 		GOTO(out, rc = -EFAULT);
-	tmpbuf = cfs_firststr(kbuf, min_t(unsigned long, BUFLEN - 1, count));
+	tmpbuf = skip_spaces(kbuf);
+	tmpbuf = strsep(&tmpbuf, " \t\n\f\v\r");
 
 	if (strncmp(tmpbuf, "nid:", 4) != 0) {
 		count = lprocfs_evict_client_seq_write(file, buf, count, off);
@@ -1230,6 +1230,38 @@ static ssize_t dir_restripe_nsonly_store(struct kobject *kobj,
 }
 LUSTRE_RW_ATTR(dir_restripe_nsonly);
 
+static ssize_t enable_remote_subdir_mount_show(struct kobject *kobj,
+					       struct attribute *attr,
+					       char *buf)
+{
+	struct obd_device *obd = container_of(kobj, struct obd_device,
+					      obd_kset.kobj);
+	struct mdt_device *mdt = mdt_dev(obd->obd_lu_dev);
+
+	return scnprintf(buf, PAGE_SIZE, "%u\n",
+			 mdt->mdt_enable_remote_subdir_mount);
+}
+
+static ssize_t enable_remote_subdir_mount_store(struct kobject *kobj,
+						struct attribute *attr,
+						const char *buffer,
+						size_t count)
+{
+	struct obd_device *obd = container_of(kobj, struct obd_device,
+					      obd_kset.kobj);
+	struct mdt_device *mdt = mdt_dev(obd->obd_lu_dev);
+	bool val;
+	int rc;
+
+	rc = kstrtobool(buffer, &val);
+	if (rc)
+		return rc;
+
+	mdt->mdt_enable_remote_subdir_mount = val;
+	return count;
+}
+LUSTRE_RW_ATTR(enable_remote_subdir_mount);
+
 /**
  * Show if the OFD enforces T10PI checksum.
  *
@@ -1349,6 +1381,7 @@ static struct attribute *mdt_attrs[] = {
 	&lustre_attr_dir_split_delta.attr,
 	&lustre_attr_dir_restripe_nsonly.attr,
 	&lustre_attr_checksum_t10pi_enforce.attr,
+	&lustre_attr_enable_remote_subdir_mount.attr,
 	NULL,
 };
 

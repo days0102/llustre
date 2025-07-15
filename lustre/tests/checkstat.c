@@ -32,7 +32,6 @@
  * stat(3) should be used in all new tests.
  *
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #include <stdio.h>
@@ -74,6 +73,40 @@ usage(char *argv0, int help)
 	printf(" -v                     increase verbosity\n");
 	printf(" -h                     print help\n");
 	printf(" Exit status is 0 on success, 1 on failure\n");
+}
+
+/* using realpath() implies the paths must be resolved/exist
+ * so this will fail for dangling links
+ */
+int check_canonical(char *lname, char *checklink, int verbose)
+{
+	char *lname_canon;
+	char *checklink_canon;
+
+	lname_canon = realpath(lname, NULL);
+	if (lname_canon == NULL) {
+		if (verbose)
+			printf("%s: can't canonicalize: %s\n",
+			       lname, strerror(errno));
+		return 1;
+	}
+
+	checklink_canon = realpath(checklink, NULL);
+	if (checklink_canon == NULL) {
+		if (verbose)
+			printf("%s: can't canonicalize: %s\n",
+			       checklink, strerror(errno));
+		return 1;
+	}
+
+	if (strcmp(checklink_canon, lname_canon)) {
+		free(lname_canon);
+		free(checklink_canon);
+		return 1;
+	}
+	free(lname_canon);
+	free(checklink_canon);
+	return 0;
 }
 
 int
@@ -287,7 +320,12 @@ main(int argc, char **argv)
 			}
 
 			lname[rc] = 0;
-			if (strcmp(checklink, lname)) {
+
+			/* just in case, try to also match the canonicalized
+			 * paths
+			 */
+			if (strcmp(checklink, lname) &&
+			    check_canonical(lname, checklink, verbose)) {
 				if (verbose)
 					printf("%s is a link to %s and not %s\n",
 					       fname, lname, checklink);

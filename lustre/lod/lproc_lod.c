@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 #define DEBUG_SUBSYSTEM S_CLASS
 
@@ -52,8 +51,8 @@ static ssize_t dom_stripesize_show(struct kobject *kobj,
 	struct dt_device *dt = container_of(kobj, struct dt_device, dd_kobj);
 	struct lod_device *lod = dt2lod_dev(dt);
 
-	return snprintf(buf, PAGE_SIZE, "%u\n",
-			lod->lod_dom_stripesize_max_kb << 10);
+	return scnprintf(buf, PAGE_SIZE, "%u\n",
+			 lod->lod_dom_stripesize_max_kb << 10);
 }
 
 static inline int dom_stripesize_max_kb_update(struct lod_device *lod,
@@ -113,8 +112,8 @@ static ssize_t dom_stripesize_max_kb_show(struct kobject *kobj,
 	struct dt_device *dt = container_of(kobj, struct dt_device, dd_kobj);
 	struct lod_device *lod = dt2lod_dev(dt);
 
-	return snprintf(buf, PAGE_SIZE, "%u\n",
-			lod->lod_dom_stripesize_max_kb);
+	return scnprintf(buf, PAGE_SIZE, "%u\n",
+			 lod->lod_dom_stripesize_max_kb);
 }
 
 /**
@@ -150,7 +149,8 @@ static ssize_t dom_stripesize_cur_kb_show(struct kobject *kobj,
 	struct dt_device *dt = container_of(kobj, struct dt_device, dd_kobj);
 	struct lod_device *lod = dt2lod_dev(dt);
 
-	return snprintf(buf, PAGE_SIZE, "%u\n", lod->lod_dom_stripesize_cur_kb);
+	return scnprintf(buf, PAGE_SIZE, "%u\n",
+			 lod->lod_dom_stripesize_cur_kb);
 }
 
 LUSTRE_RO_ATTR(dom_stripesize_cur_kb);
@@ -164,8 +164,8 @@ static ssize_t dom_threshold_free_mb_show(struct kobject *kobj,
 	struct dt_device *dt = container_of(kobj, struct dt_device, dd_kobj);
 	struct lod_device *lod = dt2lod_dev(dt);
 
-	return snprintf(buf, PAGE_SIZE, "%llu\n",
-			lod->lod_dom_threshold_free_mb);
+	return scnprintf(buf, PAGE_SIZE, "%llu\n",
+			 lod->lod_dom_threshold_free_mb);
 }
 
 /**
@@ -212,8 +212,8 @@ static ssize_t stripesize_show(struct kobject *kobj, struct attribute *attr,
 					    dd_kobj);
 	struct lod_device *lod = dt2lod_dev(dt);
 
-	return snprintf(buf, PAGE_SIZE, "%llu\n",
-			lod->lod_ost_descs.ltd_lov_desc.ld_default_stripe_size);
+	return scnprintf(buf, PAGE_SIZE, "%llu\n",
+			 lod->lod_ost_descs.ltd_lov_desc.ld_default_stripe_size);
 }
 
 static ssize_t stripesize_store(struct kobject *kobj, struct attribute *attr,
@@ -247,7 +247,7 @@ static ssize_t stripeoffset_show(struct kobject *kobj, struct attribute *attr,
 					    dd_kobj);
 	struct lod_device *lod = dt2lod_dev(dt);
 
-	return snprintf(buf, PAGE_SIZE, "%lld\n",
+	return scnprintf(buf, PAGE_SIZE, "%lld\n",
 		lod->lod_ost_descs.ltd_lov_desc.ld_default_stripe_offset);
 }
 
@@ -293,7 +293,7 @@ static ssize_t __stripetype_show(struct kobject *kobj, struct attribute *attr,
 	struct lu_tgt_descs *ltd = is_mdt ? &lod->lod_mdt_descs :
 					    &lod->lod_ost_descs;
 
-	return snprintf(buf, PAGE_SIZE, "%u\n", ltd->ltd_lov_desc.ld_pattern);
+	return scnprintf(buf, PAGE_SIZE, "%u\n", ltd->ltd_lov_desc.ld_pattern);
 }
 
 static ssize_t mdt_stripetype_show(struct kobject *kobj, struct attribute *attr,
@@ -365,8 +365,8 @@ static ssize_t __stripecount_show(struct kobject *kobj, struct attribute *attr,
 	struct lov_desc *desc = is_mdt ? &lod->lod_mdt_descs.ltd_lov_desc :
 					 &lod->lod_ost_descs.ltd_lov_desc;
 
-	return snprintf(buf, PAGE_SIZE, "%d\n",
-		      (s16)(desc->ld_default_stripe_count + 1) - 1);
+	return scnprintf(buf, PAGE_SIZE, "%d\n",
+			 (s16)(desc->ld_default_stripe_count + 1) - 1);
 }
 
 static ssize_t mdt_stripecount_show(struct kobject *kobj,
@@ -438,7 +438,8 @@ static ssize_t __numobd_show(struct kobject *kobj, struct attribute *attr,
 	struct lu_tgt_descs *ltd = is_mdt ? &lod->lod_mdt_descs :
 					    &lod->lod_ost_descs;
 
-	return snprintf(buf, PAGE_SIZE, "%u\n", ltd->ltd_lov_desc.ld_tgt_count);
+	return scnprintf(buf, PAGE_SIZE, "%u\n",
+			 ltd->ltd_lov_desc.ld_tgt_count);
 }
 
 static ssize_t mdt_numobd_show(struct kobject *kobj, struct attribute *attr,
@@ -468,8 +469,8 @@ static ssize_t __activeobd_show(struct kobject *kobj, struct attribute *attr,
 	struct lu_tgt_descs *ltd = is_mdt ? &lod->lod_mdt_descs :
 					    &lod->lod_ost_descs;
 
-	return snprintf(buf, PAGE_SIZE, "%u\n",
-			ltd->ltd_lov_desc.ld_active_tgt_count);
+	return scnprintf(buf, PAGE_SIZE, "%u\n",
+			 ltd->ltd_lov_desc.ld_active_tgt_count);
 }
 
 static ssize_t mdt_activeobd_show(struct kobject *kobj, struct attribute *attr,
@@ -497,8 +498,8 @@ static ssize_t desc_uuid_show(struct kobject *kobj, struct attribute *attr,
 					    dd_kobj);
 	struct lod_device *lod = dt2lod_dev(dt);
 
-	return snprintf(buf, PAGE_SIZE, "%s\n",
-		       lod->lod_ost_descs.ltd_lov_desc.ld_uuid.uuid);
+	return scnprintf(buf, PAGE_SIZE, "%s\n",
+			 lod->lod_ost_descs.ltd_lov_desc.ld_uuid.uuid);
 }
 LUSTRE_RO_ATTR(desc_uuid);
 
@@ -520,8 +521,8 @@ static ssize_t __qos_prio_free_show(struct kobject *kobj,
 	struct lu_tgt_descs *ltd = is_mdt ? &lod->lod_mdt_descs :
 					    &lod->lod_ost_descs;
 
-	return snprintf(buf, PAGE_SIZE, "%d%%\n",
-		       (ltd->ltd_qos.lq_prio_free * 100 + 255) >> 8);
+	return scnprintf(buf, PAGE_SIZE, "%d%%\n",
+			 (ltd->ltd_qos.lq_prio_free * 100 + 255) >> 8);
 }
 
 static ssize_t mdt_qos_prio_free_show(struct kobject *kobj,
@@ -564,8 +565,8 @@ static ssize_t __qos_prio_free_store(struct kobject *kobj,
 	if (val > 100)
 		return -EINVAL;
 	ltd->ltd_qos.lq_prio_free = (val << 8) / 100;
-	ltd->ltd_qos.lq_dirty = 1;
-	ltd->ltd_qos.lq_reset = 1;
+	set_bit(LQ_DIRTY, &ltd->ltd_qos.lq_flags);
+	set_bit(LQ_RESET, &ltd->ltd_qos.lq_flags);
 
 	return count;
 }
@@ -599,8 +600,8 @@ static ssize_t __qos_threshold_rr_show(struct kobject *kobj,
 	struct lu_tgt_descs *ltd = is_mdt ? &lod->lod_mdt_descs :
 					    &lod->lod_ost_descs;
 
-	return snprintf(buf, PAGE_SIZE, "%d%%\n",
-		       (ltd->ltd_qos.lq_threshold_rr * 100 + 255) >> 8);
+	return scnprintf(buf, PAGE_SIZE, "%d%%\n",
+			 (ltd->ltd_qos.lq_threshold_rr * 100 + 255) >> 8);
 }
 
 static ssize_t mdt_qos_threshold_rr_show(struct kobject *kobj,
@@ -655,7 +656,7 @@ static ssize_t __qos_threshold_rr_store(struct kobject *kobj,
 	if (val > 100)
 		return -EINVAL;
 	ltd->ltd_qos.lq_threshold_rr = (val << 8) / 100;
-	ltd->ltd_qos.lq_dirty = 1;
+	set_bit(LQ_DIRTY, &ltd->ltd_qos.lq_flags);
 
 	return count;
 }
@@ -690,8 +691,8 @@ static ssize_t __qos_maxage_show(struct kobject *kobj, struct attribute *attr,
 	struct lu_tgt_descs *ltd = is_mdt ? &lod->lod_mdt_descs :
 					    &lod->lod_ost_descs;
 
-	return snprintf(buf, PAGE_SIZE, "%u Sec\n",
-		       ltd->ltd_lov_desc.ld_qos_maxage);
+	return scnprintf(buf, PAGE_SIZE, "%u Sec\n",
+			 ltd->ltd_lov_desc.ld_qos_maxage);
 }
 
 static ssize_t mdt_qos_maxage_show(struct kobject *kobj, struct attribute *attr,
@@ -946,7 +947,7 @@ static ssize_t lmv_failout_show(struct kobject *kobj, struct attribute *attr,
 					    dd_kobj);
 	struct lod_device *lod = dt2lod_dev(dt);
 
-	return snprintf(buf, PAGE_SIZE, "%d\n", lod->lod_lmv_failout ? 1 : 0);
+	return scnprintf(buf, PAGE_SIZE, "%d\n", lod->lod_lmv_failout ? 1 : 0);
 }
 
 /**
@@ -975,19 +976,13 @@ static ssize_t lmv_failout_store(struct kobject *kobj, struct attribute *attr,
 }
 LUSTRE_RW_ATTR(lmv_failout);
 
-char *mdt_hash_name[] = { "none",
-			  LMV_HASH_NAME_ALL_CHARS,
-			  LMV_HASH_NAME_FNV_1A_64,
-			  LMV_HASH_NAME_CRUSH,
-};
-
 static ssize_t mdt_hash_show(struct kobject *kobj, struct attribute *attr,
 			     char *buf)
 {
 	struct dt_device *dt = container_of(kobj, struct dt_device, dd_kobj);
 	struct lod_device *lod = dt2lod_dev(dt);
 
-	return snprintf(buf, PAGE_SIZE, "%s\n",
+	return scnprintf(buf, PAGE_SIZE, "%s\n",
 		mdt_hash_name[lod->lod_mdt_descs.ltd_lmv_desc.ld_pattern]);
 }
 
@@ -1018,10 +1013,6 @@ static ssize_t mdt_hash_store(struct kobject *kobj, struct attribute *attr,
 	return -EINVAL;
 }
 LUSTRE_RW_ATTR(mdt_hash);
-
-static struct lprocfs_vars lprocfs_lod_obd_vars[] = {
-	{ NULL }
-};
 
 static const struct file_operations lod_proc_mdt_fops = {
 	.owner   = THIS_MODULE,
@@ -1076,7 +1067,6 @@ static struct attribute *lod_attrs[] = {
  */
 int lod_procfs_init(struct lod_device *lod)
 {
-	struct ldebugfs_vars ldebugfs_obd_vars[] = { { NULL } };
 	struct obd_device *obd = lod2obd(lod);
 	struct obd_type *type;
 	struct kobject *lov;
@@ -1084,17 +1074,16 @@ int lod_procfs_init(struct lod_device *lod)
 
 	lod->lod_dt_dev.dd_ktype.default_attrs = lod_attrs;
 	rc = dt_tunables_init(&lod->lod_dt_dev, obd->obd_type, obd->obd_name,
-			      ldebugfs_obd_vars);
+			      NULL);
 	if (rc) {
 		CERROR("%s: failed to setup DT tunables: %d\n",
 		       obd->obd_name, rc);
 		RETURN(rc);
 	}
 
-	obd->obd_vars = lprocfs_lod_obd_vars;
 	obd->obd_proc_entry = lprocfs_register(obd->obd_name,
 					       obd->obd_type->typ_procroot,
-					       obd->obd_vars, obd);
+					       NULL, obd);
 	if (IS_ERR(obd->obd_proc_entry)) {
 		rc = PTR_ERR(obd->obd_proc_entry);
 		CERROR("%s: error %d setting up lprocfs\n",

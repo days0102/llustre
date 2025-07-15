@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #ifndef _MOUNT_UTILS_H_
@@ -251,8 +250,8 @@ struct module_backfs_ops {
 	void   *dl_handle;
 };
 
-struct module_backfs_ops zfs_ops;
-struct module_backfs_ops ldiskfs_ops;
+extern struct module_backfs_ops zfs_ops;
+extern struct module_backfs_ops ldiskfs_ops;
 
 struct module_backfs_ops *load_backfs_module(enum ldd_mount_type mount_type);
 void unload_backfs_ops(struct module_backfs_ops *ops);

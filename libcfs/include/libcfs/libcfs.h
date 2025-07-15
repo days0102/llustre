@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #ifndef __LIBCFS_LIBCFS_H__
@@ -54,14 +53,10 @@
 #include <libcfs/libcfs_string.h>
 #include <libcfs/libcfs_workitem.h>
 #include <libcfs/libcfs_hash.h>
-#include <libcfs/libcfs_heap.h>
 #include <libcfs/libcfs_fail.h>
 #include "curproc.h"
 
 #define LIBCFS_VERSION	"0.7.1"
-
-#define PO2_ROUNDUP_TYPED(x, po2, type) (-(-(type)(x) & -(type)(po2)))
-#define LOWEST_BIT_SET(x) ((x) & ~((x) - 1))
 
 /* Sparse annotations */
 #if !defined(__must_hold)
@@ -103,6 +98,8 @@ int lprocfs_call_handler(void *data, int write, loff_t *ppos,
 			 void __user *buffer, size_t *lenp,
 			 int (*handler)(void *data, int write, loff_t pos,
 					void __user *buffer, int len));
+int debugfs_doint(struct ctl_table *table, int write,
+		  void __user *buffer, size_t *lenp, loff_t *ppos);
 
 /*
  * Memory
@@ -131,5 +128,17 @@ do {									\
 
 /* atomic-context safe vfree */
 void libcfs_vfree_atomic(const void *addr);
+
+/* interval tree */
+
+#ifdef HAVE_INTERVAL_TREE_CACHED
+#define interval_tree_root rb_root_cached
+#define interval_tree_first rb_first_cached
+#define INTERVAL_TREE_ROOT RB_ROOT_CACHED
+#else
+#define interval_tree_root rb_root
+#define interval_tree_first rb_first
+#define INTERVAL_TREE_ROOT RB_ROOT
+#endif /* HAVE_INTERVAL_TREE_CACHED */
 
 #endif /* _LIBCFS_LIBCFS_H_ */

@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #ifndef __OBD_H
@@ -46,6 +45,7 @@
 #ifdef HAVE_SERVER_SUPPORT
 # include <lu_target.h>
 # include <obd_target.h>
+# include <lustre_quota.h>
 #endif
 #include <lu_ref.h>
 #include <lustre_export.h>
@@ -54,7 +54,6 @@
 #include <lustre_handles.h>
 #include <lustre_intent.h>
 #include <lvfs.h>
-#include <lustre_quota.h>
 
 #define MAX_OBD_DEVICES 8192
 
@@ -140,7 +139,7 @@ struct timeout_item {
 };
 
 #define OBD_MAX_RIF_DEFAULT	8
-#define OBD_MAX_RIF_MAX		512
+#define OBD_MAX_RIF_MAX		8192
 #define OSC_MAX_RIF_MAX		256
 #define OSC_MAX_DIRTY_DEFAULT	2000	 /* Arbitrary large value */
 #define OSC_MAX_DIRTY_MB_MAX	2048     /* arbitrary, but < MAX_LONG bytes */
@@ -285,6 +284,7 @@ struct client_obd {
 	struct obd_histogram	cl_write_page_hist;
 	struct obd_histogram	cl_read_offset_hist;
 	struct obd_histogram	cl_write_offset_hist;
+	struct obd_histogram	cl_batch_rpc_hist;
 
 	/** LRU for osc caching pages */
 	struct cl_client_cache  *cl_cache;
@@ -406,7 +406,6 @@ struct lov_obd {
 							   array */
 	struct mutex		lov_lock;
 	struct obd_connect_data	lov_ocd;
-	struct proc_dir_entry  *targets_proc_entry;
 	atomic_t		lov_refcount;
 	__u32			lov_death_row;	/* tgts scheduled to be deleted */
 	__u32			lov_tgt_size;	/* size of tgts array */
@@ -828,6 +827,10 @@ static inline int it_to_lock_mode(struct lookup_intent *it)
 		return LCK_PR;
 	else if (it->it_op &  IT_GETXATTR)
 		return LCK_PR;
+	else if (it->it_op & IT_SETATTR)
+		return LCK_PR;
+	else if (it->it_op & IT_WBC_EXLOCK)
+		return LCK_EX;
 
 	LASSERTF(0, "Invalid it_op: %d\n", it->it_op);
 	return -EINVAL;
@@ -849,14 +852,15 @@ enum md_cli_flags {
 	CLI_API32	= BIT(3),
 	CLI_MIGRATE	= BIT(4),
 	CLI_DIRTY_DATA	= BIT(5),
+	CLI_WBC_TGT	= BIT(6),
 };
 
 enum md_op_code {
-	LUSTRE_OPC_MKDIR	= 0,
-	LUSTRE_OPC_SYMLINK	= 1,
-	LUSTRE_OPC_MKNOD	= 2,
-	LUSTRE_OPC_CREATE	= 3,
-	LUSTRE_OPC_ANY		= 5,
+	LUSTRE_OPC_MKDIR = 1,
+	LUSTRE_OPC_SYMLINK,
+	LUSTRE_OPC_MKNOD,
+	LUSTRE_OPC_CREATE,
+	LUSTRE_OPC_ANY,
 };
 
 /**
@@ -943,6 +947,9 @@ struct md_op_data {
 	__u32			op_stripe_index;
 	/* Archive ID for PCC attach */
 	__u32			op_archive_id;
+
+	/* XXX here for now for async creates, but perhaps removed later */
+	__u64			op_rdev;
 };
 
 struct md_callback {
@@ -951,20 +958,55 @@ struct md_callback {
 			       void *data, int flag);
 };
 
-struct md_enqueue_info;
-/* metadata stat-ahead */
-typedef int (* md_enqueue_cb_t)(struct ptlrpc_request *req,
-                                struct md_enqueue_info *minfo,
-                                int rc);
+struct md_op_item;
+typedef int (*md_op_item_cb_t)(struct req_capsule *pill,
+			       struct md_op_item *item,
+			       int rc);
 
-struct md_enqueue_info {
-	struct md_op_data		mi_data;
-	struct lookup_intent		mi_it;
-	struct lustre_handle		mi_lockh;
-	struct inode		       *mi_dir;
-	struct ldlm_enqueue_info	mi_einfo;
-	md_enqueue_cb_t			mi_cb;
-	void			       *mi_cbdata;
+enum md_opcode {
+	MD_OP_NONE		= 0,
+	MD_OP_GETATTR		= 1,
+	MD_OP_CREATE_LOCKLESS	= 2,
+	MD_OP_CREATE_EXLOCK	= 3,
+	MD_OP_SETATTR_LOCKLESS	= 4,
+	MD_OP_SETATTR_EXLOCK	= 5,
+	MD_OP_EXLOCK_ONLY	= 6,
+	MD_OP_REMOVE_LOCKLESS	= 7,
+	MD_OP_MAX,
+};
+
+struct md_op_item {
+	enum md_opcode			 mop_opc;
+	struct md_op_data		 mop_data;
+	struct lookup_intent		 mop_it;
+	struct lustre_handle		 mop_lockh;
+	struct ldlm_enqueue_info	 mop_einfo;
+	md_op_item_cb_t			 mop_cb;
+	void				*mop_cbdata;
+	__u64				 mop_flags;
+	__u64				 mop_lock_flags;
+	union {
+		struct inode		*mop_dir;
+		struct dentry		*mop_dentry;
+	};
+};
+
+enum lu_batch_flags {
+	BATCH_FL_NONE	= 0x0,
+	/* All requests in a batch are read-only. */
+	BATCH_FL_RDONLY	= 0x1,
+	/* Will create PTLRPC request set for the batch. */
+	BATCH_FL_RQSET	= 0x2,
+	/* Whether need sync commit. */
+	BATCH_FL_SYNC	= 0x4,
+};
+
+struct lu_batch {
+	struct ptlrpc_request_set	*bh_rqset;
+	__s32				 bh_result;
+	__u32				 bh_flags;
+	/* Max batched SUB requests count in a batch. */
+	__u32				 bh_max_count;
 };
 
 struct obd_ops {
@@ -1120,7 +1162,7 @@ struct md_ops {
 
 	int (*m_create)(struct obd_export *, struct md_op_data *,
 			const void *, size_t, umode_t, uid_t, gid_t,
-			cfs_cap_t, __u64, struct ptlrpc_request **);
+			cfs_cap_t, __u64, __u64, struct ptlrpc_request **);
 
 	int (*m_enqueue)(struct obd_export *, struct ldlm_enqueue_info *,
 			 const union ldlm_policy_data *, struct md_op_data *,
@@ -1133,6 +1175,13 @@ struct md_ops {
 			     struct lookup_intent *,
 			     struct ptlrpc_request **,
 			     ldlm_blocking_callback, __u64);
+
+	int (*m_intent_lock_async)(struct obd_export *,
+				   struct md_op_item *,
+				   struct ptlrpc_request_set *);
+
+	int (*m_reint_async)(struct obd_export *, struct md_op_item *,
+			     struct ptlrpc_request_set *);
 
 	int (*m_link)(struct obd_export *, struct md_op_data *,
 		      struct ptlrpc_request **);
@@ -1162,7 +1211,7 @@ struct md_ops {
 			  u64, const char *, size_t, struct ptlrpc_request **);
 
 	int (*m_intent_getattr_async)(struct obd_export *,
-				      struct md_enqueue_info *);
+				      struct md_op_item *);
 
         int (*m_revalidate_lock)(struct obd_export *, struct lookup_intent *,
                                  struct lu_fid *, __u64 *bits);
@@ -1177,7 +1226,7 @@ struct md_ops {
 
 	int (*m_init_ea_size)(struct obd_export *, __u32, __u32);
 
-	int (*m_get_lustre_md)(struct obd_export *, struct ptlrpc_request *,
+	int (*m_get_lustre_md)(struct obd_export *, struct req_capsule *,
 			       struct obd_export *, struct obd_export *,
 			       struct lustre_md *);
 
@@ -1213,7 +1262,15 @@ struct md_ops {
 	int (*m_unpackmd)(struct obd_export *exp, struct lmv_stripe_md **plsm,
 			  const union lmv_mds_md *lmv, size_t lmv_size);
 	int (*m_rmfid)(struct obd_export *exp, struct fid_array *fa, int *rcs,
-		       struct ptlrpc_request_set *set);
+		       __u64 flags, struct ptlrpc_request_set *set);
+	struct lu_batch *(*m_batch_create)(struct obd_export *exp,
+					   enum lu_batch_flags flags,
+					   __u32 max_count);
+	int (*m_batch_stop)(struct obd_export *exp, struct lu_batch *bh);
+	int (*m_batch_flush)(struct obd_export *exp, struct lu_batch *bh,
+			     bool wait);
+	int (*m_batch_add)(struct obd_export *exp, struct lu_batch *bh,
+			   struct md_op_item *item);
 };
 
 static inline struct md_open_data *obd_mod_alloc(void)

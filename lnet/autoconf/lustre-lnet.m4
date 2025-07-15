@@ -250,6 +250,7 @@ AC_SUBST(ENABLEO2IB)
 
 AS_IF([test $ENABLEO2IB != "no"], [
 	EXTRA_CHECK_INCLUDE="$EXTRA_OFED_CONFIG $EXTRA_OFED_INCLUDE"
+	KBUILD_EXTRA_SYMBOLS="$KBUILD_EXTRA_SYMBOLS $O2IBPATH/Module.symvers"
 
 	# In RHEL 6.2, rdma_create_id() takes the queue-pair type as a fourth argument
 	LB_CHECK_COMPILE([if 'rdma_create_id' wants four args],
@@ -552,6 +553,21 @@ AS_IF([test $ENABLEO2IB != "no"], [
 	],[
 		AC_DEFINE(HAVE_FMR_POOL_API, 1,
 			[FMR pool API is available])
+	])
+
+	# rdma_connect_locked() was added in Linux 5.10,
+	# commit 071ba4cc559de47160761b9500b72e8fa09d923d
+	# and in MOFED-5.2-2. rdma_connect_locked() must
+	# be called instead of rdma_connect() in
+	# RDMA_CM_EVENT_ROUTE_RESOLVED handler.
+	LB_CHECK_COMPILE([if 'rdma_connect_locked' exists],
+	rdma_connect_locked, [
+		#include <rdma/rdma_cm.h>
+	],[
+		rdma_connect_locked(NULL, NULL);
+	],[
+		AC_DEFINE(HAVE_RDMA_CONNECT_LOCKED, 1,
+			[rdma_connect_locked is defined])
 	])
 
 	EXTRA_CHECK_INCLUDE=""

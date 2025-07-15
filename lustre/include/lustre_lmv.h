@@ -45,6 +45,8 @@ struct lmv_stripe_md {
 	__u32	lsm_md_stripe_count;
 	__u32	lsm_md_master_mdt_index;
 	__u32	lsm_md_hash_type;
+	__u8	lsm_md_max_inherit;
+	__u8	lsm_md_max_inherit_rr;
 	__u32	lsm_md_layout_version;
 	__u32	lsm_md_migrate_offset;
 	__u32	lsm_md_migrate_hash;
@@ -114,17 +116,21 @@ lsm_md_eq(const struct lmv_stripe_md *lsm1, const struct lmv_stripe_md *lsm2)
 
 static inline void lsm_md_dump(int mask, const struct lmv_stripe_md *lsm)
 {
+	bool valid_hash = lmv_dir_bad_hash(lsm);
 	int i;
 
 	/* If lsm_md_magic == LMV_MAGIC_FOREIGN pool_name may not be a null
 	 * terminated string so only print LOV_MAXPOOLNAME bytes.
 	 */
 	CDEBUG(mask,
-	       "magic %#x stripe count %d master mdt %d hash type %#x version %d migrate offset %d migrate hash %#x pool %.*s\n",
+	       "magic %#x stripe count %d master mdt %d hash type %s:%#x max inherit %hhu version %d migrate offset %d migrate hash %#x pool %.*s\n",
 	       lsm->lsm_md_magic, lsm->lsm_md_stripe_count,
-	       lsm->lsm_md_master_mdt_index, lsm->lsm_md_hash_type,
-	       lsm->lsm_md_layout_version, lsm->lsm_md_migrate_offset,
-	       lsm->lsm_md_migrate_hash,
+	       lsm->lsm_md_master_mdt_index,
+	       valid_hash ? "invalid hash" :
+			    mdt_hash_name[lsm->lsm_md_hash_type & (LMV_HASH_TYPE_MAX - 1)],
+	       lsm->lsm_md_hash_type, lsm->lsm_md_max_inherit,
+	       lsm->lsm_md_layout_version,
+	       lsm->lsm_md_migrate_offset, lsm->lsm_md_migrate_hash,
 	       LOV_MAXPOOLNAME, lsm->lsm_md_pool_name);
 
 	if (!lmv_dir_striped(lsm))
@@ -150,6 +156,8 @@ static inline void lmv1_le_to_cpu(struct lmv_mds_md_v1 *lmv_dst,
 				le32_to_cpu(lmv_src->lmv_master_mdt_index);
 	lmv_dst->lmv_hash_type = le32_to_cpu(lmv_src->lmv_hash_type);
 	lmv_dst->lmv_layout_version = le32_to_cpu(lmv_src->lmv_layout_version);
+	if (lmv_src->lmv_stripe_count > LMV_MAX_STRIPE_COUNT)
+		return;
 	for (i = 0; i < lmv_src->lmv_stripe_count; i++)
 		fid_le_to_cpu(&lmv_dst->lmv_stripe_fids[i],
 			      &lmv_src->lmv_stripe_fids[i]);
@@ -398,6 +406,17 @@ static inline bool lmv_user_magic_supported(__u32 lum_magic)
 	       lum_magic == LMV_USER_MAGIC_SPECIFIC ||
 	       lum_magic == LMV_MAGIC_FOREIGN;
 }
+
+#define LMV_DEBUG(mask, lmv, msg)					\
+	CDEBUG(mask,							\
+	       "%s LMV: magic=%#x count=%u index=%u hash=%s:%#x version=%u migrate offset=%u migrate hash=%s:%u.\n",\
+	       msg, (lmv)->lmv_magic, (lmv)->lmv_stripe_count,		\
+	       (lmv)->lmv_master_mdt_index,				\
+	       mdt_hash_name[(lmv)->lmv_hash_type & (LMV_HASH_TYPE_MAX - 1)],\
+	       (lmv)->lmv_hash_type, (lmv)->lmv_layout_version,		\
+	       (lmv)->lmv_migrate_offset,				\
+	       mdt_hash_name[(lmv)->lmv_migrate_hash & (LMV_HASH_TYPE_MAX - 1)],\
+	       (lmv)->lmv_migrate_hash)
 
 /* master LMV is sane */
 static inline bool lmv_is_sane(const struct lmv_mds_md_v1 *lmv)

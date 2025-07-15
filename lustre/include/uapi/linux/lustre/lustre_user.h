@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/include/lustre/lustre_user.h
  *
@@ -571,6 +570,7 @@ struct ll_ioc_lease_id {
  * *INFO    - set/get lov_user_mds_data
  */
 /*	lustre_ioctl.h			101-150 */
+/* ioctl codes 128-143 are reserved for fsverity */
 #define LL_IOC_GETFLAGS                 _IOR ('f', 151, long)
 #define LL_IOC_SETFLAGS                 _IOW ('f', 152, long)
 #define LL_IOC_CLRFLAGS                 _IOW ('f', 153, long)
@@ -618,6 +618,7 @@ struct ll_ioc_lease_id {
 #define LL_IOC_LMV_GETSTRIPE		_IOWR('f', 241, struct lmv_user_md)
 #define LL_IOC_REMOVE_ENTRY		_IOWR('f', 242, __u64)
 #define LL_IOC_RMFID			_IOR('f', 242, struct fid_array)
+#define LL_IOC_UNLOCK_FOREIGN		_IO('f', 242)
 #define LL_IOC_SET_LEASE		_IOWR('f', 243, struct ll_ioc_lease)
 #define LL_IOC_SET_LEASE_OLD		_IOWR('f', 243, long)
 #define LL_IOC_GET_LEASE		_IO('f', 244)
@@ -632,6 +633,8 @@ struct ll_ioc_lease_id {
 #define LL_IOC_PCC_DETACH		_IOW('f', 252, struct lu_pcc_detach)
 #define LL_IOC_PCC_DETACH_BY_FID	_IOW('f', 252, struct lu_pcc_detach_fid)
 #define LL_IOC_PCC_STATE		_IOR('f', 252, struct lu_pcc_state)
+#define LL_IOC_WBC_STATE		_IOR('f', 253, struct lu_wbc_state)
+#define LL_IOC_WBC_UNRESERVE		_IOW('f', 253, struct lu_wbc_unreserve)
 
 #ifndef	FS_IOC_FSGETXATTR
 /*
@@ -996,11 +999,14 @@ enum lmv_hash_type {
 	LMV_HASH_TYPE_MAX,
 };
 
-#define LMV_HASH_TYPE_DEFAULT LMV_HASH_TYPE_FNV_1A_64
+static __attribute__((unused)) const char *mdt_hash_name[] = {
+	"none",
+	"all_char",
+	"fnv_1a_64",
+	"crush",
+};
 
-#define LMV_HASH_NAME_ALL_CHARS	"all_char"
-#define LMV_HASH_NAME_FNV_1A_64	"fnv_1a_64"
-#define LMV_HASH_NAME_CRUSH	"crush"
+#define LMV_HASH_TYPE_DEFAULT LMV_HASH_TYPE_FNV_1A_64
 
 /* Right now only the lower part(0-16bits) of lmv_hash_type is being used,
  * and the higher part will be the flag to indicate the status of object,
@@ -1060,8 +1066,6 @@ static inline bool lmv_hash_is_layout_changing(__u32 hash)
 	       lmv_hash_is_migrating(hash);
 }
 
-extern char *mdt_hash_name[LMV_HASH_TYPE_MAX];
-
 struct lustre_foreign_type {
 	__u32		lft_type;
 	const char	*lft_name;
@@ -1072,7 +1076,7 @@ struct lustre_foreign_type {
  **/
 enum lustre_foreign_types {
 	LU_FOREIGN_TYPE_NONE = 0,
-	LU_FOREIGN_TYPE_DAOS = 0xda05,
+	LU_FOREIGN_TYPE_SYMLINK = 0xda05,
 	/* must be the max/last one */
 	LU_FOREIGN_TYPE_UNKNOWN = 0xffffffff,
 };
@@ -1084,12 +1088,14 @@ extern struct lustre_foreign_type lu_foreign_types[];
 #define LMV_MAX_STRIPE_COUNT 2000  /* ((12 * 4096 - 256) / 24) */
 #define lmv_user_md lmv_user_md_v1
 struct lmv_user_md_v1 {
-	__u32	lum_magic;	 /* must be the first field */
+	__u32	lum_magic;	   /* must be the first field */
 	__u32	lum_stripe_count;  /* dirstripe count */
 	__u32	lum_stripe_offset; /* MDT idx for default dirstripe */
 	__u32	lum_hash_type;     /* Dir stripe policy */
-	__u32	lum_type;	  /* LMV type: default */
-	__u32	lum_padding1;
+	__u32	lum_type;	   /* LMV type: default */
+	__u8	lum_max_inherit;   /* inherit depth of default LMV */
+	__u8	lum_max_inherit_rr;	/* inherit depth of default LMV to round-robin mkdir */
+	__u16	lum_padding1;
 	__u32	lum_padding2;
 	__u32	lum_padding3;
 	char	lum_pool_name[LOV_MAXPOOLNAME + 1];
@@ -1113,6 +1119,37 @@ static inline __u32 lmv_foreign_to_md_stripes(__u32 size)
  */
 enum lmv_type {
 	LMV_TYPE_DEFAULT = 0x0000,
+};
+
+/* lum_max_inherit will be decreased by 1 after each inheritance if it's not
+ * LMV_INHERIT_UNLIMITED or > LMV_INHERIT_MAX.
+ */
+enum {
+	/* for historical reason, 0 means unlimited inheritance */
+	LMV_INHERIT_UNLIMITED	= 0,
+	/* unlimited lum_max_inherit by default */
+	LMV_INHERIT_DEFAULT	= 0,
+	/* not inherit any more */
+	LMV_INHERIT_END		= 1,
+	/* max inherit depth */
+	LMV_INHERIT_MAX		= 250,
+	/* [251, 254] are reserved */
+	/* not set, or when inherit depth goes beyond end,  */
+	LMV_INHERIT_NONE	= 255,
+};
+
+enum {
+	/* not set, or when inherit_rr depth goes beyond end,  */
+	LMV_INHERIT_RR_NONE		= 0,
+	/* disable lum_max_inherit_rr by default */
+	LMV_INHERIT_RR_DEFAULT		= 0,
+	/* not inherit any more */
+	LMV_INHERIT_RR_END		= 1,
+	/* max inherit depth */
+	LMV_INHERIT_RR_MAX		= 250,
+	/* [251, 254] are reserved */
+	/* unlimited inheritance */
+	LMV_INHERIT_RR_UNLIMITED	= 255,
 };
 
 static inline int lmv_user_md_size(int stripes, int lmm_magic)
@@ -1239,6 +1276,8 @@ static inline __u64 lustre_stoqb(__kernel_size_t space)
 #define LUSTRE_Q_SETQUOTAPOOL	0x800010  /* set user pool quota */
 #define LUSTRE_Q_GETINFOPOOL	0x800011  /* get pool quota info */
 #define LUSTRE_Q_SETINFOPOOL	0x800012  /* set pool quota info */
+#define LUSTRE_Q_GETDEFAULT_POOL	0x800013  /* get default pool quota*/
+#define LUSTRE_Q_SETDEFAULT_POOL	0x800014  /* set default pool quota */
 /* In the current Lustre implementation, the grace time is either the time
  * or the timestamp to be used after some quota ID exceeds the soft limt,
  * 48 bits should be enough, its high 16 bits can be used as quota flags.
@@ -1268,7 +1307,9 @@ static inline __u64 lustre_stoqb(__kernel_size_t space)
 	(cmd == LUSTRE_Q_GETQUOTAPOOL ||	\
 	 cmd == LUSTRE_Q_SETQUOTAPOOL ||	\
 	 cmd == LUSTRE_Q_SETINFOPOOL ||		\
-	 cmd == LUSTRE_Q_GETINFOPOOL)
+	 cmd == LUSTRE_Q_GETINFOPOOL ||		\
+	 cmd == LUSTRE_Q_SETDEFAULT_POOL ||	\
+	 cmd == LUSTRE_Q_GETDEFAULT_POOL)
 
 #define ALLQUOTA 255       /* set all quota */
 static inline const char *qtype_name(int qtype)
@@ -1532,7 +1573,7 @@ enum changelog_rec_type {
 };
 
 static inline const char *changelog_type2str(int type) {
-	static const char *changelog_str[] = {
+	static const char *const changelog_str[] = {
 		"MARK",  "CREAT", "MKDIR", "HLINK", "SLINK", "MKNOD", "UNLNK",
 		"RMDIR", "RENME", "RNMTO", "OPEN",  "CLOSE", "LYOUT", "TRUNC",
 		"SATTR", "XATTR", "HSM",   "MTIME", "CTIME", "ATIME", "MIGRT",
@@ -2638,6 +2679,274 @@ struct fid_array {
 	struct lu_fid fa_fids[0];
 };
 #define OBD_MAX_FIDS_IN_ARRAY	4096
+
+/* more types could be defined upon need for more complex
+ * format to be used in foreign symlink LOV/LMV EAs, like
+ * one to describe a delimiter string and occurence number
+ * of delimited sub-string, ...
+ */
+enum ll_foreign_symlink_upcall_item_type {
+	EOB_TYPE = 1,
+	STRING_TYPE = 2,
+	POSLEN_TYPE = 3,
+};
+
+/* may need to be modified to allow for more format items to be defined, and
+ * like for ll_foreign_symlink_upcall_item_type enum
+ */
+struct ll_foreign_symlink_upcall_item {
+	__u32 type;
+	union {
+		struct {
+			__u32 pos;
+			__u32 len;
+		};
+		struct {
+			size_t size;
+			union {
+				/* internal storage of constant string */
+				char *string;
+				/* upcall stores constant string in a raw */
+				char bytestring[0];
+			};
+		};
+	};
+};
+
+#define POSLEN_ITEM_SZ (offsetof(struct ll_foreign_symlink_upcall_item, len) + \
+		sizeof(((struct ll_foreign_symlink_upcall_item *)0)->len))
+#define STRING_ITEM_SZ(sz) ( \
+	offsetof(struct ll_foreign_symlink_upcall_item, bytestring) + \
+	(sz + sizeof(__u32) - 1) / sizeof(__u32) * sizeof(__u32))
+
+/* presently limited to not cause max stack frame size to be reached
+ * because of temporary automatic array of
+ * "struct ll_foreign_symlink_upcall_item" presently used in
+ * foreign_symlink_upcall_info_store()
+ */
+#define MAX_NB_UPCALL_ITEMS 32
+
+enum lu_wbc_flush_mode {
+	WBC_FLUSH_NONE		= 0x0,
+	/*
+	 * In the lazy flush mode, a client never flushes dirty cache and drops
+	 * the root WBC EX lock actively unless it has to in the following
+	 * cases:
+	 * - The client needs to revoke the cached root WBC EX lock when the
+	 *   directory is conflict accessing from a remote client or shrink
+	 *   the LRU locks in the client lock namespace;
+	 * - sync(2) or fsync(2) is called on a file or directory under this
+	 *   root WBC EX lock;
+	 * - The capacity of the cache on the client is used out;
+	 * - The capacity limits for the cache on the client is reached;
+	 * - A application or a user wants to cleanup or uncache the cached
+	 *   data on the client manually.
+	 * There are two lazy flush modes:
+	 * - WBC_FLUSH_LAZY_DROP indicates that the root WBC EX lock will be
+	 *   dropped level by level during flush;
+	 * - WBC_FLUSH_LAZY_KEEP indicates that the root WBC EX lock will be
+	 *   kept during flush;
+	 */
+	WBC_FLUSH_LAZY_DROP	= 0x1,
+	WBC_FLUSH_LAZY_KEEP	= 0x2,
+	/*
+	 * In this flush mode, it will trigger to flush dirty cache in the
+	 * background periodically when the cache is aged.
+	 * The WBC EX lock will be dropped or converted level by level during
+	 * flushing.
+	 * Hold the root WBC EX lock until:
+	 * - Push all its children directories or files to MDT;
+	 * - Acquire the WBC EX lock back on the next level children
+	 *   directories;
+	 * And then release the root WBC EX lock;
+	 */
+	WBC_FLUSH_AGING_DROP	= 0x3,
+	/*
+	 * This flush mode is similar to WBC_FLUSH_AGING_DROP. Instead,
+	 * the WBC EX lock for the root WBC directory never drops actively
+	 * unless it has to in the following cases:
+	 * - The client needs to revoke the cached root WBC EX lock when the
+	 *   directory is conflict accessing from a remote client or shrink
+	 *   the LRU locks in the client lock namespace;
+	 * - A application or a user wants to cleanup or uncache the cached
+	 *   data on the client manually.
+	 */
+	WBC_FLUSH_AGING_KEEP	= 0x4,
+	WBC_FLUSH_LAZY_DEFAULT	= WBC_FLUSH_LAZY_DROP,
+	/* Default WBC flush mode. */
+	WBC_FLUSH_DEFAULT_MODE	= WBC_FLUSH_LAZY_DEFAULT,
+};
+
+enum lu_wbc_cache_mode {
+	WBC_MODE_NONE,
+	/* Metadata and data are all in MemFS just similar to Linux/tmpfs. */
+	WBC_MODE_MEMFS,
+	/*
+	 * Data on PCC (DOP):
+	 * Integrate Persistent Client Cache (PCC) with WBC.
+	 * Metadta in MemFS, data on PCC.
+	 * The memory size on a client is limit compared with the local
+	 * persistent storage. For a WBC subtree, its metadata can be
+	 * reasonably whole cached in MemFS. But data for regular files maybe
+	 * grows up too large to cache on client-side MemFS.
+	 * PCC can be used as the client-side persistent caching for the data
+	 * of regular files under the protection of EX WBC lock.
+	 *
+	 * The PCC copy stub can be created according to FID when create the
+	 * regular file on MemFS and then all data I/O are directed into PCC.
+	 * It can delay to instantiate the PCC copy until flush the metadata
+	 * or the regular file is growing too large. All these operations do
+	 * not require interaction with the server until flush is needed.
+	 * During flushing for a regular file, it just needs to set the file
+	 * with HSM exists, archived and released on MDT. The file data cached
+	 * on PCC can defer resync to Lustre OSTs or evict from PCC when it is
+	 * nearly full.
+	 */
+	WBC_MODE_DATA_PCC,
+	/* Both metadata and data are all in PCC. */
+	WBC_MODE_PCC_ALL,
+	/* Default WBC cache mode. */
+	WBC_MODE_DEFAULT = WBC_MODE_MEMFS,
+};
+
+enum lu_wbc_state_flags {
+	WBC_STATE_FL_NONE		= 0x0,
+	/*
+	 * The file or directory is under the protection of subtree
+	 * WBC EX lock: Protected(P).
+	 */
+	WBC_STATE_FL_PROTECTED		= (1 << 0),
+	/*
+	 * The file or directory has been flushed to the metadata server
+	 * (MDT): Sync(S).
+	 * All its ancestor directories should be also flushed to MDT.
+	 */
+	WBC_STATE_FL_SYNC		= (1 << 1),
+	/*
+	 * The file or directory is in Complete(P) state:
+	 * - Cached in client-side cache or in Sync(S) state;
+	 * - Under the protection of EX lock: Protected(P) state;
+	 * - Contains the complete sub dirs and files in client-side cache;
+	 * - Results of readdir() and lookup() operations under the directory
+	 *   can directly be obtained from client-side cache. All file
+	 *   operations can be performed on the client-side cache without
+	 *   communication with the server.
+	 * If not in Compelte(P) state, the client must read dentries from MDT.
+	 */
+	WBC_STATE_FL_COMPLETE		= (1 << 2),
+	/* Indicate it is a root WBC directory held the root WBC EX lock. */
+	WBC_STATE_FL_ROOT		= (1 << 3),
+	/* The inode is reserved and pinned in MemFS. */
+	WBC_STATE_FL_INODE_RESERVED	= (1 << 4),
+	/*
+	 * Dirty cache pages for a regular file under the protection of the
+	 * root WBC EX LOCK can be cached in MemFS. They are pinned in memory,
+	 * can not be evicted and reclaimed until they have been assimilated
+	 * from MemFS into main filesystem Lustre. After that, the data pages
+	 * are committed into Lustre CLIO and become reclaimable. Their life
+	 * cycle is managed by main filesystem Lustre instead of the embeded
+	 * memory file system MemFS.
+	 */
+	WBC_STATE_FL_DATA_COMMITTED	= (1 << 5),
+	/* The file is being written back. */
+	__WBC_STATE_FL_WRITEBACK	= 6,
+	WBC_STATE_FL_WRITEBACK		= (1 << __WBC_STATE_FL_WRITEBACK),
+	/* The inode is being removed. */
+	WBC_STATE_FL_FREEING		= (1 << 7),
+};
+
+enum lu_wbc_dirty_flags {
+	WBC_DIRTY_FL_NONE	= 0x0,
+	/* The file is up-to-date. */
+	WBC_DIRTY_FL_UPTODATE	= WBC_DIRTY_FL_NONE,
+	/* The file is being flushed. */
+	WBC_DIRTY_FL_FLUSHING	= 0x01,
+	/* The file was created in MemFS but not yet flushed to MDT. */
+	WBC_DIRTY_FL_CREAT	= 0x02,
+	/*
+	 * Attributes was modified since the file was created in MemFS or
+	 * flushed to MDT last time.
+	 */
+	WBC_DIRTY_FL_ATTR	= 0x04,
+	/*
+	 * New hardlinks were added since the file was create in MemFS or
+	 * flushed to MDT last time.
+	 */
+	WBC_DIRTY_FL_HARDLINK	= 0x08,
+	/*
+	 * The file contains dirty pages which are charged and managed
+	 * by MemFS.
+	 */
+	WBC_DIRTY_FL_DATA	= 0x10,
+	/* The directory contains unsynchronized removed sub files. */
+	WBC_DIRTY_FL_REMOVE	= 0x20,
+};
+
+enum lu_wbc_control_flags {
+	WBC_FL_DECOMPLETE	= 0x01,
+	WBC_FL_UNRSV_CHILDREN	= 0x02,
+	WBC_FL_SYNC_NONE	= 0x04,
+	WBC_FL_FLOW_CONTROL	= 0x08,
+};
+
+struct lu_wbc_state {
+	/* File mode. */
+	mode_t			wbcs_fmode;
+	/* WBC state for the file. */
+	__u32			wbcs_flags;
+	/*
+	 * Flags to indicate what is changed since the file is created in
+	 * MemFS.
+	 */
+	__u32			wbcs_dirty_flags;
+	/* WBC cache mode. */
+	enum lu_wbc_cache_mode	wbcs_cache_mode;
+	/*
+	 * Global flush mode on a client or customized flush mode for an
+	 * special root WBC directory.
+	 */
+	enum lu_wbc_flush_mode	wbcs_flush_mode;
+	/* Reserved for local open count. */
+	__u32			wbcs_open_count;
+	/* Reserved for the path of data on PCC after supported. */
+	char			wbcs_path[PATH_MAX];
+};
+
+struct lu_wbc_unreserve {
+	__u32	wbcu_unrsv_siblings:1;
+};
+
+static inline const char *wbc_cachemode2string(enum lu_wbc_cache_mode mode)
+{
+	switch (mode) {
+	case WBC_MODE_NONE:
+		return "none";
+	case WBC_MODE_MEMFS:
+		return "memfs";
+	case WBC_MODE_DATA_PCC:
+		return "dop"; /* Data on PCC */
+	default:
+		return "fault";
+	}
+}
+
+static inline const char *wbc_flushmode2string(enum lu_wbc_flush_mode mode)
+{
+	switch (mode) {
+	case WBC_FLUSH_NONE:
+		return "none";
+	case WBC_FLUSH_LAZY_DROP:
+		return "lazy_drop";
+	case WBC_FLUSH_LAZY_KEEP:
+		return "lazy_keep";
+	case WBC_FLUSH_AGING_DROP:
+		return "aging_drop";
+	case WBC_FLUSH_AGING_KEEP:
+		return "aging_keep";
+	default:
+		return "fault";
+	}
+}
 
 #if defined(__cplusplus)
 }

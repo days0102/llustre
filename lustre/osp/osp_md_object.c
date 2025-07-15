@@ -164,7 +164,12 @@ int osp_md_create(const struct lu_env *env, struct dt_object *dt,
 	update = thandle_to_osp_update_request(th);
 	LASSERT(update != NULL);
 
-	LASSERT(attr->la_valid & LA_TYPE);
+	if (!(attr->la_valid & LA_TYPE)) {
+		CERROR("%s: create type not specified: valid %llx\n",
+		       dt->do_lu.lo_dev->ld_obd->obd_name, attr->la_valid);
+		GOTO(out, rc = -EINVAL);
+	}
+
 	rc = OSP_UPDATE_RPC_PACK(env, out_create_pack, update,
 				 lu_object_fid(&dt->do_lu), attr, hint, dof);
 	if (rc != 0)
@@ -513,7 +518,7 @@ static int osp_md_index_lookup(const struct lu_env *env, struct dt_object *dt,
 	}
 
 	fid = lbuf->lb_buf;
-	if (ptlrpc_rep_need_swab(req))
+	if (req_capsule_rep_need_swab(&req->rq_pill))
 		lustre_swab_lu_fid(fid);
 	if (!fid_is_sane(fid)) {
 		CERROR("%s: lookup "DFID" %s invalid fid "DFID"\n",
@@ -1061,7 +1066,7 @@ int osp_md_destroy(const struct lu_env *env, struct dt_object *dt,
 	RETURN(rc);
 }
 
-struct dt_object_operations osp_md_obj_ops = {
+const struct dt_object_operations osp_md_obj_ops = {
 	.do_read_lock         = osp_md_read_lock,
 	.do_write_lock        = osp_md_write_lock,
 	.do_read_unlock       = osp_md_read_unlock,
@@ -1089,6 +1094,7 @@ struct dt_object_operations osp_md_obj_ops = {
 	.do_object_lock       = osp_md_object_lock,
 	.do_object_unlock     = osp_md_object_unlock,
 	.do_invalidate	      = osp_invalidate,
+	.do_check_stale	      = osp_check_stale,
 };
 
 /**
@@ -1136,6 +1142,7 @@ static int osp_write_interpreter(const struct lu_env *env,
 	if (rc) {
 		CDEBUG(D_HA, "error "DFID": rc = %d\n",
 		       PFID(lu_object_fid(&obj->opo_obj.do_lu)), rc);
+		OBD_RACE(OBD_FAIL_OUT_OBJECT_MISS);
 		spin_lock(&obj->opo_lock);
 		obj->opo_attr.la_valid = 0;
 		obj->opo_stale = 1;
@@ -1315,7 +1322,7 @@ out_update:
 }
 
 /* These body operation will be used to write symlinks during migration etc */
-struct dt_body_operations osp_md_body_ops = {
+const struct dt_body_operations osp_md_body_ops = {
 	.dbo_declare_write	= osp_md_declare_write,
 	.dbo_write		= osp_md_write,
 	.dbo_read		= osp_md_read,

@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/mdd/mdd_device.c
  *
@@ -307,10 +306,8 @@ static int llog_changelog_cancel_cb(const struct lu_env *env,
 				    struct llog_rec_hdr *hdr, void *data)
 {
 	struct llog_changelog_rec *rec = (struct llog_changelog_rec *)hdr;
-	struct llog_cookie	 cookie;
 	struct changelog_cancel_cookie *cl_cookie =
 		(struct changelog_cancel_cookie *)data;
-	int			 rc;
 
 	ENTRY;
 
@@ -340,15 +337,18 @@ static int llog_changelog_cancel_cb(const struct lu_env *env,
 		/* records are in order, so we're done */
 		RETURN(LLOG_PROC_BREAK);
 
-	cookie.lgc_lgl = llh->lgh_id;
-	cookie.lgc_index = hdr->lrh_index;
+	if (unlikely(OBD_FAIL_PRECHECK(OBD_FAIL_MDS_CHANGELOG_RACE))) {
+		if (cfs_fail_val == 0)
+			cfs_fail_val = hdr->lrh_index;
+		if (cfs_fail_val == hdr->lrh_index)
+			OBD_RACE(OBD_FAIL_MDS_CHANGELOG_RACE);
+	}
 
 	/* cancel them one at a time.  I suppose we could store up the cookies
 	 * and cancel them all at once; probably more efficient, but this is
 	 * done as a user call, so who cares... */
-	rc = llog_cat_cancel_records(env, llh->u.phd.phd_cat_handle, 1,
-				     &cookie);
-	RETURN(rc < 0 ? rc : 0);
+
+	RETURN(LLOG_DEL_RECORD);
 }
 
 static int llog_changelog_cancel(const struct lu_env *env,
@@ -598,7 +598,9 @@ static void mdd_changelog_fini(const struct lu_env *env,
 	struct obd_device	*obd = mdd2obd_dev(mdd);
 	struct llog_ctxt	*ctxt;
 
-	mdd->mdd_cl.mc_flags = 0;
+	if (mdd->mdd_cl.mc_flags & CLM_CLEANUP_DONE)
+		return;
+	mdd->mdd_cl.mc_flags = CLM_CLEANUP_DONE;
 
 again:
 	/* stop GC-thread if running */
@@ -723,7 +725,7 @@ int mdd_changelog_write_header(const struct lu_env *env,
 	}
 
 	reclen = llog_data_len(sizeof(*rec) + len);
-	buf = lu_buf_check_and_alloc(&mdd_env_info(env)->mti_big_buf, reclen);
+	buf = lu_buf_check_and_alloc(&mdd_env_info(env)->mti_chlg_buf, reclen);
 	if (buf->lb_buf == NULL)
 		RETURN(-ENOMEM);
 	rec = buf->lb_buf;
@@ -843,7 +845,7 @@ static int mdd_obf_create(const struct lu_env *env, struct md_object *pobj,
 	RETURN(-EPERM);
 }
 
-static struct md_dir_operations mdd_obf_dir_ops = {
+static const struct md_dir_operations mdd_obf_dir_ops = {
 	.mdo_lookup = obf_lookup,
 	.mdo_create = mdd_obf_create,
 	.mdo_rename = mdd_dummy_rename,
@@ -851,7 +853,7 @@ static struct md_dir_operations mdd_obf_dir_ops = {
 	.mdo_unlink = mdd_dummy_unlink
 };
 
-static struct md_dir_operations mdd_lpf_dir_ops = {
+static const struct md_dir_operations mdd_lpf_dir_ops = {
 	.mdo_lookup = mdd_lookup,
 	.mdo_create = mdd_dummy_create,
 	.mdo_rename = mdd_dummy_rename,
@@ -859,9 +861,8 @@ static struct md_dir_operations mdd_lpf_dir_ops = {
 	.mdo_unlink = mdd_dummy_unlink
 };
 
-static struct md_object *mdo_locate(const struct lu_env *env,
-				    struct md_device *md,
-				    const struct lu_fid *fid)
+struct md_object *mdo_locate(const struct lu_env *env, struct md_device *md,
+			     const struct lu_fid *fid)
 {
 	struct lu_object *obj;
 	struct md_object *mdo;
@@ -1067,6 +1068,7 @@ static int mdd_hsm_actions_llog_fini(const struct lu_env *env,
 static void mdd_device_shutdown(const struct lu_env *env, struct mdd_device *m,
 				struct lustre_cfg *cfg)
 {
+	mdd_remover_fini(env, m);
 	barrier_deregister(m->mdd_bottom);
 	lfsck_degister(env, m->mdd_bottom);
 	mdd_hsm_actions_llog_fini(env, m);
@@ -1284,8 +1286,17 @@ static int mdd_prepare(const struct lu_env *env,
 		GOTO(out_lfsck, rc);
 	}
 
+	rc = mdd_remover_init(env, mdd);
+	if (rc) {
+		CERROR("%s: failed to initialize remover: rc = %d\n",
+		       mdd2obd_dev(mdd)->obd_name, rc);
+		GOTO(out_barrier, rc);
+	}
+
 	RETURN(0);
 
+out_barrier:
+	barrier_deregister(mdd->mdd_bottom);
 out_lfsck:
 	lfsck_degister(env, mdd->mdd_bottom);
 out_nodemap:
@@ -1945,17 +1956,17 @@ static const struct md_device_operations mdd_ops = {
 	.mdo_dtconf_get     = mdd_dtconf_get,
 };
 
-static struct lu_device_type_operations mdd_device_type_ops = {
-        .ldto_init = mdd_type_init,
-        .ldto_fini = mdd_type_fini,
+static const struct lu_device_type_operations mdd_device_type_ops = {
+	.ldto_init		= mdd_type_init,
+	.ldto_fini		= mdd_type_fini,
 
-        .ldto_start = mdd_type_start,
-        .ldto_stop  = mdd_type_stop,
+	.ldto_start		= mdd_type_start,
+	.ldto_stop		= mdd_type_stop,
 
-        .ldto_device_alloc = mdd_device_alloc,
-        .ldto_device_free  = mdd_device_free,
+	.ldto_device_alloc	= mdd_device_alloc,
+	.ldto_device_free	= mdd_device_free,
 
-        .ldto_device_fini    = mdd_device_fini
+	.ldto_device_fini	= mdd_device_fini
 };
 
 static struct lu_device_type mdd_device_type = {
@@ -1976,6 +1987,7 @@ static void mdd_key_fini(const struct lu_context *ctx,
 	lu_buf_free(&info->mti_big_buf);
 	lu_buf_free(&info->mti_link_buf);
 	lu_buf_free(&info->mti_xattr_buf);
+	lu_buf_free(&info->mti_chlg_buf);
 
 	OBD_FREE_PTR(info);
 }
@@ -2023,7 +2035,7 @@ static int __init mdd_init(void)
 	changelog_orig_logops = llog_common_cat_ops;
 	changelog_orig_logops.lop_write_rec = mdd_changelog_write_rec;
 
-	rc = class_register_type(&mdd_obd_device_ops, NULL, false, NULL,
+	rc = class_register_type(&mdd_obd_device_ops, NULL, false,
 				 LUSTRE_MDD_NAME, &mdd_device_type);
 	if (rc)
 		lu_kmem_fini(mdd_caches);

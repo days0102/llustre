@@ -239,7 +239,7 @@ hsm_action_permission(struct mdt_thread_info *mti,
 	if (hsma != HSMA_RESTORE && mdt_rdonly(mti->mti_exp))
 		RETURN(-EROFS);
 
-	if (md_capable(uc, CFS_CAP_SYS_ADMIN))
+	if (md_capable(uc, CAP_SYS_ADMIN))
 		RETURN(0);
 
 	ma->ma_need = MA_INODE;
@@ -313,7 +313,7 @@ static int mdt_hsm_register_hal(struct mdt_thread_info *mti,
 			/* In case of REMOVE and CANCEL a Lustre file
 			 * is not mandatory, but restrict this
 			 * exception to admins. */
-			if (md_capable(mdt_ucred(mti), CFS_CAP_SYS_ADMIN) &&
+			if (md_capable(mdt_ucred(mti), CAP_SYS_ADMIN) &&
 			    (hai->hai_action == HSMA_REMOVE ||
 			     hai->hai_action == HSMA_CANCEL))
 				goto record;
@@ -533,15 +533,12 @@ int mdt_hsm_get_action(struct mdt_thread_info *mti,
 		RETURN(0);
 
 	car = mdt_cdt_find_request(cdt, hgad.hgad_hai.hai_cookie);
-	if (car != NULL) {
-		__u64 data_moved;
-
-		mdt_cdt_get_work_done(car, &data_moved);
-		/* this is just to give the volume of data moved
-		 * it means data_moved data have been moved from the
-		 * original request but we do not know which one
+	if (car) {
+		/* This is just to give the volume of data moved.
+		 * It means 'car_progress' data have been moved from the
+		 * original request but we do not know which one.
 		 */
-		extent->length = data_moved;
+		extent->length = car->car_progress.crp_total;
 		mdt_cdt_put_request(car);
 	}
 

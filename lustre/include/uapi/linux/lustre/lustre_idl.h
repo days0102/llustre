@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * Lustre wire protocol definitions.
  */
@@ -617,7 +616,7 @@ struct lustre_msg_v2 {
 	__u32 lm_repsize;	/* size of preallocated reply buffer */
 	__u32 lm_cksum;		/* CRC32 of ptlrpc_body early reply messages */
 	__u32 lm_flags;		/* enum lustre_msghdr MSGHDR_* flags */
-	__u32 lm_padding_2;	/* unused */
+	__u32 lm_opc;		/* SUB request opcode in a batch request */
 	__u32 lm_padding_3;	/* unused */
 	__u32 lm_buflens[0];	/* length of additional buffers in bytes,
 				 * padded to a multiple of 8 bytes. */
@@ -626,6 +625,9 @@ struct lustre_msg_v2 {
 	 * padded to a multiple of 8 bytes each to align contents.
 	 */
 };
+
+/* The returned result of the SUB request in a batch request */
+#define lm_result	lm_opc
 
 /* ptlrpc_body packet pb_types */
 #define PTL_RPC_MSG_REQUEST	4711	/* normal RPC request message */
@@ -851,6 +853,8 @@ struct ptlrpc_body_v2 {
 #define OBD_CONNECT2_GETATTR_PFID      0x20000ULL /* pack parent FID in getattr */
 #define OBD_CONNECT2_LSEEK	       0x40000ULL /* SEEK_HOLE/DATA RPC */
 #define OBD_CONNECT2_DOM_LVB	       0x80000ULL /* pack DOM glimpse data in LVB */
+#define OBD_CONNECT2_REP_MBITS		0x100000ULL /* match reply by mbits, not xid */
+#define OBD_CONNECT2_BATCH_RPC		0x400000ULL /* Multi-req batch RPC */
 /* XXX README XXX:
  * Please DO NOT add flag values here before first ensuring that this same
  * flag value is not in use on some other branch.  Please clear any such
@@ -910,7 +914,9 @@ struct ptlrpc_body_v2 {
 				OBD_CONNECT2_CRUSH | \
 				OBD_CONNECT2_ENCRYPT | \
 				OBD_CONNECT2_GETATTR_PFID |\
-				OBD_CONNECT2_LSEEK | OBD_CONNECT2_DOM_LVB)
+				OBD_CONNECT2_LSEEK | OBD_CONNECT2_DOM_LVB |\
+				OBD_CONNECT2_REP_MBITS | \
+				OBD_CONNECT2_BATCH_RPC)
 
 #define OST_CONNECT_SUPPORTED  (OBD_CONNECT_SRVLOCK | OBD_CONNECT_GRANT | \
 				OBD_CONNECT_REQPORTAL | OBD_CONNECT_VERSION | \
@@ -932,17 +938,19 @@ struct ptlrpc_body_v2 {
 				OBD_CONNECT_SHORTIO | OBD_CONNECT_FLAGS2)
 
 #define OST_CONNECT_SUPPORTED2 (OBD_CONNECT2_LOCKAHEAD | OBD_CONNECT2_INC_XID |\
-				OBD_CONNECT2_ENCRYPT | OBD_CONNECT2_LSEEK)
+				OBD_CONNECT2_ENCRYPT | OBD_CONNECT2_LSEEK |\
+				OBD_CONNECT2_REP_MBITS)
 
-#define ECHO_CONNECT_SUPPORTED (OBD_CONNECT_FID)
-#define ECHO_CONNECT_SUPPORTED2 0
+#define ECHO_CONNECT_SUPPORTED (OBD_CONNECT_FID | OBD_CONNECT_FLAGS2)
+#define ECHO_CONNECT_SUPPORTED2 OBD_CONNECT2_REP_MBITS
 
 #define MGS_CONNECT_SUPPORTED  (OBD_CONNECT_VERSION | OBD_CONNECT_AT | \
 				OBD_CONNECT_FULL20 | OBD_CONNECT_IMP_RECOV | \
 				OBD_CONNECT_PINGLESS |\
-				OBD_CONNECT_BULK_MBITS | OBD_CONNECT_BARRIER)
+				OBD_CONNECT_BULK_MBITS | OBD_CONNECT_BARRIER | \
+				OBD_CONNECT_FLAGS2)
 
-#define MGS_CONNECT_SUPPORTED2 0
+#define MGS_CONNECT_SUPPORTED2 OBD_CONNECT2_REP_MBITS
 
 /* Features required for this version of the client to work with server */
 #define CLIENT_CONNECT_MDT_REQD (OBD_CONNECT_FID |	\
@@ -1096,6 +1104,8 @@ enum obdo_flags {
         OBD_FL_NOSPC_BLK    = 0x00100000, /* no more block space on OST */
 	OBD_FL_FLUSH	    = 0x00200000, /* flush pages on the OST */
 	OBD_FL_SHORT_IO	    = 0x00400000, /* short io request */
+	OBD_FL_LOCKLESS	    = 0x00800000, /* lockless metadata I/O operation */
+	OBD_FL_SUBTREE_RM   = 0x01000000, /* subtree remove policy */
 	/* OBD_FL_LOCAL_MASK = 0xF0000000, was local-only flags until 2.10 */
 
 	/*
@@ -1674,6 +1684,7 @@ enum mds_cmd {
 	MDS_HSM_CT_UNREGISTER	= 60,
 	MDS_SWAP_LAYOUTS	= 61,
 	MDS_RMFID		= 62,
+	MDS_BATCH		= 63,
 	MDS_LAST_OPC
 };
 
@@ -1834,7 +1845,9 @@ struct mdt_body {
 	__u32	mbo_mode;
 	__u32	mbo_uid;
 	__u32	mbo_gid;
-	__u32	mbo_flags;   /* LUSTRE_*_FL file attributes */
+	__u32	mbo_flags; /* most replies: LUSTRE_*_FL file attributes,
+			    * data_version: OBD_FL_* flags
+			    */
 	__u32	mbo_rdev;
 	__u32	mbo_nlink; /* #bytes to read in the case of MDS_READPAGE */
 	__u32	mbo_layout_gen; /* was "generation" until 2.4.0 */
@@ -1901,26 +1914,28 @@ struct mdt_rec_setattr {
  * since the client and MDS may run different kernels (see bug 13828)
  * Therefore, we should only use MDS_ATTR_* attributes for sa_valid.
  */
-#define MDS_ATTR_MODE          0x1ULL /* = 1 */
-#define MDS_ATTR_UID           0x2ULL /* = 2 */
-#define MDS_ATTR_GID           0x4ULL /* = 4 */
-#define MDS_ATTR_SIZE          0x8ULL /* = 8 */
-#define MDS_ATTR_ATIME        0x10ULL /* = 16 */
-#define MDS_ATTR_MTIME        0x20ULL /* = 32 */
-#define MDS_ATTR_CTIME        0x40ULL /* = 64 */
-#define MDS_ATTR_ATIME_SET    0x80ULL /* = 128 */
-#define MDS_ATTR_MTIME_SET   0x100ULL /* = 256 */
-#define MDS_ATTR_FORCE       0x200ULL /* = 512, Not a change, but a change it */
-#define MDS_ATTR_ATTR_FLAG   0x400ULL /* = 1024 */
-#define MDS_ATTR_KILL_SUID   0x800ULL /* = 2048 */
-#define MDS_ATTR_KILL_SGID  0x1000ULL /* = 4096 */
-#define MDS_ATTR_CTIME_SET  0x2000ULL /* = 8192 */
-#define MDS_ATTR_FROM_OPEN  0x4000ULL /* = 16384, called from open path, ie O_TRUNC */
-#define MDS_ATTR_BLOCKS     0x8000ULL /* = 32768 */
-#define MDS_ATTR_PROJID	    0x10000ULL	/* = 65536 */
-#define MDS_ATTR_LSIZE      0x20000ULL	/* = 131072 */
-#define MDS_ATTR_LBLOCKS    0x40000ULL	/* = 262144 */
-#define MDS_ATTR_OVERRIDE	0x2000000ULL /* = 33554432 */
+enum mds_attr_flags {
+	MDS_ATTR_MODE =		      0x1ULL, /* = 1 */
+	MDS_ATTR_UID =		      0x2ULL, /* = 2 */
+	MDS_ATTR_GID =		      0x4ULL, /* = 4 */
+	MDS_ATTR_SIZE =		      0x8ULL, /* = 8 */
+	MDS_ATTR_ATIME =	     0x10ULL, /* = 16 */
+	MDS_ATTR_MTIME =	     0x20ULL, /* = 32 */
+	MDS_ATTR_CTIME =	     0x40ULL, /* = 64 */
+	MDS_ATTR_ATIME_SET =	     0x80ULL, /* = 128 */
+	MDS_ATTR_MTIME_SET =	    0x100ULL, /* = 256 */
+	MDS_ATTR_FORCE =	    0x200ULL, /* = 512, change it */
+	MDS_ATTR_ATTR_FLAG =	    0x400ULL, /* = 1024 */
+	MDS_ATTR_KILL_SUID =	    0x800ULL, /* = 2048 */
+	MDS_ATTR_KILL_SGID =	   0x1000ULL, /* = 4096 */
+	MDS_ATTR_CTIME_SET =	   0x2000ULL, /* = 8192 */
+	MDS_ATTR_FROM_OPEN =	   0x4000ULL, /* = 16384, from open O_TRUNC */
+	MDS_ATTR_BLOCKS =	   0x8000ULL, /* = 32768 */
+	MDS_ATTR_PROJID =	  0x10000ULL, /* = 65536 */
+	MDS_ATTR_LSIZE =	  0x20000ULL, /* = 131072 */
+	MDS_ATTR_LBLOCKS =	  0x40000ULL, /* = 262144 */
+	MDS_ATTR_OVERRIDE =	0x2000000ULL, /* = 33554432 */
+};
 
 enum mds_op_bias {
 /*	MDS_CHECK_SPLIT		= 1 << 0, obsolete before 2.3.58 */
@@ -1951,6 +1966,11 @@ enum mds_op_bias {
 	MDS_TRUNC_KEEP_LEASE	= 1 << 18,
 	MDS_PCC_ATTACH		= 1 << 19,
 	MDS_CLOSE_UPDATE_TIMES	= 1 << 20,
+	/* setstripe create only, don't restripe if target exists */
+	MDS_SETSTRIPE_CREATE	= 1 << 21,
+	MDS_WBC_LOCKLESS	= 1 << 22,
+	/* subtree removal used for WBC */
+	MDS_SUBTREE_REMOVAL	= 1 << 23,
 };
 
 #define MDS_CLOSE_INTENT (MDS_HSM_RELEASE | MDS_CLOSE_LAYOUT_SWAP |         \
@@ -2208,14 +2228,6 @@ struct lmv_mds_md_v1 {
 	char lmv_pool_name[LOV_MAXPOOLNAME + 1];	/* pool name */
 	struct lu_fid lmv_stripe_fids[0];	/* FIDs for each stripe */
 };
-
-#define LMV_DEBUG(mask, lmv, msg)					\
-	CDEBUG(mask,							\
-	       "%s LMV: magic=%#x count=%u index=%u hash=%#x version=%u migrate offset=%u migrate hash=%u.\n",	\
-	       msg, (lmv)->lmv_magic, (lmv)->lmv_stripe_count,		\
-	       (lmv)->lmv_master_mdt_index, (lmv)->lmv_hash_type,	\
-	       (lmv)->lmv_layout_version, (lmv)->lmv_migrate_offset,	\
-	       (lmv)->lmv_migrate_hash)
 
 /* stripe count before directory split */
 #define lmv_split_offset	lmv_migrate_offset
@@ -2511,6 +2523,8 @@ enum ldlm_intent_flags {
 /*	IT_SETXATTR    = 0x00002000, Obsolete. */
 	IT_GLIMPSE     = 0x00004000,
 	IT_BRW	       = 0x00008000,
+	IT_SETATTR     = 0x00010000,
+	IT_WBC_EXLOCK  = 0x00020000,
 };
 
 struct ldlm_intent {
@@ -2608,20 +2622,20 @@ struct mgs_nidtbl_entry {
         } u;
 };
 
-enum {
-	CONFIG_T_CONFIG  = 0,
-	CONFIG_T_SPTLRPC = 1,
-	CONFIG_T_RECOVER = 2,
-	CONFIG_T_PARAMS  = 3,
-	CONFIG_T_NODEMAP = 4,
-	CONFIG_T_BARRIER = 5,
-	CONFIG_T_MAX
+enum mgs_cfg_type {
+	MGS_CFG_T_CONFIG	= 0,
+	MGS_CFG_T_SPTLRPC	= 1,
+	MGS_CFG_T_RECOVER	= 2,
+	MGS_CFG_T_PARAMS	= 3,
+	MGS_CFG_T_NODEMAP	= 4,
+	MGS_CFG_T_BARRIER	= 5,
+	MGS_CFG_T_MAX
 };
 
 struct mgs_config_body {
 	char     mcb_name[MTI_NAME_MAXLEN]; /* logname */
 	__u64    mcb_offset;    /* next index of config log to request */
-	__u16    mcb_type;      /* type of log: CONFIG_T_[CONFIG|RECOVER] */
+	__u16    mcb_type;      /* type of log: MGS_CFG_T_[CONFIG|RECOVER] */
 	__u8     mcb_nm_cur_pass;
 	__u8     mcb_bits;      /* bits unit size of config log */
 	__u32    mcb_units;     /* # of units for bulk transfer */
@@ -2937,6 +2951,7 @@ enum llog_flag {
 	LLOG_F_EXT_X_NID	= 0x80,
 	LLOG_F_EXT_X_OMODE	= 0x100,
 	LLOG_F_EXT_X_XATTR	= 0x200,
+	LLOG_F_RM_ON_ERR	= 0x400,
 
 	/* Note: Flags covered by LLOG_F_EXT_MASK will be inherited from
 	 * catlog to plain log, so do not add LLOG_F_IS_FIXSIZE here,
@@ -3466,6 +3481,54 @@ struct out_read_reply {
 	__u32	orr_padding;
 	__u64	orr_offset;
 	char	orr_data[0];
+};
+
+#define BUT_REQUEST_MAGIC	0xBADE0001
+/* Hold batched updates sending to the remote target in a single RPC */
+struct batch_update_request {
+	__u32			burq_magic;
+	__u16			burq_count;	/* number of burq_reqmsg[] */
+	__u16			burq_padding;
+	struct lustre_msg	burq_reqmsg[0];
+};
+
+#define BUT_HEADER_MAGIC	0xBADF0001
+/* Header for Batched UpdaTes request */
+struct but_update_header {
+	__u32	buh_magic;
+	__u32	buh_count;
+	__u32	buh_inline_length;
+	__u32	buh_reply_size;
+	__u32	buh_update_count;
+	__u32	buh_padding;
+	__u32	buh_inline_data[0];
+};
+
+struct but_update_buffer {
+	__u32	bub_size;
+	__u32	bub_padding;
+};
+
+#define BUT_REPLY_MAGIC	0x00AD0001
+struct batch_update_reply {
+	__u32			burp_magic;
+	__u16			burp_count;
+	__u16			burp_padding;
+	struct lustre_msg	burp_repmsg[0];
+};
+
+/**
+ * Batch update opcode.
+ */
+enum batch_update_cmd {
+	BUT_GETATTR		= 1,
+	BUT_CREATE_EXLOCK	= 2,
+	BUT_CREATE_LOCKLESS	= 3,
+	BUT_SETATTR_EXLOCK	= 4,
+	BUT_SETATTR_LOCKLESS	= 5,
+	BUT_EXLOCK_ONLY		= 6,
+	BUT_LAST_OPC,
+	BUT_FIRST_OPC	= BUT_GETATTR,
 };
 
 /** layout swap request structure

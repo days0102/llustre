@@ -565,7 +565,7 @@ static int mdt_coordinator(void *data)
 	set_cdt_state(cdt, CDT_RUNNING);
 
 	/* Inform mdt_hsm_cdt_start(). */
-	wake_up_all(&cdt->cdt_waitq);
+	wake_up(&cdt->cdt_waitq);
 
 	while (1) {
 		int i;
@@ -922,8 +922,9 @@ static int mdt_hsm_pending_restore(struct mdt_thread_info *mti)
 
 int hsm_init_ucred(struct lu_ucred *uc)
 {
-	ENTRY;
+	kernel_cap_t kcap = cap_combine(CAP_FS_SET, CAP_NFSD_SET);
 
+	ENTRY;
 	uc->uc_valid = UCRED_OLD;
 	uc->uc_o_uid = 0;
 	uc->uc_o_gid = 0;
@@ -935,7 +936,7 @@ int hsm_init_ucred(struct lu_ucred *uc)
 	uc->uc_fsgid = 0;
 	uc->uc_suppgids[0] = -1;
 	uc->uc_suppgids[1] = -1;
-	uc->uc_cap = CFS_CAP_FS_MASK;
+	uc->uc_cap = kcap.cap[0];
 	uc->uc_umask = 0777;
 	uc->uc_ginfo = NULL;
 	uc->uc_identity = NULL;
@@ -2240,15 +2241,18 @@ ssize_t hsm_control_store(struct kobject *kobj, struct attribute *attr,
 			rc = set_cdt_state(cdt, CDT_RUNNING);
 			mdt_hsm_cdt_event(cdt);
 			wake_up(&cdt->cdt_waitq);
+		} else if (cdt->cdt_state == CDT_RUNNING) {
+			rc = 0;
 		} else {
 			rc = mdt_hsm_cdt_start(mdt);
 		}
 	} else if (strncmp(buffer, CDT_STOP_CMD, strlen(CDT_STOP_CMD)) == 0) {
-		if ((cdt->cdt_state == CDT_STOPPING) ||
-		    (cdt->cdt_state == CDT_STOPPED)) {
-			CERROR("%s: Coordinator already stopped\n",
+		if (cdt->cdt_state == CDT_STOPPING) {
+			CERROR("%s: Coordinator is already stopping\n",
 			       mdt_obd_name(mdt));
 			rc = -EALREADY;
+		} else if (cdt->cdt_state == CDT_STOPPED) {
+			rc = 0;
 		} else {
 			rc = mdt_hsm_cdt_stop(mdt);
 		}

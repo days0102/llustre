@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/include/lustre_req_layout.h
  *
@@ -63,9 +62,16 @@ enum req_location {
 
 struct req_capsule {
         struct ptlrpc_request   *rc_req;
-        const struct req_format *rc_fmt;
-        enum req_location        rc_loc;
-        __u32                    rc_area[RCL_NR][REQ_MAX_FIELD_NR];
+	/** Request message - what client sent */
+	struct lustre_msg	*rc_reqmsg;
+	/** Reply message - server response */
+	struct lustre_msg	*rc_repmsg;
+	/** Fields that help to see if request and reply were swabved or not */
+	__u32			 rc_req_swab_mask;
+	__u32			 rc_rep_swab_mask;
+	const struct req_format *rc_fmt;
+	enum req_location        rc_loc;
+	__u32                    rc_area[RCL_NR][REQ_MAX_FIELD_NR];
 };
 
 void req_capsule_init(struct req_capsule *pill, struct ptlrpc_request *req,
@@ -73,12 +79,21 @@ void req_capsule_init(struct req_capsule *pill, struct ptlrpc_request *req,
 void req_capsule_fini(struct req_capsule *pill);
 
 void req_capsule_set(struct req_capsule *pill, const struct req_format *fmt);
+void req_capsule_subreq_init(struct req_capsule *pill,
+			     const struct req_format *fmt,
+			     struct ptlrpc_request *req,
+			     struct lustre_msg *reqmsg,
+			     struct lustre_msg *repmsg,
+			     enum req_location loc);
+
 void req_capsule_client_dump(struct req_capsule *pill);
 void req_capsule_server_dump(struct req_capsule *pill);
 void req_capsule_init_area(struct req_capsule *pill);
 size_t req_capsule_filled_sizes(struct req_capsule *pill,
 				enum req_location loc);
 int  req_capsule_server_pack(struct req_capsule *pill);
+int  req_capsule_client_pack(struct req_capsule *pill);
+void req_capsule_set_replen(struct req_capsule *pill);
 
 void *req_capsule_client_get(struct req_capsule *pill,
                              const struct req_msg_field *field);
@@ -126,9 +141,63 @@ void req_capsule_shrink(struct req_capsule *pill,
 int req_capsule_server_grow(struct req_capsule *pill,
 			    const struct req_msg_field *field,
 			    __u32 newlen);
+bool req_capsule_need_swab(struct req_capsule *pill, enum req_location loc,
+			   __u32 index);
+void req_capsule_set_swabbed(struct req_capsule *pill, enum req_location loc,
+			     __u32 index);
+
+/**
+ * Returns true if request buffer at offset \a index was already swabbed
+ */
+static inline bool req_capsule_req_swabbed(struct req_capsule *pill,
+					   size_t index)
+{
+	LASSERT(index < sizeof(pill->rc_req_swab_mask) * 8);
+	return pill->rc_req_swab_mask & BIT(index);
+}
+
+/**
+ * Returns true if request reply buffer at offset \a index was already swabbed
+ */
+static inline bool req_capsule_rep_swabbed(struct req_capsule *pill,
+					   size_t index)
+{
+	LASSERT(index < sizeof(pill->rc_rep_swab_mask) * 8);
+	return pill->rc_rep_swab_mask & BIT(index);
+}
+
+/**
+ * Mark request buffer at offset \a index that it was already swabbed
+ */
+static inline void req_capsule_set_req_swabbed(struct req_capsule *pill,
+					       size_t index)
+{
+	LASSERT(index < sizeof(pill->rc_req_swab_mask) * 8);
+	LASSERT((pill->rc_req_swab_mask & BIT(index)) == 0);
+	pill->rc_req_swab_mask |= BIT(index);
+}
+
+/**
+ * Mark request reply buffer at offset \a index that it was already swabbed
+ */
+static inline void req_capsule_set_rep_swabbed(struct req_capsule *pill,
+					       size_t index)
+{
+	LASSERT(index < sizeof(pill->rc_rep_swab_mask) * 8);
+	LASSERT((pill->rc_rep_swab_mask & BIT(index)) == 0);
+	pill->rc_rep_swab_mask |= BIT(index);
+}
+
 int  req_layout_init(void);
 void req_layout_fini(void);
+#ifdef HAVE_SERVER_SUPPORT
 int req_check_sepol(struct req_capsule *pill);
+#else
+static inline int req_check_sepol(struct req_capsule *pill)
+{
+	return 0;
+}
+#endif
 
 extern struct req_format RQF_OBD_PING;
 extern struct req_format RQF_OBD_SET_INFO;
@@ -169,6 +238,7 @@ extern struct req_format RQF_MDS_REINT_CREATE;
 extern struct req_format RQF_MDS_REINT_CREATE_ACL;
 extern struct req_format RQF_MDS_REINT_CREATE_SLAVE;
 extern struct req_format RQF_MDS_REINT_CREATE_SYM;
+extern struct req_format RQF_MDS_REINT_CREATE_REG;
 extern struct req_format RQF_MDS_REINT_OPEN;
 extern struct req_format RQF_MDS_REINT_UNLINK;
 extern struct req_format RQF_MDS_REINT_LINK;
@@ -224,6 +294,7 @@ extern struct req_format RQF_LDLM_INTENT_OPEN;
 extern struct req_format RQF_LDLM_INTENT_CREATE;
 extern struct req_format RQF_LDLM_INTENT_GETXATTR;
 extern struct req_format RQF_LDLM_INTENT_QUOTA;
+extern struct req_format RQF_LDLM_INTENT_SETATTR;
 extern struct req_format RQF_LDLM_CANCEL;
 extern struct req_format RQF_LDLM_CALLBACK;
 extern struct req_format RQF_LDLM_CP_CALLBACK;
@@ -241,6 +312,15 @@ extern struct req_format RQF_CONNECT;
 /* LFSCK req_format */
 extern struct req_format RQF_LFSCK_NOTIFY;
 extern struct req_format RQF_LFSCK_QUERY;
+
+/* Batch UpdaTe req_format */
+extern struct req_format RQF_BUT_GETATTR;
+extern struct req_format RQF_BUT_CREATE_EXLOCK;
+extern struct req_format RQF_BUT_CREATE_LOCKLESS;
+extern struct req_format RQF_BUT_SETATTR_EXLOCK;
+extern struct req_format RQF_BUT_SETATTR_LOCKLESS;
+extern struct req_format RQF_BUT_EXLOCK_ONLY;
+extern struct req_format RQF_MDS_BATCH;
 
 extern struct req_msg_field RMF_GENERIC_DATA;
 extern struct req_msg_field RMF_PTLRPC_BODY;
@@ -340,6 +420,11 @@ extern struct req_msg_field RMF_OUT_UPDATE;
 extern struct req_msg_field RMF_OUT_UPDATE_REPLY;
 extern struct req_msg_field RMF_OUT_UPDATE_HEADER;
 extern struct req_msg_field RMF_OUT_UPDATE_BUF;
+
+/* Batch UpdaTe format */
+extern struct req_msg_field RMF_BUT_REPLY;
+extern struct req_msg_field RMF_BUT_HEADER;
+extern struct req_msg_field RMF_BUT_BUF;
 
 /* LFSCK format */
 extern struct req_msg_field RMF_LFSCK_REQUEST;

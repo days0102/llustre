@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * libcfs/include/libcfs/linux/linux-mem.h
  *
@@ -95,59 +94,50 @@ static inline void bitmap_free(const unsigned long *bitmap)
 /*
  * Shrinker
  */
-# define SHRINKER_ARGS(sc, nr_to_scan, gfp_mask)  \
-                       struct shrinker *shrinker, \
-                       struct shrink_control *sc
-# define shrink_param(sc, var) ((sc)->var)
-
-#ifdef HAVE_SHRINKER_COUNT
-struct shrinker_var {
-	unsigned long (*count)(struct shrinker *,
-			       struct shrink_control *sc);
-	unsigned long (*scan)(struct shrinker *,
-			      struct shrink_control *sc);
-};
-# define DEF_SHRINKER_VAR(name, shrink, count_obj, scan_obj) \
-	    struct shrinker_var name = { .count = count_obj, .scan = scan_obj }
-#else
-struct shrinker_var {
-	int (*shrink)(SHRINKER_ARGS(sc, nr_to_scan, gfp_mask));
-};
-# define DEF_SHRINKER_VAR(name, shrinker, count, scan) \
-	    struct shrinker_var name = { .shrink = shrinker }
+#ifndef SHRINK_STOP
 # define SHRINK_STOP (~0UL)
 #endif
 
-static inline
-struct shrinker *set_shrinker(int seek, struct shrinker_var *var)
+#ifndef HAVE_MMAP_LOCK
+static inline void mmap_write_lock(struct mm_struct *mm)
 {
-        struct shrinker *s;
+	down_write(&mm->mmap_sem);
+}
 
-	s = kzalloc(sizeof(*s), GFP_KERNEL);
-        if (s == NULL)
-                return (NULL);
+static inline bool mmap_write_trylock(struct mm_struct *mm)
+{
+	return down_write_trylock(&mm->mmap_sem) != 0;
+}
 
-#ifdef HAVE_SHRINKER_COUNT
-	s->count_objects = var->count;
-	s->scan_objects = var->scan;
-#else
-	s->shrink = var->shrink;
+static inline void mmap_write_unlock(struct mm_struct *mm)
+{
+	up_write(&mm->mmap_sem);
+}
+
+static inline void mmap_read_lock(struct mm_struct *mm)
+{
+	down_read(&mm->mmap_sem);
+}
+
+static inline bool mmap_read_trylock(struct mm_struct *mm)
+{
+	return down_read_trylock(&mm->mmap_sem) != 0;
+}
+
+static inline void mmap_read_unlock(struct mm_struct *mm)
+{
+	up_read(&mm->mmap_sem);
+}
 #endif
-        s->seeks = seek;
 
-        register_shrinker(s);
+#ifdef HAVE_VMALLOC_2ARGS
+#define __ll_vmalloc(size, flags) __vmalloc(size, flags)
+#else
+#define __ll_vmalloc(size, flags) __vmalloc(size, flags, PAGE_KERNEL)
+#endif
 
-        return s;
-}
-
-static inline
-void remove_shrinker(struct shrinker *shrinker)
-{
-        if (shrinker == NULL)
-                return;
-
-        unregister_shrinker(shrinker);
-        kfree(shrinker);
-}
+#ifndef HAVE_KFREE_SENSITIVE
+#define kfree_sensitive(x)      kzfree(x)
+#endif
 
 #endif /* __LINUX_CFS_MEM_H__ */

@@ -1882,8 +1882,9 @@ t32_test() {
 			mkfsoptions="--mkfsoptions=\\\"-J size=8\\\""
 		fi
 
-		add $SINGLEMDS $(mkfs_opts mds2 $fs2mdsdev $fsname) --reformat \
-			   $mkfsoptions $fs2mdsdev $fs2mdsvdev > /dev/null || {
+		add $SINGLEMDS $(mds2failover_HOST="" \
+			mkfs_opts mds2 $fs2mdsdev $fsname) --reformat \
+			$mkfsoptions $fs2mdsdev $fs2mdsvdev > /dev/null || {
 			error_noexit "Mkfs new MDT failed"
 			return 1
 		}
@@ -8636,7 +8637,7 @@ test_120() { # LU-11130
 }
 run_test 120 "cross-target rename should not create bad symlinks"
 
-test_122() {
+test_122a() {
 	[ $MDSCOUNT -lt 2 ] && skip "needs >= 2 MDTs"
 	[[ "$OST1_VERSION" -ge $(version_code 2.11.53) ]] ||
 		skip "Need OST version at least 2.11.53"
@@ -8655,7 +8656,68 @@ test_122() {
 
 	cleanup
 }
-run_test 122 "Check OST sequence update"
+run_test 122a "Check OST sequence update"
+
+test_122b() {
+	[[ "$OST1_VERSION" -ge $(version_code 2.11.53) ]] ||
+		skip "Need OST version at least 2.11.53"
+	local err
+
+	reformat
+	LOAD_MODULES_REMOTE=true load_modules
+#define OBD_FAIL_OFD_SET_OID 0x1e0
+	do_facet ost1 $LCTL set_param fail_loc=0x00001e0
+
+	stack_trap cleanup EXIT
+	setup_noconfig
+	do_facet ost1 $LCTL set_param obdfilter.*.precreate_batch=256
+	$LFS mkdir -i0 -c1 $DIR/$tdir || error "failed to create directory"
+	$LFS setstripe -i0 -c1 $DIR/$tdir || error "failed to setstripe"
+	do_facet ost1 $LCTL set_param fail_loc=0
+	# overflow IDIF 32bit and create > OST_MAX_PRECREATE*5
+	# so a new wrong sequence would differ from an original with error
+	#define OST_MAX_PRECREATE 20000
+	local ost_max_precreate=20100
+	local num_create=$(( ost_max_precreate * 5 ))
+
+	# Check the number of inodes available on OST0
+	local files=0
+	local ifree=$($LFS df -i $MOUNT | awk '/OST0000/ { print $4 }')
+
+	log "On OST0, $ifree inodes available. Want $num_create."
+
+	if [ $ifree -lt 10000 ]; then
+		files=$(( ifree - 50 ))
+	else
+		files=10000
+	fi
+
+	local j=$((num_create / files + 1))
+
+	for i in $(seq 1 $j); do
+		createmany -o $DIR/$tdir/$tfile-$i- $files ||
+			error "createmany fail create $files files: $?"
+		unlinkmany $DIR/$tdir/$tfile-$i- $files ||
+			error "unlinkmany failed unlink $files files"
+	done
+	sync
+	do_facet ost1 sync
+	#we need a write req during recovery for ofd_seq_load
+	replay_barrier ost1
+	dd if=/dev/urandom of=$DIR/$tdir/$tfile bs=1024k count=1 oflag=sync ||
+		 error "failed to write file"
+
+	# OBD_FAIL_OST_CREATE_NET 0x204
+	do_facet ost1 $LCTL set_param fail_loc=0x80000204
+	fail ost1
+	createmany -o $DIR/$tdir/file_ 100
+	sync
+
+	err=$(do_facet ost1 dmesg | tac | sed "/Recovery over/,$ d" |
+	      grep "OST replaced or reformatted")
+	[ -z "$err" ] || error $err
+}
+run_test 122b "Check OST sequence wouldn't change when IDIF 32bit overflows"
 
 test_123aa() {
 	remote_mgs_nodsh && skip "remote MGS with nodsh"
@@ -8911,6 +8973,12 @@ test_124()
 	[ -z $mds2failover_HOST ] && skip "needs MDT failover setup"
 
 	setup
+	do_facet mgs $LCTL --device MGS llog_print $FSNAME-client |
+		grep 1.2.3.4@tcp && error "Should not be fake nid"
+	do_facet mgs $LCTL conf_param $FSNAME-MDT0001.failover.node=1.2.3.4@tcp\
+		|| error "Set params error"
+	do_facet mgs $LCTL --device MGS llog_print $FSNAME-client |
+		grep 1.2.3.4@tcp || error "Fake nid should be added"
 	cleanup
 
 	load_modules
@@ -9124,6 +9192,43 @@ test_127() {
 		oflag=direct || error "overwrite failed"
 }
 run_test 127 "direct io overwrite on full ost"
+
+test_128()
+{
+	combined_mgs_mds && skip "need separate mgs device"
+	[ "$ost2_FSTYPE" == zfs ] && import_zpool ost2
+
+	format_ost 2
+	# Try to apply nolocallogs to the virgin OST. Should fail.
+	do_facet ost2 "$TUNEFS --nolocallogs $(ostdevname 2)" &&
+		error "nolocallogs should not be allowed on the virgin target"
+
+	setupall
+	stopall
+
+	[ "$ost1_FSTYPE" == zfs ] && import_zpool ost1
+	# Start OST without MGS (local configs)
+	do_facet ost1 "$TUNEFS --dryrun $(ostdevname 1)"
+	start_ost || error "unable to start OST1"
+	stop_ost || error "Unable to stop OST1"
+
+	[ "$ost1_FSTYPE" == zfs ] && import_zpool ost1
+	# Do not allow reading local configs, should fail
+	do_facet ost1 "$TUNEFS --nolocallogs $(ostdevname 1)" ||
+		error "Can not set nolocallogs"
+	start_ost && error "OST1 started, but should fail"
+
+	# Connect to MGS successfully, reset nolocallogs flag
+	[ "$ost1_FSTYPE" == zfs ] && import_zpool ost1
+	start_mgs || error "unable to start MGS"
+	start_ost || error "unable to start OST1"
+
+	do_facet ost1 "$TUNEFS --dryrun $(ostdevname 1)" | grep "nolocallogs" &&
+		error "nolocallogs expected to be reset"
+
+	stop_ost || error "Unable to stop OST1"
+}
+run_test 128 "Force using remote logs with --nolocallogs"
 
 if ! combined_mgs_mds ; then
 	stop mgs

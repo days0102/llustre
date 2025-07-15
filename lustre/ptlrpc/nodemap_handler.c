@@ -31,7 +31,6 @@
 #include <uapi/linux/lnet/nidstr.h>
 #include <lustre_net.h>
 #include <lustre_acl.h>
-#include <lustre_eacl.h>
 #include <obd_class.h>
 #include "nodemap_internal.h"
 
@@ -1621,6 +1620,8 @@ struct nodemap_config *nodemap_config_alloc(void)
 	}
 
 	init_rwsem(&config->nmc_range_tree_lock);
+
+	config->nmc_range_tree.nmrt_range_interval_root = INTERVAL_TREE_ROOT;
 
 	return config;
 }

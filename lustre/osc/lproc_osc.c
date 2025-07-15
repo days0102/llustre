@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 #define DEBUG_SUBSYSTEM S_CLASS
 
@@ -60,6 +59,7 @@ static ssize_t active_store(struct kobject *kobj, struct attribute *attr,
 {
 	struct obd_device *obd = container_of(kobj, struct obd_device,
 					      obd_kset.kobj);
+	struct obd_import *imp, *imp0;
 	bool val;
 	int rc;
 
@@ -67,14 +67,19 @@ static ssize_t active_store(struct kobject *kobj, struct attribute *attr,
 	if (rc)
 		return rc;
 
+	with_imp_locked(obd, imp0, rc)
+		imp = class_import_get(imp0);
+	if (rc)
+		return rc;
 	/* opposite senses */
-	if (obd->u.cli.cl_import->imp_deactive == val)
-		rc = ptlrpc_set_import_active(obd->u.cli.cl_import, val);
+	if (imp->imp_deactive == val)
+		rc = ptlrpc_set_import_active(imp, val);
 	else
 		CDEBUG(D_CONFIG, "activate %u: ignoring repeat request\n",
 		       (unsigned int)val);
+	class_import_put(imp);
 
-	return count;
+	return rc ?: count;
 }
 LUSTRE_RW_ATTR(active);
 

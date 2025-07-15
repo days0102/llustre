@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/lod/lod_qos.c
  *
@@ -137,8 +136,8 @@ static int lod_statfs_and_check(const struct lu_env *env, struct lod_device *d,
 
 			LASSERT(desc->ld_active_tgt_count > 0);
 			desc->ld_active_tgt_count--;
-			ltd->ltd_qos.lq_dirty = 1;
-			ltd->ltd_qos.lq_rr.lqr_dirty = 1;
+			set_bit(LQ_DIRTY, &ltd->ltd_qos.lq_flags);
+			set_bit(LQ_DIRTY, &ltd->ltd_qos.lq_rr.lqr_flags);
 			CDEBUG(D_CONFIG, "%s: turns inactive\n",
 			       tgt->ltd_exp->exp_obd->obd_name);
 		}
@@ -153,8 +152,8 @@ static int lod_statfs_and_check(const struct lu_env *env, struct lod_device *d,
 			tgt->ltd_active = 1;
 			tgt->ltd_connecting = 0;
 			desc->ld_active_tgt_count++;
-			ltd->ltd_qos.lq_dirty = 1;
-			ltd->ltd_qos.lq_rr.lqr_dirty = 1;
+			set_bit(LQ_DIRTY, &ltd->ltd_qos.lq_flags);
+			set_bit(LQ_DIRTY, &ltd->ltd_qos.lq_rr.lqr_flags);
 			CDEBUG(D_CONFIG, "%s: turns active\n",
 			       tgt->ltd_exp->exp_obd->obd_name);
 		}
@@ -223,7 +222,7 @@ void lod_qos_statfs_update(const struct lu_env *env, struct lod_device *lod,
 
 		if (tgt->ltd_statfs.os_bavail != avail)
 			/* recalculate weigths */
-			ltd->ltd_qos.lq_dirty = 1;
+			set_bit(LQ_DIRTY, &ltd->ltd_qos.lq_flags);
 	}
 	obd->obd_osfs_age = ktime_get_seconds();
 
@@ -262,7 +261,7 @@ static int lod_qos_calc_rr(struct lod_device *lod, struct lu_tgt_descs *ltd,
 	int rc;
 	ENTRY;
 
-	if (!lqr->lqr_dirty) {
+	if (!test_bit(LQ_DIRTY, &lqr->lqr_flags)) {
 		LASSERT(lqr->lqr_pool.op_size);
 		RETURN(0);
 	}
@@ -274,7 +273,7 @@ static int lod_qos_calc_rr(struct lod_device *lod, struct lu_tgt_descs *ltd,
 	 * Check again. While we were sleeping on @lq_rw_sem something could
 	 * change.
 	 */
-	if (!lqr->lqr_dirty) {
+	if (!test_bit(LQ_DIRTY, &lqr->lqr_flags)) {
 		LASSERT(lqr->lqr_pool.op_size);
 		up_write(&ltd->ltd_qos.lq_rw_sem);
 		RETURN(0);
@@ -287,7 +286,7 @@ static int lod_qos_calc_rr(struct lod_device *lod, struct lu_tgt_descs *ltd,
 	   deleting from the pool. The lq_rw_sem insures that nobody else
 	   is reading. */
 	lqr->lqr_pool.op_count = real_count;
-	rc = tgt_pool_extend(&lqr->lqr_pool, real_count);
+	rc = lu_tgt_pool_extend(&lqr->lqr_pool, real_count);
 	if (rc) {
 		up_write(&ltd->ltd_qos.lq_rw_sem);
 		RETURN(rc);
@@ -323,7 +322,7 @@ static int lod_qos_calc_rr(struct lod_device *lod, struct lu_tgt_descs *ltd,
 		}
 	}
 
-	lqr->lqr_dirty = 0;
+	clear_bit(LQ_DIRTY, &lqr->lqr_flags);
 	up_write(&ltd->ltd_qos.lq_rw_sem);
 
 	if (placed != real_count) {
@@ -335,7 +334,7 @@ static int lod_qos_calc_rr(struct lod_device *lod, struct lu_tgt_descs *ltd,
 			LCONSOLE(D_WARNING, "rr #%d tgt idx=%d\n", i,
 				 lqr->lqr_pool.op_array[i]);
 		}
-		lqr->lqr_dirty = 1;
+		set_bit(LQ_DIRTY, &lqr->lqr_flags);
 		RETURN(-EAGAIN);
 	}
 
@@ -370,8 +369,10 @@ static int lod_qos_calc_rr(struct lod_device *lod, struct lu_tgt_descs *ltd,
 static struct dt_object *lod_qos_declare_object_on(const struct lu_env *env,
 						   struct lod_device *d,
 						   __u32 ost_idx,
+						   bool can_block,
 						   struct thandle *th)
 {
+	struct dt_allocation_hint *ah = &lod_env_info(env)->lti_ah;
 	struct lod_tgt_desc *ost;
 	struct lu_object *o, *n;
 	struct lu_device *nd;
@@ -405,7 +406,8 @@ static struct dt_object *lod_qos_declare_object_on(const struct lu_env *env,
 
 	dt = container_of(n, struct dt_object, do_lu);
 
-	rc = lod_sub_declare_create(env, dt, NULL, NULL, NULL, th);
+	ah->dah_can_block = can_block;
+	rc = lod_sub_declare_create(env, dt, NULL, ah, NULL, th);
 	if (rc < 0) {
 		CDEBUG(D_OTHER, "can't declare creation on #%u: %d\n",
 		       ost_idx, rc);
@@ -607,7 +609,7 @@ static inline bool lod_should_avoid_ost(struct lod_object *lo,
 		return false;
 
 	/* if the OSS has been used, check whether the OST has been used */
-	if (!cfs_bitmap_check(lag->lag_ost_avoid_bitmap, index))
+	if (!test_bit(index, lag->lag_ost_avoid_bitmap))
 		used = false;
 	else
 		QOS_DEBUG("OST%d: been used in conflicting mirror component\n",
@@ -683,7 +685,7 @@ static int lod_check_and_reserve_ost(const struct lu_env *env,
 			RETURN(rc);
 	}
 
-	o = lod_qos_declare_object_on(env, lod, ost_idx, th);
+	o = lod_qos_declare_object_on(env, lod, ost_idx, true, th);
 	if (IS_ERR(o)) {
 		CDEBUG(D_OTHER, "can't declare new object on #%u: %d\n",
 		       ost_idx, (int) PTR_ERR(o));
@@ -1162,7 +1164,7 @@ static int lod_alloc_ost_list(const struct lu_env *env, struct lod_object *lo,
 		if (rc < 0) /* this OSP doesn't feel well */
 			break;
 
-		o = lod_qos_declare_object_on(env, m, ost_idx, th);
+		o = lod_qos_declare_object_on(env, m, ost_idx, true, th);
 		if (IS_ERR(o)) {
 			rc = PTR_ERR(o);
 			CDEBUG(D_OTHER,
@@ -1321,7 +1323,7 @@ repeat_find:
 		if (i && !tgt->ltd_statfs.os_fprecreated && !speed)
 			continue;
 
-		o = lod_qos_declare_object_on(env, m, ost_idx, th);
+		o = lod_qos_declare_object_on(env, m, ost_idx, true, th);
 		if (IS_ERR(o)) {
 			CDEBUG(D_OTHER, "can't declare new object on #%u: %d\n",
 			       ost_idx, (int) PTR_ERR(o));
@@ -1423,6 +1425,7 @@ static int lod_ost_alloc_qos(const struct lu_env *env, struct lod_object *lo,
 	__u32 nfound, good_osts, stripe_count, stripe_count_min;
 	bool overstriped = false;
 	int stripes_per_ost = 1;
+	bool slow = false;
 	int rc = 0;
 	ENTRY;
 
@@ -1528,6 +1531,7 @@ static int lod_ost_alloc_qos(const struct lu_env *env, struct lod_object *lo,
 		 */
 		for (i = 0; i < osts->op_count; i++) {
 			__u32 idx = osts->op_array[i];
+			struct lod_tgt_desc *ost = OST_TGT(lod, idx);
 
 			if (lod_should_avoid_ost(lo, lag, idx))
 				continue;
@@ -1563,7 +1567,7 @@ static int lod_ost_alloc_qos(const struct lu_env *env, struct lod_object *lo,
 					continue;
 			}
 
-			o = lod_qos_declare_object_on(env, lod, idx, th);
+			o = lod_qos_declare_object_on(env, lod, idx, slow, th);
 			if (IS_ERR(o)) {
 				QOS_DEBUG("can't declare object on #%u: %d\n",
 					  idx, (int) PTR_ERR(o));
@@ -1578,6 +1582,13 @@ static int lod_ost_alloc_qos(const struct lu_env *env, struct lod_object *lo,
 			nfound++;
 			rc = 0;
 			break;
+		}
+
+		if (rc && !slow && nfound < stripe_count) {
+			/* couldn't allocate using precreated objects
+			 * so try to wait for new precreations */
+			slow = true;
+			rc = 0;
 		}
 
 		if (rc) {
@@ -1603,9 +1614,8 @@ static int lod_ost_alloc_qos(const struct lu_env *env, struct lod_object *lo,
 		}
 
 		/* makes sense to rebalance next time */
-		lod->lod_ost_descs.ltd_qos.lq_dirty = 1;
-		lod->lod_ost_descs.ltd_qos.lq_same_space = 0;
-
+		set_bit(LQ_DIRTY, &lod->lod_ost_descs.ltd_qos.lq_flags);
+		clear_bit(LQ_SAME_SPACE, &lod->lod_ost_descs.ltd_qos.lq_flags);
 		rc = -EAGAIN;
 	}
 
@@ -1824,8 +1834,8 @@ int lod_mdt_alloc_qos(const struct lu_env *env, struct lod_object *lo,
 		}
 
 		/* makes sense to rebalance next time */
-		ltd->ltd_qos.lq_dirty = 1;
-		ltd->ltd_qos.lq_same_space = 0;
+		set_bit(LQ_DIRTY, &ltd->ltd_qos.lq_flags);
+		clear_bit(LQ_SAME_SPACE, &ltd->ltd_qos.lq_flags);
 
 		rc = -EAGAIN;
 	} else {
@@ -2231,9 +2241,13 @@ int lod_qos_parse_config(const struct lu_env *env, struct lod_object *lo,
 		}
 
 		pool_name = NULL;
+		if (def_pool[0] != '\0')
+			pool_name = def_pool;
+
 		if (v1->lmm_magic == LOV_USER_MAGIC_V3 ||
 		    v1->lmm_magic == LOV_USER_MAGIC_SPECIFIC) {
 			v3 = (struct lov_user_md_v3 *)v1;
+
 			if (v3->lmm_pool_name[0] != '\0')
 				pool_name = v3->lmm_pool_name;
 
@@ -2241,11 +2255,10 @@ int lod_qos_parse_config(const struct lu_env *env, struct lod_object *lo,
 				rc = lod_comp_copy_ost_lists(lod_comp, v3);
 				if (rc)
 					GOTO(free_comp, rc);
+
+				pool_name = NULL;
 			}
 		}
-
-		if (pool_name == NULL && def_pool[0] != '\0')
-			pool_name = def_pool;
 
 		if (v1->lmm_pattern == 0)
 			v1->lmm_pattern = LOV_PATTERN_RAID0;
@@ -2321,7 +2334,7 @@ int lod_prepare_avoidance(const struct lu_env *env, struct lod_object *lo)
 {
 	struct lod_device *lod = lu2lod_dev(lo->ldo_obj.do_lu.lo_dev);
 	struct lod_avoid_guide *lag = &lod_env_info(env)->lti_avoid;
-	struct cfs_bitmap *bitmap = NULL;
+	unsigned long *bitmap = NULL;
 	__u32 *new_oss = NULL;
 
 	lag->lag_ost_avail = lod->lod_ost_count;
@@ -2337,16 +2350,17 @@ int lod_prepare_avoidance(const struct lu_env *env, struct lod_object *lo)
 
 	/* init OST avoid guide bitmap */
 	if (lag->lag_ost_avoid_bitmap) {
-		if (lod->lod_ost_count <= lag->lag_ost_avoid_bitmap->size) {
-			CFS_RESET_BITMAP(lag->lag_ost_avoid_bitmap);
+		if (lod->lod_ost_count <= lag->lag_ost_avoid_size) {
+			bitmap_zero(lag->lag_ost_avoid_bitmap,
+				    lag->lag_ost_avoid_size);
 		} else {
-			CFS_FREE_BITMAP(lag->lag_ost_avoid_bitmap);
+			bitmap_free(lag->lag_ost_avoid_bitmap);
 			lag->lag_ost_avoid_bitmap = NULL;
 		}
 	}
 
 	if (!lag->lag_ost_avoid_bitmap) {
-		bitmap = CFS_ALLOCATE_BITMAP(lod->lod_ost_count);
+		bitmap = bitmap_zalloc(lod->lod_ost_count, GFP_KERNEL);
 		if (!bitmap)
 			return -ENOMEM;
 	}
@@ -2360,7 +2374,7 @@ int lod_prepare_avoidance(const struct lu_env *env, struct lod_object *lo)
 		 */
 		OBD_ALLOC_PTR_ARRAY(new_oss, lod->lod_ost_count);
 		if (!new_oss) {
-			CFS_FREE_BITMAP(bitmap);
+			bitmap_free(bitmap);
 			return -ENOMEM;
 		}
 	}
@@ -2369,8 +2383,10 @@ int lod_prepare_avoidance(const struct lu_env *env, struct lod_object *lo)
 		lag->lag_oss_avoid_array = new_oss;
 		lag->lag_oaa_size = lod->lod_ost_count;
 	}
-	if (bitmap)
+	if (bitmap) {
 		lag->lag_ost_avoid_bitmap = bitmap;
+		lag->lag_ost_avoid_size = lod->lod_ost_count;
+	}
 
 	return 0;
 }
@@ -2384,7 +2400,7 @@ void lod_collect_avoidance(struct lod_object *lo, struct lod_avoid_guide *lag,
 {
 	struct lod_device *lod = lu2lod_dev(lo->ldo_obj.do_lu.lo_dev);
 	struct lod_layout_component *lod_comp = &lo->ldo_comp_entries[comp_idx];
-	struct cfs_bitmap *bitmap = lag->lag_ost_avoid_bitmap;
+	unsigned long *bitmap = lag->lag_ost_avoid_bitmap;
 	int i, j;
 
 	/* iterate mirrors */
@@ -2431,12 +2447,12 @@ void lod_collect_avoidance(struct lod_object *lo, struct lod_avoid_guide *lag,
 				ost = OST_TGT(lod, comp->llc_ost_indices[j]);
 				lsq = ost->ltd_qos.ltq_svr;
 
-				if (cfs_bitmap_check(bitmap, ost->ltd_index))
+				if (test_bit(ost->ltd_index, bitmap))
 					continue;
 
 				QOS_DEBUG("OST%d used in conflicting mirror "
 					  "component\n", ost->ltd_index);
-				cfs_bitmap_set(bitmap, ost->ltd_index);
+				set_bit(ost->ltd_index, bitmap);
 				lag->lag_ost_avail--;
 
 				for (k = 0; k < lag->lag_oaa_count; k++) {

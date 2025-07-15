@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/osd/osd_internal.h
  *
@@ -405,8 +404,12 @@ enum osd_op_type {
 struct osd_access_lock {
 	struct list_head	 tl_list;
 	struct osd_object	*tl_obj;
+	loff_t			 tl_start;
+	loff_t			 tl_end;
+	int			 tl_mode;
 	bool			 tl_shared;
 	bool			 tl_truncate;
+	bool			 tl_punch;
 };
 
 struct osd_thandle {
@@ -798,10 +801,11 @@ char *osd_lf_fid2name(const struct lu_fid *fid);
 int osd_scrub_start(const struct lu_env *env, struct osd_device *dev,
 		    __u32 flags);
 void osd_scrub_stop(struct osd_device *dev);
-int osd_scrub_setup(const struct lu_env *env, struct osd_device *dev);
+int osd_scrub_setup(const struct lu_env *env, struct osd_device *dev,
+		    bool restored);
 void osd_scrub_cleanup(const struct lu_env *env, struct osd_device *dev);
-int osd_oii_insert(struct osd_device *dev, struct osd_idmap_cache *oic,
-		   int insert);
+int osd_oii_insert(struct osd_device *dev, const struct lu_fid *fid,
+		   struct osd_inode_id *id, int insert);
 int osd_oii_lookup(struct osd_device *dev, const struct lu_fid *fid,
 		   struct osd_inode_id *id);
 void osd_scrub_dump(struct seq_file *m, struct osd_device *dev);
@@ -828,6 +832,13 @@ int osd_lookup_in_remote_parent(struct osd_thread_info *oti,
 
 int osd_ost_seq_exists(struct osd_thread_info *info, struct osd_device *osd,
 		       __u64 seq);
+int osd_scrub_refresh_mapping(struct osd_thread_info *info,
+			      struct osd_device *dev,
+			      const struct lu_fid *fid,
+			      const struct osd_inode_id *id,
+			      int ops, bool force,
+			      enum oi_check_flags flags, bool *exist);
+
 /* osd_quota_fmt.c */
 int walk_tree_dqentry(const struct lu_env *env, struct osd_object *obj,
                       int type, uint blk, int depth, uint index,
@@ -1068,7 +1079,7 @@ static inline void osd_object_put(const struct lu_env *env,
 
 static inline int osd_object_is_root(const struct osd_object *obj)
 {
-        return osd_sb(osd_obj2dev(obj))->s_root->d_inode == obj->oo_inode;
+	return obj->oo_inode && is_root_inode(obj->oo_inode);
 }
 
 static inline struct osd_object *osd_obj(const struct lu_object *o)
@@ -1532,7 +1543,7 @@ osd_index_backup(const struct lu_env *env, struct osd_device *osd, bool backup)
 int osd_trunc_lock(struct osd_object *obj, struct osd_thandle *oh,
 		   bool shared);
 void osd_trunc_unlock_all(const struct lu_env *env, struct list_head *list);
-void osd_process_truncates(struct list_head *list);
+void osd_process_truncates(const struct lu_env *env, struct list_head *list);
 void osd_execute_truncate(struct osd_object *obj);
 
 #ifdef HAVE_BIO_ENDIO_USES_ONE_ARG

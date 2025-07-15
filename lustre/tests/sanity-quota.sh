@@ -355,34 +355,48 @@ wait_grace_time() {
 	case $flavour in
 		block)
 			time=$(lfs quota -$qtype $qarg $parg $DIR|
-				   awk 'NR == 3{ print $5 }'| sed 's/s$//')
+				   awk 'NR == 3{ print $5 }')
 			;;
 		file)
 			time=$(lfs quota -$qtype $qarg $DIR|
-				   awk 'NR == 3{ print $9 }'| sed 's/s$//')
+				   awk 'NR == 3{ print $9 }')
 			;;
 		*)
 			error "Unknown quota type: $flavour"
 			;;
 	esac
 
+	local sleep_seconds=0
+	local orig_time=$time
+
+	echo "Grace time is $time"
 	# from lfs.c:__sec2str()
 	# const char spec[] = "smhdw";
 	# {1, 60, 60*60, 24*60*60, 7*24*60*60};
-	[[ $time == *m* ]] && time=${time//m/} && time=$((time*60));
-	[[ $time == *h* ]] && time=${time//h/} && time=$((time*60*60));
-	[[ $time == *d* ]] && time=${time//d/} && time=$((time*24*60*60));
-	[[ $time == *w* ]] && time=${time//w/} && time=$((time*7*24*60*60));
+	[[ $time == *w* ]] && w_time=${time%w*} &&
+		let sleep_seconds+=$((w_time*7*24*60*60));
+	time=${time#*w}
+	[[ $time == *d* ]] && d_time=${time%d*} &&
+		let sleep_seconds+=$((d_time*24*60*60));
+	time=${time#*d}
+	[[ $time == *h* ]] && h_time=${time%h*} &&
+		let sleep_seconds+=$((h_time*60*60));
+	time=${time#*h}
+	[[ $time == *m* ]] && m_time=${time%m*} &&
+		let sleep_seconds+=$((m_time*60));
+	time=${time#*m}
+	[[ $time == *s* ]] && s_time=${time%s*} &&
+		let sleep_seconds+=$s_time
 
 	echo "Sleep through grace ..."
-	[ "$time" == "-" ] &&
+	[ "$orig_time" == "-" ] &&
 	    error "Grace timeout was not set or quota not exceeded"
-	if [ "$time" == "none" ]; then
+	if [ "$orig_time" == "none" ]; then
 	    echo "...Grace timeout already expired"
 	else
-		let time+=$extrasleep
-		echo "...sleep $time seconds"
-		sleep $time
+		let sleep_seconds+=$extrasleep
+		echo "...sleep $sleep_seconds seconds"
+		sleep $sleep_seconds
 	fi
 }
 
@@ -510,7 +524,7 @@ test_quota_performance() {
 
 # test basic quota performance b=21696
 test_0() {
-	local MB=100 # 100M
+	local MB=100 # MB
 	[ "$SLOW" = "no" ] && MB=10
 
 	local free_space=$(lfs_df | grep "summary" | awk '{print $4}')
@@ -582,7 +596,7 @@ check_write_fallocate() {
 
 # test block hardlimit
 test_1a() {
-	local limit=10  # 10M
+	local limit=10 # MB
 	local testfile="$DIR/$tdir/$tfile-0"
 
 	setup_quota_test || error "setup quota failed with $?"
@@ -672,8 +686,8 @@ test_1a() {
 run_test 1a "Block hard limit (normal use and out of quota)"
 
 test_1b() {
-	local limit=10  # 10M
-	local global_limit=20  # 100M
+	local limit=10 # MB
+	local global_limit=20 # MB
 	local testfile="$DIR/$tdir/$tfile-0"
 	local qpool="qpool1"
 
@@ -781,7 +795,7 @@ test_1b() {
 run_test 1b "Quota pools: Block hard limit (normal use and out of quota)"
 
 test_1c() {
-	local global_limit=20  # 100M
+	local global_limit=20 # MB
 	local testfile="$DIR/$tdir/$tfile-0"
 	local qpool1="qpool1"
 	local qpool2="qpool2"
@@ -843,9 +857,9 @@ test_1c() {
 run_test 1c "Quota pools: check 3 pools with hardlimit only for global"
 
 test_1d() {
-	local limit1=10  # 10M
-	local limit2=12  # 12M
-	local global_limit=20  # 100M
+	local limit1=10 # MB
+	local limit2=12 # MB
+	local global_limit=20 # MB
 	local testfile="$DIR/$tdir/$tfile-0"
 	local qpool1="qpool1"
 	local qpool2="qpool2"
@@ -905,8 +919,8 @@ test_1d() {
 run_test 1d "Quota pools: check block hardlimit on different pools"
 
 test_1e() {
-	local limit1=10  # 10M
-	local global_limit=200  # 200M
+	local limit1=10 # MB
+	local global_limit=53000000 # MB
 	local testfile="$DIR/$tdir/$tfile-0"
 	local testfile2="$DIR/$tdir/$tfile-1"
 	local qpool1="qpool1"
@@ -967,8 +981,8 @@ test_1e() {
 run_test 1e "Quota pools: global pool high block limit vs quota pool with small"
 
 test_1f() {
-	local global_limit=200  # 200M
-	local limit1=10  # 10M
+	local global_limit=200 # MB
+	local limit1=10 # MB
 	local TESTDIR="$DIR/$tdir/"
 	local testfile="$TESTDIR/$tfile-0"
 	local qpool1="qpool1"
@@ -1022,8 +1036,8 @@ test_1f() {
 run_test 1f "Quota pools: correct qunit after removing/adding OST"
 
 test_1g() {
-	local limit=20  # 20M
-	local global_limit=40  # 40M
+	local limit=20 # MB
+	local global_limit=40 # MB
 	local testfile="$DIR/$tdir/$tfile-0"
 	local qpool="qpool1"
 	local mdmb_param="osc.*.max_dirty_mb"
@@ -1085,7 +1099,7 @@ test_1g() {
 run_test 1g "Quota pools: Block hard limit with wide striping"
 
 test_1h() {
-	local limit=10  # 10M
+	local limit=10 # MB
 	local testfile="$DIR/$tdir/$tfile-0"
 
 	check_set_fallocate_or_skip
@@ -1237,6 +1251,8 @@ test_block_soft() {
 	local OFFSET=0
 	local qtype=$4
 	local pool=$5
+	local soft_limit=$(do_facet $SINGLEMDS $LCTL get_param -n \
+		qmt.$FSNAME-QMT0000.dt-0x0.soft_least_qunit)
 
 	setup_quota_test
 	stack_trap cleanup_quota_test EXIT
@@ -1287,8 +1303,11 @@ test_block_soft() {
 
 	log "Write after timer goes off"
 	# maybe cache write, ignore.
-	$RUNAS dd if=/dev/zero of=$testfile bs=1K count=10 seek=$OFFSET || true
-	OFFSET=$((OFFSET + 1024))
+	# write up to soft least quint to consume all
+	# possible slave granted space.
+	$RUNAS dd if=/dev/zero of=$testfile bs=1K \
+		count=$soft_limit seek=$OFFSET || true
+	OFFSET=$((OFFSET + soft_limit))
 	cancel_lru_locks osc
 	log "Write after cancel lru locks"
 	$RUNAS dd if=/dev/zero of=$testfile bs=1K count=10 seek=$OFFSET &&
@@ -1326,7 +1345,7 @@ test_block_soft() {
 
 # block soft limit
 test_3a() {
-	local grace=20 # 20s
+	local grace=20 # seconds
 	if [ $(facet_fstype $SINGLEMDS) = "zfs" ]; then
 	    grace=60
 	fi
@@ -1393,7 +1412,7 @@ test_3a() {
 run_test 3a "Block soft limit (start timer, timer goes off, stop timer)"
 
 test_3b() {
-	local grace=20 # 20s
+	local grace=20 # seconds
 	local qpool="qpool1"
 	if [ $(facet_fstype $SINGLEMDS) = "zfs" ]; then
 		grace=60
@@ -1492,7 +1511,7 @@ test_3b() {
 run_test 3b "Quota pools: Block soft limit (start timer, expires, stop timer)"
 
 test_3c() {
-	local grace=20 # 20s
+	local grace=20 # seconds
 	local qpool="qpool1"
 	local qpool2="qpool2"
 	if [ $(facet_fstype $SINGLEMDS) = "zfs" ]; then
@@ -1726,8 +1745,8 @@ run_test 4b "Grace time strings handling"
 
 # chown & chgrp (chown & chgrp successfully even out of block/file quota)
 test_5() {
-	local BLIMIT=10 # 10M
-	local ILIMIT=10 # 10 inodes
+	local BLIMIT=10 # MB
+	local ILIMIT=10 # inodes
 
 	setup_quota_test || error "setup quota failed with $?"
 	trap cleanup_quota_test EXIT
@@ -1788,7 +1807,7 @@ run_test 5 "Chown & chgrp successfully even out of block/file quota"
 
 # test dropping acquire request on master
 test_6() {
-	local LIMIT=3 # 3M
+	local LIMIT=3 # MB
 
 	# Clear dmesg so watchdog is not triggered by previous
 	# test output
@@ -1900,7 +1919,7 @@ run_test 6 "Test dropping acquire request on master"
 # quota reintegration (global index)
 test_7a() {
 	local TESTFILE=$DIR/$tdir/$tfile
-	local LIMIT=20 # 20M
+	local LIMIT=20 # MB
 
 	[ "$SLOW" = "no" ] && LIMIT=5
 
@@ -1971,7 +1990,7 @@ run_test 7a "Quota reintegration (global index)"
 
 # quota reintegration (slave index)
 test_7b() {
-	local LIMIT="100G"
+	local limit=100000 # MB
 	local TESTFILE=$DIR/$tdir/$tfile
 
 	setup_quota_test || error "setup quota failed with $?"
@@ -2004,7 +2023,7 @@ test_7b() {
 	lustre_fail mds 0xa02
 
 	set_ost_qtype $QTYPE || error "enable ost quota failed"
-	$LFS setquota -u $TSTUSR -b 0 -B $LIMIT -i 0 -I 0 $DIR ||
+	$LFS setquota -u $TSTUSR -b 0 -B ${limit}M -i 0 -I 0 $DIR ||
 		error "set quota failed"
 
 	# ignore the write error
@@ -2031,7 +2050,7 @@ run_test 7b "Quota reintegration (slave index)"
 
 # quota reintegration (restart mds during reintegration)
 test_7c() {
-	local LIMIT=20 # 20M
+	local LIMIT=20 # MB
 	local TESTFILE=$DIR/$tdir/$tfile
 
 	[ "$SLOW" = "no" ] && LIMIT=5
@@ -2084,7 +2103,7 @@ run_test 7c "Quota reintegration (restart mds during reintegration)"
 test_7d(){
 	local TESTFILE=$DIR/$tdir/$tfile
 	local TESTFILE1="$DIR/$tdir/$tfile"-1
-	local limit=20 #20M
+	local limit=20 # MB
 
 	setup_quota_test || error "setup quota failed with $?"
 	trap cleanup_quota_test EXIT
@@ -2131,7 +2150,7 @@ test_7e() {
 			skip "requires zpool with active userobj_accounting"
 	}
 
-	local ilimit=$((1024 * 2)) # 2k inodes
+	local ilimit=$((1024 * 2)) # inodes
 	local TESTFILE=$DIR/${tdir}-1/$tfile
 
 	setup_quota_test || error "setup quota failed with $?"
@@ -2356,7 +2375,7 @@ run_test 11 "Chown/chgrp ignores quota"
 test_12a() {
 	[ "$OSTCOUNT" -lt "2" ] && skip "needs >= 2 OSTs"
 
-	local blimit=22 # 22M
+	local blimit=22 # MB
 	local blk_cnt=$((blimit - 5))
 	local TESTFILE0="$DIR/$tdir/$tfile"-0
 	local TESTFILE1="$DIR/$tdir/$tfile"-1
@@ -2367,7 +2386,7 @@ test_12a() {
 	set_ost_qtype "u" || error "enable ost quota failed"
 	quota_show_check b u $TSTUSR
 
-	$LFS setquota -u $TSTUSR -b 0 -B "$blimit"M -i 0 -I 0 $DIR ||
+	$LFS setquota -u $TSTUSR -b 0 -B ${blimit}M -i 0 -I 0 $DIR ||
 		error "set quota failed"
 
 	$LFS setstripe $TESTFILE0 -c 1 -i 0 || error "setstripe $TESTFILE0 failed"
@@ -2399,7 +2418,7 @@ run_test 12a "Block quota rebalancing"
 test_12b() {
 	[ "$MDSCOUNT" -lt "2" ] && skip "needs >= 2 MDTs"
 
-	local ilimit=$((1024 * 2)) # 2k inodes
+	local ilimit=$((1024 * 2)) # inodes
 	local TESTFILE0=$DIR/$tdir/$tfile
 	local TESTFILE1=$DIR/${tdir}-1/$tfile
 
@@ -2592,7 +2611,7 @@ run_test 17 "DQACQ return recoverable error"
 
 test_18_sub () {
 	local io_type=$1
-	local blimit="200m" # 200M
+	local blimit=200 # MB
 	local TESTFILE="$DIR/$tdir/$tfile"
 
 	setup_quota_test || error "setup quota failed with $?"
@@ -2600,7 +2619,7 @@ test_18_sub () {
 
 	set_ost_qtype "u" || error "enable ost quota failed"
 	log "User quota (limit: $blimit)"
-	$LFS setquota -u $TSTUSR -b 0 -B $blimit -i 0 -I 0 $MOUNT ||
+	$LFS setquota -u $TSTUSR -b 0 -B ${blimit}M -i 0 -I 0 $MOUNT ||
 		error "set quota failed"
 	quota_show_check b u $TSTUSR
 
@@ -2671,7 +2690,7 @@ test_18() {
 run_test 18 "MDS failover while writing, no watchdog triggered (b14840)"
 
 test_19() {
-	local blimit=5 # 5M
+	local blimit=5 # MB
 	local TESTFILE=$DIR/$tdir/$tfile
 
 	setup_quota_test || error "setup quota failed with $?"
@@ -2684,11 +2703,11 @@ test_19() {
 	chown $TSTUSR.$TSTUSR $TESTFILE || error "chown $TESTFILE failed"
 
 	echo "Set user quota (limit: ${blimit}M)"
-	$LFS setquota -u $TSTUSR -b 0 -B "$blimit"M -i 0 -I 0 $MOUNT ||
+	$LFS setquota -u $TSTUSR -b 0 -B ${blimit}M -i 0 -I 0 $MOUNT ||
 		error "set user quota failed"
 	quota_show_check b u $TSTUSR
 	echo "Update quota limits"
-	$LFS setquota -u $TSTUSR -b 0 -B "$blimit"M -i 0 -I 0 $MOUNT ||
+	$LFS setquota -u $TSTUSR -b 0 -B ${blimit}M -i 0 -I 0 $MOUNT ||
 		error "set group quota failed"
 	quota_show_check b u $TSTUSR
 
@@ -2923,7 +2942,7 @@ test_23() {
 run_test 23 "Quota should be honored with directIO (b16125)"
 
 test_24() {
-	local blimit=5 # 5M
+	local blimit=5 # MB
 	local TESTFILE="$DIR/$tdir/$tfile"
 
 	setup_quota_test || error "setup quota failed with $?"
@@ -3026,7 +3045,7 @@ test_27d() {
 run_test 27d "lfs setquota should support fraction block limit"
 
 test_30() {
-	local LIMIT=4 # 4MB
+	local LIMIT=4 # MB
 	local TESTFILE="$DIR/$tdir/$tfile"
 	local GRACE=10
 
@@ -3064,8 +3083,8 @@ run_test 30 "Hard limit updates should not reset grace times"
 
 # basic usage tracking for user & group
 test_33() {
-	local INODES=10 # 10 files
-	local BLK_CNT=2 # of 2M each
+	local INODES=10 # files
+	local BLK_CNT=2 # MB each
 	local TOTAL_BLKS=$((INODES * BLK_CNT * 1024))
 
 	setup_quota_test || error "setup quota failed with $?"
@@ -3149,7 +3168,7 @@ run_test 33 "Basic usage tracking for user & group & project"
 
 # usage transfer test for user & group & project
 test_34() {
-	local BLK_CNT=2 # 2MB
+	local BLK_CNT=2 # MB
 	local project_supported="no"
 
 	is_project_quota_supported && project_supported="yes"
@@ -3241,7 +3260,7 @@ run_test 34 "Usage transfer for user & group & project"
 
 # usage is still accessible across restart
 test_35() {
-	local BLK_CNT=2 # 2 MB
+	local BLK_CNT=2 # MB
 
 	setup_quota_test || error "setup quota failed with $?"
 	trap cleanup_quota_test EXIT
@@ -3887,7 +3906,7 @@ test_default_quota() {
 		skip "Not supported before 2.11.51."
 
 	local qtype=$1
-	local qpool=$2
+	local qres_type=$2
 	local qid=$TSTUSR
 	local qprjid=$TSTPRJID
 	local qdtype="-U"
@@ -3895,6 +3914,7 @@ test_default_quota() {
 	local qh="-B"
 	local LIMIT=20480 #20M disk space
 	local TESTFILE="$DIR/$tdir/$tfile-0"
+	local $qpool_cmd
 
 	[ $qtype == "-p" ] && ! is_project_quota_supported &&
 		echo "Project quota is not supported" && return 0
@@ -3906,14 +3926,20 @@ test_default_quota() {
 		qid=$qprjid
 	}
 
-	[ $qpool == "meta" ] && {
+	[ $qres_type == "meta" ] && {
 		LIMIT=10240 #10K inodes
 		qs="-i"
 		qh="-I"
 	}
+	[ ! -z "$3" ] && {
+		qpool_cmd="--pool $3"
+		# pool quotas don't work properly without global limit
+		$LFS setquota $qtype $qid -B1T -b1T $DIR ||
+			error "set global limit failed"
+	}
 
 	setup_quota_test || error "setup quota failed with $?"
-	trap cleanup_quota_test EXIT
+	stack_trap cleanup_quota_test EXIT
 
 	quota_init
 
@@ -3922,19 +3948,19 @@ test_default_quota() {
 	set_ost_qtype $QTYPE || error "enable ost quota failed"
 
 	log "set to use default quota"
-	$LFS setquota $qtype $qid -d $DIR ||
+	$LFS setquota $qtype $qid -d $qpool_cmd $DIR ||
 		error "set $qid to use default quota failed"
 
 	log "set default quota"
-	$LFS setquota $qdtype $qs ${LIMIT} $qh ${LIMIT} $DIR ||
+	$LFS setquota $qdtype $qpool_cmd $qs ${LIMIT} $qh ${LIMIT} $DIR ||
 		error "set $qid default quota failed"
 
 	log "get default quota"
 	$LFS quota $qdtype $DIR || error "get default quota failed"
 
-	if [ $qpool == "data" ]; then
-		local SLIMIT=$($LFS quota $qdtype $DIR | grep "$MOUNT" | \
-							awk '{print $2}')
+	if [ $qres_type == "data" ]; then
+		local SLIMIT=$($LFS quota $qpool_cmd $qdtype $DIR | \
+				grep "$MOUNT" | awk '{print $2}')
 		[ $SLIMIT -eq $LIMIT ] ||
 			error "the returned default quota is wrong"
 	else
@@ -3948,13 +3974,14 @@ test_default_quota() {
 	local USED=$(getquota $qtype $qid global curspace)
 	[ $USED -ne 0 ] && error "Used space for $qid isn't 0."
 
-	$LFS setstripe $TESTFILE -c 1 || error "setstripe $TESTFILE failed"
+	$LFS setstripe $TESTFILE -c 1 $qpool_cmd ||
+			error "setstripe $TESTFILE failed"
 	chown $TSTUSR.$TSTUSR $TESTFILE || error "chown $TESTFILE failed"
 
 	[ $qtype == "-p" ] && change_project -sp $TSTPRJID $DIR/$tdir
 
 	log "Test not out of quota"
-	if [ $qpool == "data" ]; then
+	if [ $qres_type == "data" ]; then
 		$RUNAS $DD of=$TESTFILE count=$((LIMIT/2 >> 10)) oflag=sync ||
 			quota_error $qtype $qid "write failed, expect succeed"
 	else
@@ -3969,7 +3996,7 @@ test_default_quota() {
 	cancel_lru_locks osc
 	cancel_lru_locks mdc
 	sync; sync_all_data || true
-	if [ $qpool == "data" ]; then
+	if [ $qres_type == "data" ]; then
 		$RUNAS $DD of=$TESTFILE count=$((LIMIT*2 >> 10)) oflag=sync &&
 			quota_error $qtype $qid "write succeed, expect EDQUOT"
 	else
@@ -3979,19 +4006,24 @@ test_default_quota() {
 		unlinkmany $TESTFILE $((LIMIT*2))
 	fi
 
+	rm -f $TESTFILE
+	$LFS setstripe $TESTFILE -c 1 $qpool_cmd ||
+			error "setstripe $TESTFILE failed"
+	chown $TSTUSR.$TSTUSR $TESTFILE || error "chown $TESTFILE failed"
+
 	log "Increase default quota"
 
 	# LU-4505: sleep 5 seconds to enable quota acquire
 	sleep 5
 
 	# increase default quota
-	$LFS setquota $qdtype $qs $((LIMIT*3)) $qh $((LIMIT*3)) $DIR ||
-		error "set default quota failed"
+	$LFS setquota $qdtype $qpool_cmd $qs $((LIMIT*3)) \
+		$qh $((LIMIT*3)) $DIR || error "set default quota failed"
 
 	cancel_lru_locks osc
 	cancel_lru_locks mdc
 	sync; sync_all_data || true
-	if [ $qpool == "data" ]; then
+	if [ $qres_type == "data" ]; then
 		$RUNAS $DD of=$TESTFILE count=$((LIMIT*2 >> 10)) oflag=sync ||
 			quota_error $qtype $qid "write failed, expect succeed"
 	else
@@ -4002,13 +4034,13 @@ test_default_quota() {
 	fi
 
 	log "Set quota to override default quota"
-	$LFS setquota $qtype $qid $qs ${LIMIT} $qh ${LIMIT} $DIR ||
+	$LFS setquota $qtype $qid $qpool_cmd $qs ${LIMIT} $qh ${LIMIT} $DIR ||
 		error "set $qid quota failed"
 
 	cancel_lru_locks osc
 	cancel_lru_locks mdc
 	sync; sync_all_data || true
-	if [ $qpool == "data" ]; then
+	if [ $qres_type == "data" ]; then
 		$RUNAS $DD of=$TESTFILE count=$((LIMIT*2 >> 10)) oflag=sync &&
 			quota_error $qtype $qid "write succeed, expect EQUOT"
 	else
@@ -4023,13 +4055,13 @@ test_default_quota() {
 	# LU-4505: sleep 5 seconds to enable quota acquire
 	sleep 5
 
-	$LFS setquota $qtype $qid -d $DIR ||
+	$LFS setquota $qtype $qid -d $qpool_cmd $DIR ||
 		error "set $qid to use default quota failed"
 
 	cancel_lru_locks osc
 	cancel_lru_locks mdc
 	sync; sync_all_data || true
-	if [ $qpool == "data" ]; then
+	if [ $qres_type == "data" ]; then
 		$RUNAS $DD of=$TESTFILE count=$((LIMIT*2 >> 10)) oflag=sync ||
 			quota_error $qtype $qid "write failed, expect succeed"
 	else
@@ -4043,9 +4075,10 @@ test_default_quota() {
 	rm -f $TESTFILE
 	wait_delete_completed || error "wait_delete_completed failed"
 	sync_all_data || true
-	$LFS setquota $qdtype -b 0 -B 0 -i 0 -I 0 $DIR ||
+
+	$LFS setquota $qdtype $qpool_cmd $qs 0 $qh 0 $DIR ||
 		error "reset default quota failed"
-	$LFS setquota $qtype $qid -b 0 -B 0 -i 0 -I 0 $DIR ||
+	$LFS setquota $qtype $qid $qpool_cmd $qs 0 $qh 0 $DIR ||
 		error "reset quota failed"
 
 	cleanup_quota_test
@@ -4217,7 +4250,7 @@ test_64() {
 run_test 64 "lfs project on symlink files should fail"
 
 test_65() {
-	local SIZE=10 #10M
+	local SIZE=10 # MB
 	local TESTFILE="$DIR/$tdir/$tfile-0"
 
 	setup_quota_test || error "setup quota failed with $?"
@@ -4331,7 +4364,7 @@ getgranted() {
 }
 
 test_67() {
-	local limit=20  # 20M
+	local limit=20 # MB
 	local testfile="$DIR/$tdir/$tfile-0"
 	local testfile2="$DIR/$tdir/$tfile-1"
 	local testfile3="$DIR/$tdir/$tfile-2"
@@ -4515,8 +4548,8 @@ run_test 68 "slave number in quota pool changed after each add/remove OST"
 
 test_69()
 {
-	local global_limit=200  # 200M
-	local limit=10  # 10M
+	local global_limit=200 # MB
+	local limit=10 # MB
 	local testfile="$DIR/$tdir/$tfile-0"
 	local dom0="$DIR/$tdir/dom0"
 	local qpool="qpool1"
@@ -4579,7 +4612,7 @@ run_test 69 "EDQUOT at one of pools shouldn't affect DOM"
 test_70()
 {
 	local qpool="qpool1"
-	local limit=20
+	local limit=20 # MB
 	local err=0
 	local bhard
 
@@ -4618,8 +4651,8 @@ run_test 70 "check lfs setquota/quota with a pool option"
 
 test_71a()
 {
-	local limit=10  # 10M
-	local global_limit=100  # 100M
+	local limit=10 # MB
+	local global_limit=100 # MB
 	local testfile="$DIR/$tdir/$tfile-0"
 	local qpool="qpool1"
 	local qpool2="qpool2"
@@ -4702,9 +4735,9 @@ run_test 71a "Check PFL with quota pools"
 
 test_71b()
 {
-	local global_limit=1000 # 1G
-	local limit1=160 # 160M
-	local limit2=10 # 10M
+	local global_limit=1000 # MB
+	local limit1=160 # MB
+	local limit2=10 # MB
 	local testfile="$DIR/$tdir/$tfile-0"
 	local qpool="qpool1"
 	local qpool2="qpool2"
@@ -4769,8 +4802,8 @@ run_test 71b "Check SEL with quota pools"
 
 test_72()
 {
-	local limit=10  # 10M
-	local global_limit=50  # 50M
+	local limit=10 # MB
+	local global_limit=50 # MB
 	local testfile="$DIR/$tdir/$tfile-0"
 	local qpool="qpool1"
 
@@ -4813,6 +4846,20 @@ test_72()
 	cleanup_quota_test
 }
 run_test 72 "lfs quota --pool prints only pool's OSTs"
+
+test_73()
+{
+	local qpool="qpool1"
+
+	mds_supports_qp
+
+	pool_add $qpool || error "pool_add failed"
+	pool_add_targets $qpool 0 $((OSTCOUNT - 1)) ||
+		error "pool_add_targets failed"
+
+	test_default_quota "-u" "data" "qpool1"
+}
+run_test 73 "default limits at OST Pool Quotas"
 
 quota_fini()
 {

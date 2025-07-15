@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #include <errno.h>
@@ -49,20 +48,10 @@
 #endif /* CONFIG_FS_POSIX_ACL */
 #endif /* HAVE_SERVER_SUPPORT */
 #include <linux/lustre/lustre_cfg.h>
+#include <lustre/lustreapi.h>
 
 #define LASSERT(cond) if (!(cond)) { printf("failed " #cond "\n"); ret = 1; }
 #define LASSERTF(cond, fmt, ...) if (!(cond)) { printf("failed '" #cond "'" fmt, ## __VA_ARGS__); ret = 1; }
-/*
- * BUILD_BUG_ON() is Compile-time check which verifies correctness at
- * compile-time rather than runtime. If "cond" is true, then there are two
- * identical cases ("0" and "0"), which is an error that causes the compiler to
- * complain. If "cond" is false, then there are two different cases
- * ("(non-zero)" and "0").
- *
- */
-#ifndef BUILD_BUG_ON
-#define BUILD_BUG_ON(cond) do {switch (0) {case (cond): case 1: break; } } while (0)
-#endif
 
 int ret;
 
@@ -214,7 +203,9 @@ void lustre_assert_wire_constants(void)
 		 (long long)MDS_SWAP_LAYOUTS);
 	LASSERTF(MDS_RMFID == 62, "found %lld\n",
 		 (long long)MDS_RMFID);
-	LASSERTF(MDS_LAST_OPC == 63, "found %lld\n",
+	LASSERTF(MDS_BATCH == 63, "found %lld\n",
+		 (long long)MDS_BATCH);
+	LASSERTF(MDS_LAST_OPC == 64, "found %lld\n",
 		 (long long)MDS_LAST_OPC);
 	LASSERTF(REINT_SETATTR == 1, "found %lld\n",
 		 (long long)REINT_SETATTR);
@@ -843,10 +834,10 @@ void lustre_assert_wire_constants(void)
 		 (long long)(int)offsetof(struct lustre_msg_v2, lm_flags));
 	LASSERTF((int)sizeof(((struct lustre_msg_v2 *)0)->lm_flags) == 4, "found %lld\n",
 		 (long long)(int)sizeof(((struct lustre_msg_v2 *)0)->lm_flags));
-	LASSERTF((int)offsetof(struct lustre_msg_v2, lm_padding_2) == 24, "found %lld\n",
-		 (long long)(int)offsetof(struct lustre_msg_v2, lm_padding_2));
-	LASSERTF((int)sizeof(((struct lustre_msg_v2 *)0)->lm_padding_2) == 4, "found %lld\n",
-		 (long long)(int)sizeof(((struct lustre_msg_v2 *)0)->lm_padding_2));
+	LASSERTF((int)offsetof(struct lustre_msg_v2, lm_opc) == 24, "found %lld\n",
+		 (long long)(int)offsetof(struct lustre_msg_v2, lm_opc));
+	LASSERTF((int)sizeof(((struct lustre_msg_v2 *)0)->lm_opc) == 4, "found %lld\n",
+		 (long long)(int)sizeof(((struct lustre_msg_v2 *)0)->lm_opc));
 	LASSERTF((int)offsetof(struct lustre_msg_v2, lm_padding_3) == 28, "found %lld\n",
 		 (long long)(int)offsetof(struct lustre_msg_v2, lm_padding_3));
 	LASSERTF((int)sizeof(((struct lustre_msg_v2 *)0)->lm_padding_3) == 4, "found %lld\n",
@@ -1415,6 +1406,10 @@ void lustre_assert_wire_constants(void)
 		 OBD_CONNECT2_LSEEK);
 	LASSERTF(OBD_CONNECT2_DOM_LVB == 0x80000ULL, "found 0x%.16llxULL\n",
 		 OBD_CONNECT2_DOM_LVB);
+	LASSERTF(OBD_CONNECT2_REP_MBITS == 0x100000ULL, "found 0x%.16llxULL\n",
+		 OBD_CONNECT2_REP_MBITS);
+	LASSERTF(OBD_CONNECT2_BATCH_RPC == 0x400000ULL, "found 0x%.16llxULL\n",
+		 OBD_CONNECT2_BATCH_RPC);
 	LASSERTF(OBD_CKSUM_CRC32 == 0x00000001UL, "found 0x%.8xUL\n",
 		(unsigned)OBD_CKSUM_CRC32);
 	LASSERTF(OBD_CKSUM_ADLER == 0x00000002UL, "found 0x%.8xUL\n",
@@ -4614,12 +4609,12 @@ void lustre_assert_wire_constants(void)
 		 (long long)(int)offsetof(struct mgs_config_body, mcb_units));
 	LASSERTF((int)sizeof(((struct mgs_config_body *)0)->mcb_units) == 4, "found %lld\n",
 		 (long long)(int)sizeof(((struct mgs_config_body *)0)->mcb_units));
-	BUILD_BUG_ON(CONFIG_T_CONFIG != 0);
-	BUILD_BUG_ON(CONFIG_T_SPTLRPC != 1);
-	BUILD_BUG_ON(CONFIG_T_RECOVER != 2);
-	BUILD_BUG_ON(CONFIG_T_PARAMS != 3);
-	BUILD_BUG_ON(CONFIG_T_NODEMAP != 4);
-	BUILD_BUG_ON(CONFIG_T_BARRIER != 5);
+	BUILD_BUG_ON(MGS_CFG_T_CONFIG != 0);
+	BUILD_BUG_ON(MGS_CFG_T_SPTLRPC != 1);
+	BUILD_BUG_ON(MGS_CFG_T_RECOVER != 2);
+	BUILD_BUG_ON(MGS_CFG_T_PARAMS != 3);
+	BUILD_BUG_ON(MGS_CFG_T_NODEMAP != 4);
+	BUILD_BUG_ON(MGS_CFG_T_BARRIER != 5);
 
 	/* Checks for struct mgs_config_res */
 	LASSERTF((int)sizeof(struct mgs_config_res) == 16, "found %lld\n",

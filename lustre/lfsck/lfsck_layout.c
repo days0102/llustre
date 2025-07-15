@@ -96,9 +96,9 @@ struct lfsck_layout_slave_async_args {
 	struct lfsck_layout_slave_target *llsaa_llst;
 };
 
-static inline bool lfsck_comp_extent_aligned(__u64 size)
+static inline bool lfsck_comp_extent_aligned(__u64 border, __u32 size)
 {
-	 return (size & (LOV_MIN_STRIPE_SIZE - 1)) == 0;
+	return (border & (size - 1)) == 0;
 }
 
 static inline void
@@ -329,10 +329,13 @@ out:
 
 static int lfsck_layout_verify_header_v1v3(struct dt_object *obj,
 					   struct lov_mds_md_v1 *lmm,
-					   __u64 start, __u32 comp_id)
+					   __u64 start, __u64 end,
+					   __u32 comp_id,
+					   bool ext, bool *dom)
 {
 	__u32 magic;
 	__u32 pattern;
+	__u32 size;
 
 	magic = le32_to_cpu(lmm->lmm_magic);
 	/* If magic crashed, keep it there. Sometime later, during OST-object
@@ -346,7 +349,7 @@ static int lfsck_layout_verify_header_v1v3(struct dt_object *obj,
 		else
 			rc = -EINVAL;
 
-		CDEBUG(D_LFSCK, "%s LOV EA magic %u for the file "DFID"\n",
+		CDEBUG(D_LFSCK, "%s LOV EA magic 0x%X for the file "DFID"\n",
 		       rc == -EINVAL ? "Unknown" : "Unsupported",
 		       magic, PFID(lfsck_dto2fid(obj)));
 
@@ -354,10 +357,11 @@ static int lfsck_layout_verify_header_v1v3(struct dt_object *obj,
 	}
 
 	pattern = le32_to_cpu(lmm->lmm_pattern);
+	*dom = !!(lov_pattern(pattern) == LOV_PATTERN_MDT);
 
-#if 0
 	/* XXX: DoM file verification will be supportted via LU-11081. */
 	if (lov_pattern(pattern) == LOV_PATTERN_MDT) {
+#if 0
 		if (start != 0) {
 			CDEBUG(D_LFSCK, "The DoM entry for "DFID" is not "
 			       "the first component in the mirror %x/%llu\n",
@@ -365,15 +369,24 @@ static int lfsck_layout_verify_header_v1v3(struct dt_object *obj,
 
 			return -EINVAL;
 		}
-	}
 #endif
-
-	if (!lov_pattern_supported_normal_comp(lov_pattern(pattern))) {
+	} else if (!lov_pattern_supported_normal_comp(lov_pattern(pattern))) {
 		CDEBUG(D_LFSCK, "Unsupported LOV EA pattern %u for the file "
 		       DFID" in the component %x\n",
 		       pattern, PFID(lfsck_dto2fid(obj)), comp_id);
 
 		return -EOPNOTSUPP;
+	}
+
+	size = le32_to_cpu(lmm->lmm_stripe_size);
+	if (!ext && end != LUSTRE_EOF && start != end &&
+	    !lfsck_comp_extent_aligned(end, size)){
+		CDEBUG(D_LFSCK, "not aligned border in PFL extent range "
+		       "[%llu - %llu) stripesize %u for the file "DFID
+		       " at idx %d\n", start, end, size,
+		       PFID(lfsck_dto2fid(obj)), comp_id);
+
+		return -EINVAL;
 	}
 
 	return 0;
@@ -403,10 +416,13 @@ static int lfsck_layout_verify_header_foreign(struct dt_object *obj,
 static int lfsck_layout_verify_header(struct dt_object *obj,
 				      struct lov_mds_md_v1 *lmm, size_t len)
 {
+	bool p_dom = false;
 	int rc = 0;
 
-	if (le32_to_cpu(lmm->lmm_magic) == LOV_MAGIC_COMP_V1) {
+	if (le32_to_cpu(lmm->lmm_magic) == LOV_MAGIC_COMP_V1 ||
+	    le32_to_cpu(lmm->lmm_magic) == LOV_MAGIC_SEL) {
 		struct lov_comp_md_v1 *lcm = (struct lov_comp_md_v1 *)lmm;
+		bool p_zero = false;
 		int i;
 		__u16 count = le16_to_cpu(lcm->lcm_entry_count);
 
@@ -424,39 +440,72 @@ static int lfsck_layout_verify_header(struct dt_object *obj,
 			__u64 start = le64_to_cpu(lcme->lcme_extent.e_start);
 			__u64 end = le64_to_cpu(lcme->lcme_extent.e_end);
 			__u32 comp_id = le32_to_cpu(lcme->lcme_id);
+			bool ext, inited, zero;
+			__u32 flags;
 
 			if (unlikely(comp_id == LCME_ID_INVAL ||
 				     comp_id > LCME_ID_MAX)) {
-				CDEBUG(D_LFSCK, "found invalid FPL ID %u "
+				CDEBUG(D_LFSCK, "found invalid PFL ID %u "
 				       "for the file "DFID" at idx %d\n",
 				       comp_id, PFID(lfsck_dto2fid(obj)), i);
 
 				return -EINVAL;
 			}
 
-			if (unlikely(start >= end ||
-				     !lfsck_comp_extent_aligned(start) ||
-				     (!lfsck_comp_extent_aligned(end) &&
-				      end != LUSTRE_EOF))) {
-				CDEBUG(D_LFSCK, "found invalid FPL extent "
-				       "range [%llu - %llu) for the file "
-				       DFID" at idx %d\n",
-				       start, end, PFID(lfsck_dto2fid(obj)), i);
+			flags = le32_to_cpu(lcme->lcme_flags);
+			ext = flags & LCME_FL_EXTENSION;
+			inited = flags & LCME_FL_INIT;
+			zero = !!(start == end);
 
+			if ((i == 0) && zero) {
+				CDEBUG(D_LFSCK, "invalid PFL comp %d: [%llu "
+				       "- %llu) for "DFID"\n", i, start, end,
+				       PFID(lfsck_dto2fid(obj)));
+				return -EINVAL;
+			}
+
+			if ((zero && (inited || (i + 1 == count))) ||
+			    (start > end)) {
+				CDEBUG(D_LFSCK, "invalid PFL comp %d/%d: "
+				       "[%llu, %llu) for "DFID", %sinited\n",
+				       i, count, start, end,
+				       PFID(lfsck_dto2fid(obj)),
+				       inited ? "" : "NOT ");
+				return -EINVAL;
+			}
+
+			if (!ext && p_zero) {
+				CDEBUG(D_LFSCK, "invalid PFL comp %d: [%llu, "
+				       "%llu) for "DFID": NOT extension "
+				       "after 0-length component\n", i,
+				       start, end, PFID(lfsck_dto2fid(obj)));
+				return -EINVAL;
+			}
+
+			if (ext && (inited || p_dom || zero)) {
+				CDEBUG(D_LFSCK, "invalid PFL comp %d: [%llu, "
+				       "%llu) for "DFID": %s\n", i,
+				       start, end, PFID(lfsck_dto2fid(obj)),
+				       inited ? "inited extension" :
+				       p_dom ? "extension follows DOM" :
+				       zero ? "zero length extension" : "");
 				return -EINVAL;
 			}
 
 			rc = lfsck_layout_verify_header_v1v3(obj,
 					(struct lov_mds_md_v1 *)((char *)lmm +
 					le32_to_cpu(lcme->lcme_offset)), start,
-					comp_id);
+					end, comp_id, ext, &p_dom);
+
+			p_zero = zero;
 		}
 	} else if (le32_to_cpu(lmm->lmm_magic) == LOV_MAGIC_FOREIGN) {
 		rc = lfsck_layout_verify_header_foreign(obj,
 						(struct lov_foreign_md *)lmm,
 						len);
 	} else {
-		rc = lfsck_layout_verify_header_v1v3(obj, lmm, 1, 0);
+		rc = lfsck_layout_verify_header_v1v3(obj, lmm, 0, LUSTRE_EOF,
+						     0, false, &p_dom);
 	}
 
 	return rc;
@@ -2386,8 +2435,7 @@ again:
 	do {
 		snprintf(name, NAME_MAX, DFID"%s-%s-%d", PFID(pfid), infix,
 			 type, idx++);
-		rc = dt_lookup(env, lfsck->li_lpf_obj, (struct dt_rec *)tfid,
-			       (const struct dt_key *)name);
+		rc = dt_lookup_dir(env, lfsck->li_lpf_obj, name, tfid);
 		if (rc != 0 && rc != -ENOENT)
 			GOTO(log, rc);
 	} while (rc == 0);
@@ -2399,8 +2447,7 @@ again:
 
 	/* Re-check whether the name conflict with othrs after taken
 	 * the ldlm lock. */
-	rc = dt_lookup(env, lfsck->li_lpf_obj, (struct dt_rec *)tfid,
-		       (const struct dt_key *)name);
+	rc = dt_lookup_dir(env, lfsck->li_lpf_obj, name, tfid);
 	if (unlikely(rc == 0)) {
 		lfsck_unlock(llh);
 		goto again;
@@ -2930,7 +2977,7 @@ again:
 		GOTO(unlock_parent, rc = rc1);
 
 	magic = le32_to_cpu(lmm->lmm_magic);
-	if (magic == LOV_MAGIC_COMP_V1) {
+	if (magic == LOV_MAGIC_COMP_V1 || magic == LOV_MAGIC_SEL) {
 		__u64 start;
 		__u64 end;
 		__u16 mirror_id0 = mirror_id_of(ol->ol_comp_id);
@@ -3359,7 +3406,7 @@ static int lfsck_lov2layout(struct lov_mds_md_v1 *lmm, struct filter_fid *ff,
 		ol->ol_comp_id = 0;
 		ff->ff_layout_version = 0;
 		ff->ff_range = 0;
-	} else if (magic == LOV_MAGIC_COMP_V1) {
+	} else if (magic == LOV_MAGIC_COMP_V1 || magic == LOV_MAGIC_SEL) {
 		struct lov_comp_md_v1 *lcm = (struct lov_comp_md_v1 *)lmm;
 		struct lov_comp_md_entry_v1 *lcme = NULL;
 		__u16 count = le16_to_cpu(lcm->lcm_entry_count);
@@ -3518,7 +3565,7 @@ static int __lfsck_layout_repair_dangling(const struct lu_env *env,
 
 		lmm = lovea->lb_buf;
 		magic = le32_to_cpu(lmm->lmm_magic);
-		if (magic == LOV_MAGIC_COMP_V1) {
+		if (magic == LOV_MAGIC_COMP_V1 || magic == LOV_MAGIC_SEL) {
 			struct lov_comp_md_v1 *lcm = buf->lb_buf;
 			struct lov_comp_md_entry_v1 *lcme;
 			__u16 count = le16_to_cpu(lcm->lcm_entry_count);
@@ -3914,7 +3961,7 @@ static int lfsck_layout_repair_multiple_references(const struct lu_env *env,
 
 	lmm = buf->lb_buf;
 	magic = le32_to_cpu(lmm->lmm_magic);
-	if (magic == LOV_MAGIC_COMP_V1) {
+	if (magic == LOV_MAGIC_COMP_V1 || magic == LOV_MAGIC_SEL) {
 		struct lov_comp_md_v1 *lcm = buf->lb_buf;
 		struct lov_comp_md_entry_v1 *lcme;
 		__u16 count = le16_to_cpu(lcm->lcm_entry_count);
@@ -4162,7 +4209,7 @@ static int lfsck_layout_check_parent(const struct lu_env *env,
 
 	lmm = buf->lb_buf;
 	magic = le32_to_cpu(lmm->lmm_magic);
-	if (magic == LOV_MAGIC_COMP_V1) {
+	if (magic == LOV_MAGIC_COMP_V1 || magic == LOV_MAGIC_SEL) {
 		struct lov_comp_md_v1 *lcm = buf->lb_buf;
 		struct lov_comp_md_entry_v1 *lcme;
 
@@ -4976,7 +5023,7 @@ static int lfsck_layout_master_check_pairs(const struct lu_env *env,
 
 	lmm = buf->lb_buf;
 	magic = le32_to_cpu(lmm->lmm_magic);
-	if (magic == LOV_MAGIC_COMP_V1) {
+	if (magic == LOV_MAGIC_COMP_V1 || magic == LOV_MAGIC_SEL) {
 		struct lov_comp_md_v1 *lcm = buf->lb_buf;
 		struct lov_comp_md_entry_v1 *lcme;
 
@@ -5579,7 +5626,7 @@ static int lfsck_layout_scan_stripes(const struct lu_env *env,
 		lad->lad_prefetched++;
 		spin_unlock(&lad->lad_lock);
 		if (wakeup)
-			wake_up_all(&athread->t_ctl_waitq);
+			wake_up(&athread->t_ctl_waitq);
 
 next:
 		down_write(&com->lc_sem);
@@ -5670,7 +5717,7 @@ again:
 	size = rc;
 	lmm = buf->lb_buf;
 	magic = le32_to_cpu(lmm->lmm_magic);
-	if (magic == LOV_MAGIC_COMP_V1) {
+	if (magic == LOV_MAGIC_COMP_V1 || magic == LOV_MAGIC_SEL) {
 		struct lov_mds_md_v1 *v1;
 		int i;
 
@@ -5727,7 +5774,7 @@ fix:
 		goto again;
 	}
 
-	if (magic == LOV_MAGIC_COMP_V1) {
+	if (magic == LOV_MAGIC_COMP_V1 || magic == LOV_MAGIC_SEL) {
 		struct lov_mds_md_v1 *v1;
 		int i;
 
@@ -5769,7 +5816,7 @@ out:
 		       PFID(lfsck_dto2fid(obj)), rc);
 
 	if (stripe) {
-		if (magic == LOV_MAGIC_COMP_V1) {
+		if (magic == LOV_MAGIC_COMP_V1 || magic == LOV_MAGIC_SEL) {
 			int i;
 
 			for (i = 0; i < count; i++) {
@@ -6307,7 +6354,7 @@ done:
 			(rc > 0 && lo->ll_flags & LF_INCOMPLETE) ? 0 : rc);
 	lfsck_layout_slave_quit(env, com);
 	if (atomic_dec_and_test(&lfsck->li_double_scan_count))
-		wake_up_all(&lfsck->li_thread.t_ctl_waitq);
+		wake_up(&lfsck->li_thread.t_ctl_waitq);
 
 	CDEBUG(D_LFSCK, "%s: layout LFSCK slave phase2 scan finished, "
 	       "status %d: rc = %d\n",
@@ -6563,7 +6610,7 @@ static int lfsck_layout_master_in_notify(const struct lu_env *env,
 		stop->ls_flags = lr->lr_param & ~LPF_BROADCAST;
 		lfsck_stop(env, lfsck->li_bottom, stop);
 	} else if (lfsck_phase2_next_ready(lad)) {
-		wake_up_all(&lad->lad_thread.t_ctl_waitq);
+		wake_up(&lad->lad_thread.t_ctl_waitq);
 	}
 
 	RETURN(0);
@@ -6647,7 +6694,7 @@ static int lfsck_layout_slave_in_notify(const struct lu_env *env,
 							      true);
 			if (llst != NULL) {
 				lfsck_layout_llst_put(llst);
-				wake_up_all(&lfsck->li_thread.t_ctl_waitq);
+				wake_up(&lfsck->li_thread.t_ctl_waitq);
 			}
 		}
 
@@ -6669,7 +6716,7 @@ static int lfsck_layout_slave_in_notify(const struct lu_env *env,
 
 	lfsck_layout_llst_put(llst);
 	if (list_empty(&llsd->llsd_master_list))
-		wake_up_all(&lfsck->li_thread.t_ctl_waitq);
+		wake_up(&lfsck->li_thread.t_ctl_waitq);
 
 	if (lr->lr_event == LE_PEER_EXIT &&
 	    (lfsck->li_bookmark_ram.lb_param & LPF_FAILOUT ||
@@ -6808,7 +6855,7 @@ static int lfsck_layout_slave_join(const struct lu_env *env,
 	RETURN(rc);
 }
 
-static struct lfsck_operations lfsck_layout_master_ops = {
+static const struct lfsck_operations lfsck_layout_master_ops = {
 	.lfsck_reset		= lfsck_layout_reset,
 	.lfsck_fail		= lfsck_layout_fail,
 	.lfsck_checkpoint	= lfsck_layout_master_checkpoint,
@@ -6824,7 +6871,7 @@ static struct lfsck_operations lfsck_layout_master_ops = {
 	.lfsck_query		= lfsck_layout_query,
 };
 
-static struct lfsck_operations lfsck_layout_slave_ops = {
+static const struct lfsck_operations lfsck_layout_slave_ops = {
 	.lfsck_reset		= lfsck_layout_reset,
 	.lfsck_fail		= lfsck_layout_fail,
 	.lfsck_checkpoint	= lfsck_layout_slave_checkpoint,
@@ -6862,7 +6909,7 @@ static void lfsck_layout_assistant_fill_pos(const struct lu_env *env,
 	pos->lp_oit_cookie = llr->llr_lar.lar_parent->lso_oit_cookie - 1;
 }
 
-struct lfsck_assistant_operations lfsck_layout_assistant_ops = {
+const struct lfsck_assistant_operations lfsck_layout_assistant_ops = {
 	.la_handler_p1		= lfsck_layout_assistant_handler_p1,
 	.la_handler_p2		= lfsck_layout_assistant_handler_p2,
 	.la_fill_pos		= lfsck_layout_assistant_fill_pos,

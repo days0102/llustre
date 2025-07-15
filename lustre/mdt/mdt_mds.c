@@ -638,7 +638,7 @@ static struct lu_device *mds_device_alloc(const struct lu_env *env,
 /* type constructor/destructor: mdt_type_init, mdt_type_fini */
 LU_TYPE_INIT_FINI(mds, &mdt_thread_key);
 
-static struct lu_device_type_operations mds_device_type_ops = {
+static const struct lu_device_type_operations mds_device_type_ops = {
 	.ldto_init = mds_type_init,
 	.ldto_fini = mds_type_fini,
 
@@ -684,7 +684,7 @@ static const struct obd_ops mds_obd_device_ops = {
 
 int mds_mod_init(void)
 {
-	return class_register_type(&mds_obd_device_ops, NULL, false, NULL,
+	return class_register_type(&mds_obd_device_ops, NULL, false,
 				   LUSTRE_MDS_NAME, &mds_device_type);
 }
 

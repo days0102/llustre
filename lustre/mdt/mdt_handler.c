@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/mdt/mdt_handler.c
  *
@@ -276,6 +275,7 @@ static int mdt_lookup_fileset(struct mdt_thread_info *info, const char *fileset,
 {
 	struct mdt_device *mdt = info->mti_mdt;
 	struct lu_name *lname = &info->mti_name;
+	const char *start = fileset;
 	char *filename = info->mti_filename;
 	struct mdt_object *parent;
 	u32 mode;
@@ -290,8 +290,8 @@ static int mdt_lookup_fileset(struct mdt_thread_info *info, const char *fileset,
 	 */
 	*fid = mdt->mdt_md_root_fid;
 
-	while (rc == 0 && fileset != NULL && *fileset != '\0') {
-		const char *s1 = fileset;
+	while (rc == 0 && start != NULL && *start != '\0') {
+		const char *s1 = start;
 		const char *s2;
 
 		while (*++s1 == '/')
@@ -303,7 +303,7 @@ static int mdt_lookup_fileset(struct mdt_thread_info *info, const char *fileset,
 		if (s2 == s1)
 			break;
 
-		fileset = s2;
+		start = s2;
 
 		lname->ln_namelen = s2 - s1;
 		if (lname->ln_namelen > NAME_MAX) {
@@ -339,9 +339,21 @@ static int mdt_lookup_fileset(struct mdt_thread_info *info, const char *fileset,
 			rc = PTR_ERR(parent);
 		else {
 			mode = lu_object_attr(&parent->mot_obj);
-			mdt_object_put(info->mti_env, parent);
-			if (!S_ISDIR(mode))
+			if (!S_ISDIR(mode)) {
 				rc = -ENOTDIR;
+			} else if (mdt_is_remote_object(info, parent, parent)) {
+				if (!mdt->mdt_enable_remote_subdir_mount) {
+					rc = -EREMOTE;
+					LCONSOLE_WARN("%s: subdir mount '%s' refused because 'enable_remote_subdir_mount=0': rc = %d\n",
+						      mdt_obd_name(mdt),
+						      fileset, rc);
+				} else {
+					LCONSOLE_INFO("%s: subdir mount '%s' is remote and may be slow\n",
+						      mdt_obd_name(mdt),
+						      fileset);
+				}
+			}
+			mdt_object_put(info->mti_env, parent);
 		}
 	}
 
@@ -423,6 +435,7 @@ static int mdt_statfs(struct tgt_session_info *tsi)
 	struct mdt_body *reqbody = NULL;
 	struct mdt_statfs_cache *msf;
 	ktime_t kstart = ktime_get();
+	int current_blockbits;
 	int rc;
 
 	ENTRY;
@@ -479,6 +492,15 @@ static int mdt_statfs(struct tgt_session_info *tsi)
 			spin_unlock(&mdt->mdt_lock);
 	}
 
+	/* tgd_blockbit is recordsize bits set during mkfs.
+	 * This once set does not change. However, 'zfs set'
+	 * can be used to change the MDT blocksize. Instead
+	 * of using cached value of 'tgd_blockbit' always
+	 * calculate the blocksize bits which may have
+	 * changed.
+	 */
+	current_blockbits = fls64(osfs->os_bsize) - 1;
+
 	/* at least try to account for cached pages.  its still racy and
 	 * might be under-reporting if clients haven't announced their
 	 * caches with brw recently */
@@ -486,12 +508,12 @@ static int mdt_statfs(struct tgt_session_info *tsi)
 	       " pending %llu free %llu avail %llu\n",
 	       tgd->tgd_tot_dirty, tgd->tgd_tot_granted,
 	       tgd->tgd_tot_pending,
-	       osfs->os_bfree << tgd->tgd_blockbits,
-	       osfs->os_bavail << tgd->tgd_blockbits);
+	       osfs->os_bfree << current_blockbits,
+	       osfs->os_bavail << current_blockbits);
 
 	osfs->os_bavail -= min_t(u64, osfs->os_bavail,
 				 ((tgd->tgd_tot_dirty + tgd->tgd_tot_pending +
-				   osfs->os_bsize - 1) >> tgd->tgd_blockbits));
+				   osfs->os_bsize - 1) >> current_blockbits));
 
 	tgt_grant_sanity_check(mdt->mdt_lu_dev.ld_obd, __func__);
 	CDEBUG(D_CACHE, "%llu blocks: %llu free, %llu avail; "
@@ -500,15 +522,15 @@ static int mdt_statfs(struct tgt_session_info *tsi)
 	       osfs->os_files, osfs->os_ffree, osfs->os_state);
 
 	if (!exp_grant_param_supp(tsi->tsi_exp) &&
-	    tgd->tgd_blockbits > COMPAT_BSIZE_SHIFT) {
+	    current_blockbits > COMPAT_BSIZE_SHIFT) {
 		/* clients which don't support OBD_CONNECT_GRANT_PARAM
 		 * should not see a block size > page size, otherwise
 		 * cl_lost_grant goes mad. Therefore, we emulate a 4KB (=2^12)
 		 * block size which is the biggest block size known to work
 		 * with all client's page size. */
-		osfs->os_blocks <<= tgd->tgd_blockbits - COMPAT_BSIZE_SHIFT;
-		osfs->os_bfree  <<= tgd->tgd_blockbits - COMPAT_BSIZE_SHIFT;
-		osfs->os_bavail <<= tgd->tgd_blockbits - COMPAT_BSIZE_SHIFT;
+		osfs->os_blocks <<= current_blockbits - COMPAT_BSIZE_SHIFT;
+		osfs->os_bfree  <<= current_blockbits - COMPAT_BSIZE_SHIFT;
+		osfs->os_bavail <<= current_blockbits - COMPAT_BSIZE_SHIFT;
 		osfs->os_bsize = 1 << COMPAT_BSIZE_SHIFT;
 	}
 	if (rc == 0)
@@ -645,6 +667,7 @@ int mdt_pack_acl2body(struct mdt_thread_info *info, struct mdt_body *repbody,
 	if (buf->lb_len == 0)
 		RETURN(0);
 
+	LASSERT(!info->mti_big_acl_used);
 again:
 	rc = mo_xattr_get(env, next, buf, XATTR_NAME_ACL_ACCESS);
 	if (rc < 0) {
@@ -654,10 +677,9 @@ again:
 			rc = 0;
 		} else if (rc == -EOPNOTSUPP) {
 			rc = 0;
-		} else {
-			if (rc == -ERANGE &&
-			    exp_connect_large_acl(info->mti_exp) &&
-			    buf->lb_buf != info->mti_big_acl) {
+		} else if (rc == -ERANGE) {
+			if (exp_connect_large_acl(info->mti_exp) &&
+			    !info->mti_big_acl_used) {
 				if (info->mti_big_acl == NULL) {
 					info->mti_big_aclsize =
 							min_t(unsigned int,
@@ -683,47 +705,19 @@ again:
 
 				buf->lb_buf = info->mti_big_acl;
 				buf->lb_len = info->mti_big_aclsize;
-
+				info->mti_big_acl_used = 1;
 				goto again;
 			}
-
+			/* FS has ACL bigger that our limits */
+			CDEBUG(D_INODE, "%s: "DFID" ACL can't fit into %d\n",
+			       mdt_obd_name(mdt), PFID(mdt_object_fid(o)),
+			       info->mti_big_aclsize);
+			rc = -E2BIG;
+		} else {
 			CERROR("%s: unable to read "DFID" ACL: rc = %d\n",
 			       mdt_obd_name(mdt), PFID(mdt_object_fid(o)), rc);
 		}
 	} else {
-		int client;
-		int server;
-		int acl_buflen;
-		int lmm_buflen = 0;
-		int lmmsize = 0;
-
-		acl_buflen = req_capsule_get_size(pill, &RMF_ACL, RCL_SERVER);
-		if (acl_buflen >= rc)
-			goto map;
-
-		/* If LOV/LMA EA is small, we can reuse part of their buffer */
-		client = ptlrpc_req_get_repsize(pill->rc_req);
-		server = lustre_packed_msg_size(pill->rc_req->rq_repmsg);
-		if (req_capsule_has_field(pill, &RMF_MDT_MD, RCL_SERVER)) {
-			lmm_buflen = req_capsule_get_size(pill, &RMF_MDT_MD,
-							  RCL_SERVER);
-			lmmsize = repbody->mbo_eadatasize;
-		}
-
-		if (client < server - acl_buflen - lmm_buflen + rc + lmmsize) {
-			CDEBUG(D_INODE, "%s: client prepared buffer size %d "
-			       "is not big enough with the ACL size %d (%d)\n",
-			       mdt_obd_name(mdt), client, rc,
-			       server - acl_buflen - lmm_buflen + rc + lmmsize);
-			repbody->mbo_aclsize = 0;
-			repbody->mbo_valid &= ~OBD_MD_FLACL;
-			RETURN(-ERANGE);
-		}
-
-map:
-		if (buf->lb_buf == info->mti_big_acl)
-			info->mti_big_acl_used = 1;
-
 		rc = nodemap_map_acl(nodemap, buf->lb_buf,
 				     rc, NODEMAP_FS_TO_CLIENT);
 		/* if all ACLs mapped out, rc is still >= 0 */
@@ -1403,10 +1397,10 @@ static int mdt_getattr_internal(struct mdt_thread_info *info,
 
 	rc = mdt_attr_get_complex(info, o, ma);
 	if (unlikely(rc)) {
-		CDEBUG(rc == -ENOENT ? D_OTHER : D_ERROR,
-		       "%s: getattr error for "DFID": rc = %d\n",
-		       mdt_obd_name(info->mti_mdt),
-		       PFID(mdt_object_fid(o)), rc);
+		CDEBUG_LIMIT(rc == -ENOENT ? D_OTHER : D_ERROR,
+			     "%s: getattr error for "DFID": rc = %d\n",
+			     mdt_obd_name(info->mti_mdt),
+			     PFID(mdt_object_fid(o)), rc);
 		RETURN(rc);
 	}
 
@@ -1884,7 +1878,7 @@ static int mdt_getattr_name_lock(struct mdt_thread_info *info,
 		rc = mdt_check_resent_lock(info, child, lhc);
 		if (rc < 0) {
 			RETURN(rc);
-		} else if (rc > 0) {
+		} else if (rc > 0 && !info->mti_parent_locked) {
 			mdt_lock_handle_init(lhc);
 			mdt_lock_reg_init(lhc, LCK_PR);
 
@@ -1905,7 +1899,7 @@ static int mdt_getattr_name_lock(struct mdt_thread_info *info,
 		}
 
 		/* Finally, we can get attr for child. */
-		if (!mdt_object_exists(child)) {
+		if (!mdt_object_exists(child) && !info->mti_parent_locked) {
 			LU_OBJECT_DEBUG(D_INFO, info->mti_env,
 					&child->mot_obj,
 					"remote object doesn't exist.");
@@ -1915,7 +1909,8 @@ static int mdt_getattr_name_lock(struct mdt_thread_info *info,
 
 		rc = mdt_getattr_internal(info, child, 0);
 		if (unlikely(rc != 0)) {
-			mdt_object_unlock(info, child, lhc, 1);
+			if (!info->mti_parent_locked)
+				mdt_object_unlock(info, child, lhc, 1);
 			RETURN(rc);
 		}
 
@@ -2007,7 +2002,8 @@ static int mdt_getattr_name_lock(struct mdt_thread_info *info,
 		}
 
 		/* step 1: lock parent only if parent is a directory */
-		if (S_ISDIR(lu_object_attr(&parent->mot_obj))) {
+		if (!info->mti_parent_locked &&
+		    S_ISDIR(lu_object_attr(&parent->mot_obj))) {
 			lhp = &info->mti_lh[MDT_LH_PARENT];
 			mdt_lock_pdo_init(lhp, LCK_PR, lname);
 			rc = mdt_object_lock(info, parent, lhp,
@@ -2066,12 +2062,17 @@ static int mdt_getattr_name_lock(struct mdt_thread_info *info,
 			 * return not only a LOOKUP lock, but also an UPDATE
 			 * lock and this might save us RPC on later STAT. For
 			 * directories, it also let negative dentry cache start
-			 * working for this dir. */
-			if (ma->ma_valid & MA_INODE &&
+			 * working for this dir.
+			 * In the face of EX locks on the child, make this
+			 * a trylock to avoid preemptive cache flushes unless
+			 * absolutely necessary.
+			 */
+			if (!info->mti_parent_locked &&
+			    ma->ma_valid & MA_INODE &&
 			    ma->ma_attr.la_valid & LA_CTIME &&
 			    info->mti_mdt->mdt_namespace->ns_ctime_age_limit +
 			    ma->ma_attr.la_ctime < ktime_get_real_seconds())
-				child_bits |= MDS_INODELOCK_UPDATE;
+				try_bits |= MDS_INODELOCK_UPDATE;
 		}
 
 		/* layout lock must be granted in a best-effort way
@@ -2089,20 +2090,33 @@ static int mdt_getattr_name_lock(struct mdt_thread_info *info,
 				try_bits |= MDS_INODELOCK_DOM;
 		}
 
-		if (try_bits != 0) {
-			/* try layout lock, it may fail to be granted due to
-			 * contention at LOOKUP or UPDATE */
-			rc = mdt_object_lock_try(info, child, lhc, &child_bits,
-						 try_bits, false);
-			if (child_bits & MDS_INODELOCK_LAYOUT)
+		if (info->mti_parent_locked) {
+			if (try_bits & MDS_INODELOCK_LAYOUT)
 				ma_need |= MA_LOV;
 		} else {
-			/* Do not enqueue the UPDATE lock from MDT(cross-MDT),
-			 * client will enqueue the lock to the remote MDT */
-			if (mdt_object_remote(child))
-				child_bits &= ~MDS_INODELOCK_UPDATE;
-			rc = mdt_object_lock(info, child, lhc, child_bits);
+			if (try_bits != 0) {
+				/*
+				 * try layout lock, it may fail to be granted
+				 * due to contention at LOOKUP or UPDATE
+				 */
+				rc = mdt_object_lock_try(info, child, lhc,
+							 &child_bits, try_bits,
+							 false);
+				if (child_bits & MDS_INODELOCK_LAYOUT)
+					ma_need |= MA_LOV;
+			} else {
+				/*
+				 * Do not enqueue the UPDATE lock from
+				 * MDT(cross-MDT), client will enqueue the lock
+				 * to the remote MDT.
+				 */
+				if (mdt_object_remote(child))
+					child_bits &= ~MDS_INODELOCK_UPDATE;
+				rc = mdt_object_lock(info, child, lhc,
+						     child_bits);
+			}
 		}
+
 		if (unlikely(rc != 0))
 			GOTO(out_child, rc);
 	}
@@ -2135,6 +2149,16 @@ static int mdt_getattr_name_lock(struct mdt_thread_info *info,
 			 "Lock res_id: "DLDLMRES", fid: "DFID"\n",
 			 PLDLMRES(lock->l_resource),
 			 PFID(mdt_object_fid(child)));
+
+		if (unlikely(OBD_FAIL_PRECHECK(OBD_FAIL_PTLRPC_ENQ_RESEND))) {
+			if (!(lustre_msg_get_flags(req->rq_reqmsg) & MSG_RESENT))
+				OBD_FAIL_TIMEOUT(OBD_FAIL_PTLRPC_ENQ_RESEND,
+						 req->rq_deadline -
+						 req->rq_arrival_time.tv_sec +
+						 cfs_fail_val ?: 3);
+			/* Put the lock to the waiting list and force the cancel */
+			ldlm_set_ast_sent(lock);
+		}
 
 		if (S_ISREG(lu_object_attr(&child->mot_obj)) &&
 		    !mdt_object_remote(child) && child != parent) {
@@ -2214,8 +2238,8 @@ static int mdt_rmfid_unlink(struct mdt_thread_info *info,
 	struct ldlm_enqueue_info *einfo = &info->mti_einfo[0];
 	struct mdt_device *mdt = info->mti_mdt;
 	struct md_attr *ma = &info->mti_attr;
-	struct mdt_lock_handle *parent_lh;
-	struct mdt_lock_handle *child_lh;
+	struct mdt_lock_handle *parent_lh = NULL;
+	struct mdt_lock_handle *child_lh = NULL;
 	struct mdt_object *pobj;
 	bool cos_incompat = false;
 	int rc;
@@ -2225,11 +2249,14 @@ static int mdt_rmfid_unlink(struct mdt_thread_info *info,
 	if (IS_ERR(pobj))
 		GOTO(out, rc = PTR_ERR(pobj));
 
-	parent_lh = &info->mti_lh[MDT_LH_PARENT];
-	mdt_lock_pdo_init(parent_lh, LCK_PW, name);
-	rc = mdt_object_lock(info, pobj, parent_lh, MDS_INODELOCK_UPDATE);
-	if (rc != 0)
-		GOTO(put_parent, rc);
+	if (!info->mti_parent_locked) {
+		parent_lh = &info->mti_lh[MDT_LH_PARENT];
+		mdt_lock_pdo_init(parent_lh, LCK_PW, name);
+		rc = mdt_object_lock(info, pobj, parent_lh,
+				     MDS_INODELOCK_UPDATE);
+		if (rc != 0)
+			GOTO(put_parent, rc);
+	}
 
 	if (mdt_object_remote(pobj))
 		cos_incompat = true;
@@ -2242,13 +2269,16 @@ static int mdt_rmfid_unlink(struct mdt_thread_info *info,
 	if (!lu_fid_eq(child_fid, mdt_object_fid(obj)))
 		GOTO(unlock_parent, rc = -EREMCHG);
 
-	child_lh = &info->mti_lh[MDT_LH_CHILD];
-	mdt_lock_reg_init(child_lh, LCK_EX);
-	rc = mdt_reint_striped_lock(info, obj, child_lh,
-				    MDS_INODELOCK_LOOKUP | MDS_INODELOCK_UPDATE,
-				    einfo, cos_incompat);
-	if (rc != 0)
-		GOTO(unlock_parent, rc);
+	if (!info->mti_parent_locked) {
+		child_lh = &info->mti_lh[MDT_LH_CHILD];
+		mdt_lock_reg_init(child_lh, LCK_EX);
+		rc = mdt_reint_striped_lock(info, obj, child_lh,
+					    MDS_INODELOCK_LOOKUP |
+					    MDS_INODELOCK_UPDATE,
+					    einfo, cos_incompat);
+		if (rc != 0)
+			GOTO(unlock_parent, rc);
+	}
 
 	if (atomic_read(&obj->mot_open_count)) {
 		CDEBUG(D_OTHER, "object "DFID" open, skip\n",
@@ -2269,9 +2299,11 @@ static int mdt_rmfid_unlink(struct mdt_thread_info *info,
 	mutex_unlock(&obj->mot_lov_mutex);
 
 unlock_child:
-	mdt_reint_striped_unlock(info, obj, child_lh, einfo, 1);
+	if (!info->mti_parent_locked)
+		mdt_reint_striped_unlock(info, obj, child_lh, einfo, 1);
 unlock_parent:
-	mdt_object_unlock(info, pobj, parent_lh, 1);
+	if (!info->mti_parent_locked)
+		mdt_object_unlock(info, pobj, parent_lh, 1);
 put_parent:
 	mdt_object_put(info->mti_env, pobj);
 out:
@@ -2295,7 +2327,7 @@ static int mdt_rmfid_check_permission(struct mdt_thread_info *info,
 	if (la->la_flags & LUSTRE_IMMUTABLE_FL)
 			rc = -EACCES;
 
-	if (md_capable(uc, CFS_CAP_DAC_OVERRIDE))
+	if (md_capable(uc, CAP_DAC_OVERRIDE))
 		RETURN(0);
 	if (uc->uc_fsuid == la->la_uid) {
 		if ((la->la_mode & S_IWUSR) == 0)
@@ -2360,6 +2392,7 @@ static int mdt_rmfid_one(struct mdt_thread_info *info, struct lu_fid *fid,
 		/* remove every hardlink */
 		linkea_entry_unpack(lee, &reclen, name, pfid);
 		lee = (struct link_ea_entry *) ((char *)lee + reclen);
+
 		rc = mdt_rmfid_unlink(info, pfid, name, obj, ctime);
 		if (rc)
 			break;
@@ -2377,6 +2410,7 @@ out:
 static int mdt_rmfid(struct tgt_session_info *tsi)
 {
 	struct mdt_thread_info *mti = tsi2mdt_info(tsi);
+	struct md_attr *ma = &mti->mti_attr;
 	struct mdt_body *reqbody;
 	struct lu_fid *fids, *rfids;
 	int bufsize, rc;
@@ -2387,6 +2421,14 @@ static int mdt_rmfid(struct tgt_session_info *tsi)
 	reqbody = req_capsule_client_get(tsi->tsi_pill, &RMF_MDT_BODY);
 	if (reqbody == NULL)
 		RETURN(-EPROTO);
+
+	if (reqbody->mbo_valid & OBD_MD_FLFLAGS) {
+		mti->mti_parent_locked = !!(reqbody->mbo_flags &
+					    OBD_FL_LOCKLESS);
+		if (reqbody->mbo_flags & OBD_FL_SUBTREE_RM)
+			ma->ma_attr_flags |= MDS_SUBTREE_REMOVAL;
+	}
+
 	bufsize = req_capsule_get_size(tsi->tsi_pill, &RMF_FID_ARRAY,
 				       RCL_CLIENT);
 	nr = bufsize / sizeof(struct lu_fid);
@@ -2466,7 +2508,7 @@ static int mdt_set_info(struct tgt_session_info *tsi)
 			       tgt_name(tsi->tsi_tgt), vallen);
 			RETURN(-EINVAL);
 		}
-		if (ptlrpc_req_need_swab(req)) {
+		if (req_capsule_req_need_swab(&req->rq_pill)) {
 			__swab64s(&cs->cs_recno);
 			__swab32s(&cs->cs_id);
 		}
@@ -2522,7 +2564,7 @@ static int mdt_readpage(struct tgt_session_info *tsi)
 				exp_max_brw_size(tsi->tsi_exp));
 	rdpg->rp_npages = (rdpg->rp_count + PAGE_SIZE - 1) >>
 			  PAGE_SHIFT;
-	OBD_ALLOC_PTR_ARRAY(rdpg->rp_pages, rdpg->rp_npages);
+	OBD_ALLOC_PTR_ARRAY_LARGE(rdpg->rp_pages, rdpg->rp_npages);
 	if (rdpg->rp_pages == NULL)
 		RETURN(-ENOMEM);
 
@@ -2546,7 +2588,7 @@ free_rdpg:
 	for (i = 0; i < rdpg->rp_npages; i++)
 		if (rdpg->rp_pages[i] != NULL)
 			__free_page(rdpg->rp_pages[i]);
-	OBD_FREE_PTR_ARRAY(rdpg->rp_pages, rdpg->rp_npages);
+	OBD_FREE_PTR_ARRAY_LARGE(rdpg->rp_pages, rdpg->rp_npages);
 
 	if (OBD_FAIL_CHECK(OBD_FAIL_MDS_SENDPAGE))
 		RETURN(0);
@@ -2593,7 +2635,9 @@ static void mdt_preset_secctx_size(struct mdt_thread_info *info)
 			/* pre-set size in server part with max size */
 			req_capsule_set_size(pill, &RMF_FILE_SECCTX,
 					     RCL_SERVER,
-					     OBD_MAX_DEFAULT_EA_SIZE);
+					     req_capsule_ptlreq(pill) ?
+					     OBD_MAX_DEFAULT_EA_SIZE :
+					     MAX_MD_SIZE_OLD);
 		else
 			req_capsule_set_size(pill, &RMF_FILE_SECCTX,
 					     RCL_SERVER, 0);
@@ -2605,11 +2649,13 @@ static void mdt_preset_encctx_size(struct mdt_thread_info *info)
 	struct req_capsule *pill = info->mti_pill;
 
 	if (req_capsule_has_field(pill, &RMF_FILE_ENCCTX,
-				  RCL_SERVER))
+				  RCL_SERVER)) {
 		/* pre-set size in server part with max size */
 		req_capsule_set_size(pill, &RMF_FILE_ENCCTX,
-				     RCL_SERVER,
-				     info->mti_mdt->mdt_max_mdsize);
+				     RCL_SERVER, req_capsule_ptlreq(pill) ?
+				     info->mti_mdt->mdt_max_mdsize :
+				     MAX_MD_SIZE_OLD);
+	}
 }
 
 static int mdt_reint_internal(struct mdt_thread_info *info,
@@ -2943,6 +2989,7 @@ static int mdt_quotactl(struct tgt_session_info *tsi)
 	case LUSTRE_Q_SETDEFAULT:
 	case LUSTRE_Q_SETQUOTAPOOL:
 	case LUSTRE_Q_SETINFOPOOL:
+	case LUSTRE_Q_SETDEFAULT_POOL:
 		if (!nodemap_can_setquota(nodemap))
 			GOTO(out_nodemap, rc = -EPERM);
 		/* fallthrough */
@@ -2951,6 +2998,7 @@ static int mdt_quotactl(struct tgt_session_info *tsi)
 	case LUSTRE_Q_GETDEFAULT:
 	case LUSTRE_Q_GETQUOTAPOOL:
 	case LUSTRE_Q_GETINFOPOOL:
+	case LUSTRE_Q_GETDEFAULT_POOL:
 		if (qmt == NULL)
 			GOTO(out_nodemap, rc = -EOPNOTSUPP);
 		/* slave quotactl */
@@ -3009,6 +3057,8 @@ static int mdt_quotactl(struct tgt_session_info *tsi)
 	case LUSTRE_Q_GETQUOTAPOOL:
 	case LUSTRE_Q_SETINFOPOOL:
 	case LUSTRE_Q_GETINFOPOOL:
+	case LUSTRE_Q_SETDEFAULT_POOL:
+	case LUSTRE_Q_GETDEFAULT_POOL:
 		/* forward quotactl request to QMT */
 		rc = qmt_hdls.qmth_quotactl(tsi->tsi_env, qmt, oqctl);
 		break;
@@ -3891,7 +3941,9 @@ static int mdt_unpack_req_pack_rep(struct mdt_thread_info *info,
 		/* Pack reply. */
 		if (req_capsule_has_field(pill, &RMF_MDT_MD, RCL_SERVER))
 			req_capsule_set_size(pill, &RMF_MDT_MD, RCL_SERVER,
-					     DEF_REP_MD_SIZE);
+					     req_capsule_ptlreq(pill) ?
+					     DEF_REP_MD_SIZE : MAX_MD_SIZE_OLD);
+
 		if (req_capsule_has_field(pill, &RMF_LOGCOOKIES, RCL_SERVER))
 			req_capsule_set_size(pill, &RMF_LOGCOOKIES,
 					     RCL_SERVER, 0);
@@ -3931,6 +3983,32 @@ void mdt_lock_handle_fini(struct mdt_lock_handle *lh)
         LASSERT(!lustre_handle_is_used(&lh->mlh_pdo_lh));
 }
 
+void mdt_thread_info_reset(struct mdt_thread_info *info)
+{
+	memset(&info->mti_attr, 0, sizeof(info->mti_attr));
+	info->mti_body = NULL;
+	info->mti_dlm_req = NULL;
+	info->mti_has_trans = 0;
+	info->mti_cross_ref = 0;
+	info->mti_opdata = 0;
+	info->mti_big_lmm_used = 0;
+	info->mti_big_acl_used = 0;
+	info->mti_som_valid = 0;
+	info->mti_intent_lock = 0;
+
+	info->mti_spec.no_create = 0;
+	info->mti_spec.sp_rm_entry = 0;
+	info->mti_spec.sp_permitted = 0;
+
+	info->mti_spec.u.sp_ea.eadata = NULL;
+	info->mti_spec.u.sp_ea.eadatalen = 0;
+
+	if (info->mti_batch_env && info->mti_object != NULL) {
+		mdt_object_put(info->mti_env, info->mti_object);
+		info->mti_object = NULL;
+	}
+}
+
 /*
  * Initialize fields of struct mdt_thread_info. Other fields are left in
  * uninitialized state, because it's too expensive to zero out whole
@@ -3955,25 +4033,13 @@ void mdt_thread_info_init(struct ptlrpc_request *req,
                 info->mti_mdt = NULL;
 	info->mti_env = req->rq_svc_thread->t_env;
 	info->mti_transno = lustre_msg_get_transno(req->rq_reqmsg);
-
-        memset(&info->mti_attr, 0, sizeof(info->mti_attr));
 	info->mti_big_buf = LU_BUF_NULL;
-	info->mti_body = NULL;
-        info->mti_object = NULL;
-        info->mti_dlm_req = NULL;
-        info->mti_has_trans = 0;
-        info->mti_cross_ref = 0;
-        info->mti_opdata = 0;
-	info->mti_big_lmm_used = 0;
-	info->mti_big_acl_used = 0;
-	info->mti_som_valid = 0;
+	info->mti_batch_env = 0;
+	info->mti_object = NULL;
+	info->mti_parent_locked = 0;
+	info->mti_exlock_update = 0;
 
-        info->mti_spec.no_create = 0;
-	info->mti_spec.sp_rm_entry = 0;
-	info->mti_spec.sp_permitted = 0;
-
-	info->mti_spec.u.sp_ea.eadata = NULL;
-	info->mti_spec.u.sp_ea.eadatalen = 0;
+	mdt_thread_info_reset(info);
 }
 
 void mdt_thread_info_fini(struct mdt_thread_info *info)
@@ -4281,8 +4347,6 @@ static int mdt_intent_getattr(enum ldlm_intent_flags it_opc,
 	rc = mdt_getattr_name_lock(info, lhc, child_bits, ldlm_rep);
 	ldlm_rep->lock_policy_res2 = clear_serious(rc);
 
-        if (mdt_get_disposition(ldlm_rep, DISP_LOOKUP_NEG))
-                ldlm_rep->lock_policy_res2 = 0;
         if (!mdt_get_disposition(ldlm_rep, DISP_LOOKUP_POS) ||
             ldlm_rep->lock_policy_res2) {
                 lhc->mlh_reg_lh.cookie = 0ull;
@@ -4519,6 +4583,50 @@ static int mdt_intent_open(enum ldlm_intent_flags it_opc,
 	RETURN(ELDLM_LOCK_ABORTED);
 }
 
+static int mdt_intent_setattr(enum ldlm_intent_flags it_opc,
+			      struct mdt_thread_info *info,
+			      struct ldlm_lock **lockp,
+			      __u64 flags)
+{
+	struct mdt_lock_handle *lhc = &info->mti_lh[MDT_LH_RMT];
+	static const struct req_format *intent_fmts[REINT_MAX] = {
+		[REINT_SETATTR]	= &RQF_LDLM_INTENT_SETATTR,
+	};
+	struct ldlm_reply *rep = NULL;
+	long opc;
+	int rc;
+
+	ENTRY;
+
+	opc = mdt_reint_opcode(mdt_info_req(info), intent_fmts);
+	if (opc < 0)
+		RETURN(opc);
+
+	/* Get lock from request for possible resent case. */
+	mdt_intent_fixup_resent(info, *lockp, lhc, flags);
+
+	rc = mdt_reint_internal(info, lhc, opc);
+
+	/* Check whether the reply has been packed successfully. */
+	if (mdt_info_req(info)->rq_repmsg != NULL)
+		rep = req_capsule_server_get(info->mti_pill, &RMF_DLM_REP);
+	if (rep == NULL) {
+		if (is_serious(rc))
+			RETURN(rc);
+		else
+			RETURN(err_serious(-EFAULT));
+	}
+
+	rep->lock_policy_res2 = clear_serious(rc);
+	if (lustre_handle_is_used(&lhc->mlh_reg_lh) && rc == 0) {
+		rc = mdt_intent_lock_replace(info, lockp, lhc, flags, rc);
+		RETURN(rc);
+	}
+
+	lhc->mlh_reg_lh.cookie = 0ull;
+	RETURN(ELDLM_LOCK_ABORTED);
+}
+
 static int mdt_intent_opc(enum ldlm_intent_flags it_opc,
 			  struct mdt_thread_info *info,
 			  struct ldlm_lock **lockp,
@@ -4539,6 +4647,7 @@ static int mdt_intent_opc(enum ldlm_intent_flags it_opc,
 
 	switch (it_opc) {
 	case IT_OPEN:
+	case IT_CREAT:
 	case IT_OPEN|IT_CREAT:
 		/*
 		 * OCREAT is not a IS_MUTABLE request since the file may
@@ -4592,13 +4701,18 @@ static int mdt_intent_opc(enum ldlm_intent_flags it_opc,
 						 flags);
 		RETURN(rc);
 	}
+	case IT_SETATTR:
+		it_format = &RQF_LDLM_INTENT_SETATTR;
+		it_handler = &mdt_intent_setattr;
+		break;
 	default:
 		CERROR("%s: unknown intent code %#x\n",
 		       mdt_obd_name(info->mti_mdt), it_opc);
 		RETURN(-EPROTO);
 	}
 
-	req_capsule_extend(pill, it_format);
+	if (!info->mti_batch_env)
+		req_capsule_extend(pill, it_format);
 
 	rc = mdt_unpack_req_pack_rep(info, it_handler_flags);
 	if (rc < 0)
@@ -4616,7 +4730,7 @@ static int mdt_intent_opc(enum ldlm_intent_flags it_opc,
 	rc = (*it_handler)(it_opc, info, lockp, flags);
 
 	/* Check whether the reply has been packed successfully. */
-	if (req->rq_repmsg != NULL) {
+	if (info->mti_batch_env || req->rq_repmsg != NULL) {
 		rep = req_capsule_server_get(info->mti_pill, &RMF_DLM_REP);
 		rep->lock_policy_res2 =
 			ptlrpc_status_hton(rep->lock_policy_res2);
@@ -4658,26 +4772,58 @@ static int mdt_intent_policy(const struct lu_env *env,
 
 	tsi = tgt_ses_info(env);
 
-	info = tsi2mdt_info(tsi);
+	info = mdt_th_info(env);
 	LASSERT(info != NULL);
-	pill = info->mti_pill;
+
+	/* Check whether it is a sub request processing in a batch request */
+	if (info->mti_batch_env) {
+		pill = info->mti_pill;
+		LASSERT(pill == &info->mti_sub_pill);
+	} else {
+		info = tsi2mdt_info(tsi);
+		pill = info->mti_pill;
+	}
+
 	LASSERT(pill->rc_req == req);
 	ldesc = &info->mti_dlm_req->lock_desc;
 
-	if (req->rq_reqmsg->lm_bufcount > DLM_INTENT_IT_OFF) {
-		req_capsule_extend(pill, &RQF_LDLM_INTENT_BASIC);
+	if (info->mti_batch_env ||
+	    req->rq_reqmsg->lm_bufcount > DLM_INTENT_IT_OFF) {
+		/*
+		 * For batch processing environment, the request format has
+		 * already been set.
+		 */
+		if (!info->mti_batch_env)
+			req_capsule_extend(pill, &RQF_LDLM_INTENT_BASIC);
+
 		it = req_capsule_client_get(pill, &RMF_LDLM_INTENT);
 		if (it != NULL) {
 			mdt_ptlrpc_stats_update(req, it->opc);
+			info->mti_intent_lock = 1;
+
+			if (flags & LDLM_FL_INTENT_PARENT_LOCKED)
+				info->mti_parent_locked = 1;
+
+			if (flags & LDLM_FL_INTENT_EXLOCK_UPDATE)
+				info->mti_exlock_update = 1;
+
+			/*
+			 * For intent lock request with policy, the ELC locks
+			 * have been cancelled in ldlm_handle_enqueue0().
+			 * Thus set @mti_dlm_req with null here.
+			 */
+			info->mti_dlm_req = NULL;
 			rc = mdt_intent_opc(it->opc, info, lockp, flags);
 			if (rc == 0)
 				rc = ELDLM_OK;
 
-			/* Lock without inodebits makes no sense and will oops
+			/*
+			 * Lock without inodebits makes no sense and will oops
 			 * later in ldlm. Let's check it now to see if we have
 			 * ibits corrupted somewhere in mdt_intent_opc().
 			 * The case for client miss to set ibits has been
-			 * processed by others. */
+			 * processed by others.
+			 */
 			LASSERT(ergo(ldesc->l_resource.lr_type == LDLM_IBITS,
 				ldesc->l_policy_data.l_inodebits.bits != 0));
 		} else {
@@ -4707,7 +4853,9 @@ static int mdt_intent_policy(const struct lu_env *env,
 		if (rc)
 			rc = err_serious(rc);
 	}
-	mdt_thread_info_fini(info);
+
+	if (!info->mti_batch_env)
+		mdt_thread_info_fini(info);
 	RETURN(rc);
 }
 
@@ -5442,6 +5590,7 @@ TGT_MDT_HDL(HAS_KEY | HAS_BODY | HAS_REPLY | IS_MUTABLE,
 	    MDS_SWAP_LAYOUTS,
 	    mdt_swap_layouts),
 TGT_MDT_HDL(IS_MUTABLE,		MDS_RMFID,	mdt_rmfid),
+TGT_MDT_HDL(IS_MUTABLE,		MDS_BATCH,	mdt_batch),
 };
 
 static struct tgt_handler mdt_io_ops[] = {
@@ -5700,6 +5849,7 @@ static int mdt_init0(const struct lu_env *env, struct mdt_device *m,
 	m->mdt_enable_chprojid_gid = 0;
 	m->mdt_enable_remote_rename = 1;
 	m->mdt_dir_restripe_nsonly = 1;
+	m->mdt_enable_remote_subdir_mount = 1;
 
 	atomic_set(&m->mdt_mds_mds_conns, 0);
 	atomic_set(&m->mdt_async_commit_count, 0);
@@ -5755,8 +5905,13 @@ static int mdt_init0(const struct lu_env *env, struct mdt_device *m,
 					      LDLM_NAMESPACE_SERVER,
 					      LDLM_NAMESPACE_GREEDY,
 					      LDLM_NS_TYPE_MDT);
-	if (m->mdt_namespace == NULL)
-		GOTO(err_fini_seq, rc = -ENOMEM);
+	if (IS_ERR(m->mdt_namespace)) {
+		rc = PTR_ERR(m->mdt_namespace);
+		CERROR("%s: unable to create server namespace: rc = %d\n",
+		       obd->obd_name, rc);
+		m->mdt_namespace = NULL;
+		GOTO(err_fini_seq, rc);
+	}
 
 	m->mdt_namespace->ns_lvbp = m;
 	m->mdt_namespace->ns_lvbo = &mdt_lvbo;
@@ -6722,18 +6877,20 @@ static int mdt_path_current(struct mdt_thread_info *info,
 			    struct getinfo_fid2path *fp,
 			    struct lu_fid *root_fid)
 {
-	struct mdt_device	*mdt = info->mti_mdt;
-	struct mdt_object	*mdt_obj;
-	struct link_ea_header	*leh;
-	struct link_ea_entry	*lee;
-	struct lu_name		*tmpname = &info->mti_name;
-	struct lu_fid		*tmpfid = &info->mti_tmp_fid1;
-	struct lu_buf		*buf = &info->mti_big_buf;
-	char			*ptr;
-	int			reclen;
-	struct linkea_data	ldata = { NULL };
-	int			rc = 0;
-	bool			first = true;
+	struct mdt_device *mdt = info->mti_mdt;
+	struct lu_name *tmpname = &info->mti_name;
+	struct lu_fid *tmpfid = &info->mti_tmp_fid1;
+	struct lu_buf *buf = &info->mti_big_buf;
+	struct md_attr *ma = &info->mti_attr;
+	struct linkea_data ldata = { NULL };
+	bool first = true;
+	struct mdt_object *mdt_obj;
+	struct link_ea_header *leh;
+	struct link_ea_entry *lee;
+	char *ptr;
+	int reclen;
+	int rc = 0;
+
 	ENTRY;
 
 	/* temp buffer for path element, the buffer will be finally freed
@@ -6749,8 +6906,6 @@ static int mdt_path_current(struct mdt_thread_info *info,
 	*tmpfid = fp->gf_fid = *mdt_object_fid(obj);
 
 	while (!lu_fid_eq(root_fid, &fp->gf_fid)) {
-		struct lu_buf		lmv_buf;
-
 		if (!lu_fid_eq(root_fid, &mdt->mdt_md_root_fid) &&
 		    lu_fid_eq(&mdt->mdt_md_root_fid, &fp->gf_fid))
 			GOTO(out, rc = -ENOENT);
@@ -6798,22 +6953,23 @@ static int mdt_path_current(struct mdt_thread_info *info,
 				fp->gf_linkno++;
 		}
 
-		lmv_buf.lb_buf = info->mti_xattr_buf;
-		lmv_buf.lb_len = sizeof(info->mti_xattr_buf);
 		/* Check if it is slave stripes */
-		rc = mo_xattr_get(info->mti_env, mdt_object_child(mdt_obj),
-				  &lmv_buf, XATTR_NAME_LMV);
+		rc = mdt_stripe_get(info, mdt_obj, ma, XATTR_NAME_LMV);
 		mdt_object_put(info->mti_env, mdt_obj);
-		if (rc > 0) {
-			union lmv_mds_md *lmm = lmv_buf.lb_buf;
+		if (rc < 0)
+			GOTO(out, rc);
+
+		if (ma->ma_valid & MA_LMV) {
+			struct lmv_mds_md_v1 *lmv = &ma->ma_lmv->lmv_md_v1;
+
+			if (!lmv_is_sane2(lmv))
+				GOTO(out, rc = -EBADF);
 
 			/* For slave stripes, get its master */
-			if (le32_to_cpu(lmm->lmv_magic) == LMV_MAGIC_STRIPE) {
+			if (le32_to_cpu(lmv->lmv_magic) == LMV_MAGIC_STRIPE) {
 				fp->gf_fid = *tmpfid;
 				continue;
 			}
-		} else if (rc < 0 && rc != -ENODATA) {
-			GOTO(out, rc);
 		}
 
 		/* Pack the name in the end of the buffer */
@@ -6965,7 +7121,7 @@ static int mdt_rpc_fid2path(struct mdt_thread_info *info, void *key, int keylen,
 	fpin = key + cfs_size_round(sizeof(KEY_FID2PATH));
 	fpout = val;
 
-	if (ptlrpc_req_need_swab(info->mti_pill->rc_req))
+	if (req_capsule_req_need_swab(info->mti_pill))
 		lustre_swab_fid2path(fpin);
 
 	memcpy(fpout, fpin, sizeof(*fpin));
@@ -6976,7 +7132,7 @@ static int mdt_rpc_fid2path(struct mdt_thread_info *info, void *key, int keylen,
 		      sizeof(struct lu_fid)) {
 		/* client sent its root FID, which is normally fileset FID */
 		root_fid = fpin->gf_u.gf_root_fid;
-		if (ptlrpc_req_need_swab(info->mti_pill->rc_req))
+		if (req_capsule_req_need_swab(info->mti_pill))
 			lustre_swab_lu_fid(root_fid);
 
 		if (root_fid != NULL && !fid_is_sane(root_fid))
@@ -7366,10 +7522,10 @@ int mdt_cos_is_enabled(struct mdt_device *mdt)
         return mdt->mdt_opts.mo_cos != 0;
 }
 
-static struct lu_device_type_operations mdt_device_type_ops = {
-        .ldto_device_alloc = mdt_device_alloc,
-        .ldto_device_free  = mdt_device_free,
-        .ldto_device_fini  = mdt_device_fini
+static const struct lu_device_type_operations mdt_device_type_ops = {
+	.ldto_device_alloc = mdt_device_alloc,
+	.ldto_device_free  = mdt_device_free,
+	.ldto_device_fini  = mdt_device_fini
 };
 
 static struct lu_device_type mdt_device_type = {
@@ -7395,7 +7551,7 @@ static int __init mdt_init(void)
 	if (rc)
 		GOTO(lu_fini, rc);
 
-	rc = class_register_type(&mdt_obd_device_ops, NULL, true, NULL,
+	rc = class_register_type(&mdt_obd_device_ops, NULL, true,
 				 LUSTRE_MDT_NAME, &mdt_device_type);
 	if (rc)
 		GOTO(mds_fini, rc);

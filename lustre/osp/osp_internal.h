@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/osp/osp_internal.h
  *
@@ -326,10 +325,9 @@ struct osp_object {
 	struct rw_semaphore	opo_invalidate_sem;
 };
 
-extern struct lu_object_operations osp_lu_obj_ops;
-extern const struct dt_device_operations osp_dt_ops;
-extern struct dt_object_operations osp_md_obj_ops;
-extern struct dt_body_operations osp_md_body_ops;
+extern const struct lu_object_operations osp_lu_obj_ops;
+extern const struct dt_object_operations osp_md_obj_ops;
+extern const struct dt_body_operations osp_md_body_ops;
 
 struct osp_thread_info {
 	struct lu_buf		 osi_lb;
@@ -818,6 +816,7 @@ int osp_declare_xattr_del(const struct lu_env *env, struct dt_object *dt,
 int osp_xattr_del(const struct lu_env *env, struct dt_object *dt,
 		  const char *name, struct thandle *th);
 int osp_invalidate(const struct lu_env *env, struct dt_object *dt);
+bool osp_check_stale(struct dt_object *dt);
 void osp_obj_invalidate_cache(struct osp_object *obj);
 
 int osp_trans_stop(const struct lu_env *env, struct dt_device *dt,
@@ -849,7 +848,8 @@ extern const struct dt_index_operations osp_md_index_ops;
 
 /* osp_precreate.c */
 int osp_init_precreate(struct osp_device *d);
-int osp_precreate_reserve(const struct lu_env *env, struct osp_device *d);
+int osp_precreate_reserve(const struct lu_env *env,
+			  struct osp_device *d, bool can_block);
 __u64 osp_precreate_get_id(struct osp_device *d);
 int osp_precreate_get_fid(const struct lu_env *env, struct osp_device *d,
 			  struct lu_fid *fid);

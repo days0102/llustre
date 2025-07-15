@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 #define DEBUG_SUBSYSTEM S_CLASS
 
@@ -98,6 +97,7 @@ static struct ll_rpc_opcode {
 	{ MDS_HSM_CT_UNREGISTER, "mds_hsm_ct_unregister" },
 	{ MDS_SWAP_LAYOUTS,	"mds_swap_layouts" },
 	{ MDS_RMFID,        "mds_rmfid" },
+	{ MDS_BATCH,        "mds_batch" },
 	{ LDLM_ENQUEUE,     "ldlm_enqueue" },
 	{ LDLM_CONVERT,     "ldlm_convert" },
 	{ LDLM_CANCEL,      "ldlm_cancel" },
@@ -133,9 +133,11 @@ static struct ll_rpc_opcode {
 	{ SEC_CTX_FINI,     "sec_ctx_fini" },
 	{ FLD_QUERY,        "fld_query" },
 	{ FLD_READ,	    "fld_read" },
+#ifdef HAVE_SERVER_SUPPORT
 	{ OUT_UPDATE,	    "out_update" },
 	{ LFSCK_NOTIFY,	    "lfsck_notify" },
 	{ LFSCK_QUERY,	    "lfsck_query" },
+#endif
 };
 
 static struct ll_eopcode {
@@ -503,8 +505,8 @@ static const char *nrs_state2str(enum ptlrpc_nrs_pol_state state)
  * \param[in] policy The policy
  * \param[out] info  Holds returned status information
  */
-void nrs_policy_get_info_locked(struct ptlrpc_nrs_policy *policy,
-				struct ptlrpc_nrs_pol_info *info)
+static void nrs_policy_get_info_locked(struct ptlrpc_nrs_policy *policy,
+				       struct ptlrpc_nrs_pol_info *info)
 {
 	LASSERT(policy != NULL);
 	LASSERT(info != NULL);
@@ -1065,7 +1067,7 @@ static int ptlrpc_lprocfs_svc_req_history_show(struct seq_file *s, void *iter)
 static int
 ptlrpc_lprocfs_svc_req_history_open(struct inode *inode, struct file *file)
 {
-	static struct seq_operations sops = {
+	static const struct seq_operations sops = {
 		.start = ptlrpc_lprocfs_svc_req_history_start,
 		.stop  = ptlrpc_lprocfs_svc_req_history_stop,
 		.next  = ptlrpc_lprocfs_svc_req_history_next,
@@ -1209,14 +1211,14 @@ void ptlrpc_ldebugfs_register_service(struct dentry *entry,
 		  .fops = &ptlrpc_lprocfs_req_buffers_max_fops,
 		  .data = svc },
 		{ NULL }
-        };
-        static struct file_operations req_history_fops = {
-                .owner       = THIS_MODULE,
-                .open        = ptlrpc_lprocfs_svc_req_history_open,
-                .read        = seq_read,
-                .llseek      = seq_lseek,
-                .release     = lprocfs_seq_release,
-        };
+	};
+	static const struct file_operations req_history_fops = {
+		.owner		= THIS_MODULE,
+		.open		= ptlrpc_lprocfs_svc_req_history_open,
+		.read		= seq_read,
+		.llseek		= seq_lseek,
+		.release	= lprocfs_seq_release,
+	};
 
 	ptlrpc_ldebugfs_register(entry, svc->srv_name, "stats",
 				 &svc->srv_debugfs_entry, &svc->srv_stats);

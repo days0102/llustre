@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * glimpse code used by vvp (and other Lustre clients in the future).
  *
@@ -211,7 +210,7 @@ int cl_glimpse_size0(struct inode *inode, int agl)
 		} else if (result == 0) {
 			result = cl_glimpse_lock(env, io, inode, io->ci_obj,
 						 agl);
-			if (!agl && result == -EWOULDBLOCK)
+			if (!agl && result == -EAGAIN)
 				io->ci_need_restart = 1;
 		}
 

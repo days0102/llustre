@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * libcfs/libcfs/tracefile.c
  *
@@ -48,8 +47,6 @@
 #include <libcfs/linux/linux-fs.h>
 #include <libcfs/libcfs.h>
 
-#define CFS_TRACE_CONSOLE_BUFFER_SIZE	1024
-#define TCD_MAX_TYPES			8
 
 enum cfs_trace_buf_type {
 	CFS_TCD_TYPE_PROC = 0,
@@ -58,14 +55,12 @@ enum cfs_trace_buf_type {
 	CFS_TCD_TYPE_CNT
 };
 
-union cfs_trace_data_union (*cfs_trace_data[TCD_MAX_TYPES])[NR_CPUS] __cacheline_aligned;
+union cfs_trace_data_union (*cfs_trace_data[CFS_TCD_TYPE_CNT])[NR_CPUS] __cacheline_aligned;
 
-char *cfs_trace_console_buffers[NR_CPUS][CFS_TCD_TYPE_CNT];
 char cfs_tracefile[TRACEFILE_NAME_SIZE];
 long long cfs_tracefile_size = CFS_TRACEFILE_SIZE;
-static struct tracefiled_ctl trace_tctl;
-static DEFINE_MUTEX(cfs_trace_thread_mutex);
-static int thread_running = 0;
+
+struct task_struct *tctl_task;
 
 static atomic_t cfs_tage_allocated = ATOMIC_INIT(0);
 static DECLARE_RWSEM(cfs_tracefile_sem);
@@ -109,13 +104,13 @@ void cfs_trace_unlock_tcd(struct cfs_trace_cpu_data *tcd, int walking)
 }
 
 #define cfs_tcd_for_each(tcd, i, j)					\
-	for (i = 0; cfs_trace_data[i]; i++)				\
+	for (i = 0; i < CFS_TCD_TYPE_CNT && cfs_trace_data[i]; i++)	\
 		for (j = 0, ((tcd) = &(*cfs_trace_data[i])[j].tcd);	\
 		     j < num_possible_cpus();				\
 		     j++, (tcd) = &(*cfs_trace_data[i])[j].tcd)
 
 #define cfs_tcd_for_each_type_lock(tcd, i, cpu)				\
-	for (i = 0; cfs_trace_data[i] &&				\
+	for (i = 0; i < CFS_TCD_TYPE_CNT && cfs_trace_data[i] &&	\
 	     (tcd = &(*cfs_trace_data[i])[cpu].tcd) &&			\
 	     cfs_trace_lock_tcd(tcd, 1); cfs_trace_unlock_tcd(tcd, 1), i++)
 
@@ -126,14 +121,6 @@ enum cfs_trace_buf_type cfs_trace_buf_idx_get(void)
 	if (in_softirq())
 		return CFS_TCD_TYPE_SOFTIRQ;
 	return CFS_TCD_TYPE_PROC;
-}
-
-static inline char *cfs_trace_get_console_buffer(void)
-{
-	unsigned int i = get_cpu();
-	unsigned int j = cfs_trace_buf_idx_get();
-
-	return cfs_trace_console_buffers[i][j];
 }
 
 static inline struct cfs_trace_cpu_data *
@@ -212,14 +199,15 @@ static void cfs_tage_to_tail(struct cfs_trace_page *tage,
 static struct cfs_trace_page *
 cfs_trace_get_tage_try(struct cfs_trace_cpu_data *tcd, unsigned long len)
 {
-        struct cfs_trace_page *tage;
+	struct cfs_trace_page *tage;
+	struct task_struct *tsk;
 
-        if (tcd->tcd_cur_pages > 0) {
+	if (tcd->tcd_cur_pages > 0) {
 		__LASSERT(!list_empty(&tcd->tcd_pages));
-                tage = cfs_tage_from_list(tcd->tcd_pages.prev);
+		tage = cfs_tage_from_list(tcd->tcd_pages.prev);
 		if (tage->used + len <= PAGE_SIZE)
-                        return tage;
-        }
+			return tage;
+	}
 
 	if (tcd->tcd_cur_pages < tcd->tcd_max_pages) {
 		if (tcd->tcd_cur_stock_pages > 0) {
@@ -243,16 +231,16 @@ cfs_trace_get_tage_try(struct cfs_trace_cpu_data *tcd, unsigned long len)
 		list_add_tail(&tage->linkage, &tcd->tcd_pages);
 		tcd->tcd_cur_pages++;
 
-		if (tcd->tcd_cur_pages > 8 && thread_running) {
-			struct tracefiled_ctl *tctl = &trace_tctl;
+		tsk = tctl_task;
+		if (tcd->tcd_cur_pages > 8 && tsk)
 			/*
 			 * wake up tracefiled to process some pages.
 			 */
-			wake_up(&tctl->tctl_waitq);
-		}
+			wake_up_process(tsk);
+
 		return tage;
-        }
-        return NULL;
+	}
+	return NULL;
 }
 
 static void cfs_tcd_shrink(struct cfs_trace_cpu_data *tcd)
@@ -285,14 +273,14 @@ static void cfs_tcd_shrink(struct cfs_trace_cpu_data *tcd)
 
 /* return a page that has 'len' bytes left at the end */
 static struct cfs_trace_page *cfs_trace_get_tage(struct cfs_trace_cpu_data *tcd,
-                                                 unsigned long len)
+						 unsigned long len)
 {
-        struct cfs_trace_page *tage;
+	struct cfs_trace_page *tage;
 
-        /*
-         * XXX nikita: do NOT call portals_debug_msg() (CDEBUG/ENTRY/EXIT)
-         * from here: this will lead to infinite recursion.
-         */
+	/*
+	 * XXX nikita: do NOT call portals_debug_msg() (CDEBUG/ENTRY/EXIT)
+	 * from here: this will lead to infinite recursion.
+	 */
 
 	if (len > PAGE_SIZE) {
 		pr_err("LustreError: cowardly refusing to write %lu bytes in a page\n",
@@ -300,17 +288,17 @@ static struct cfs_trace_page *cfs_trace_get_tage(struct cfs_trace_cpu_data *tcd,
 		return NULL;
 	}
 
-        tage = cfs_trace_get_tage_try(tcd, len);
-        if (tage != NULL)
-                return tage;
-        if (thread_running)
-                cfs_tcd_shrink(tcd);
-        if (tcd->tcd_cur_pages > 0) {
-                tage = cfs_tage_from_list(tcd->tcd_pages.next);
-                tage->used = 0;
-                cfs_tage_to_tail(tage, &tcd->tcd_pages);
-        }
-        return tage;
+	tage = cfs_trace_get_tage_try(tcd, len);
+	if (tage != NULL)
+		return tage;
+	if (tctl_task)
+		cfs_tcd_shrink(tcd);
+	if (tcd->tcd_cur_pages > 0) {
+		tage = cfs_tage_from_list(tcd->tcd_pages.next);
+		tage->used = 0;
+		cfs_tage_to_tail(tage, &tcd->tcd_pages);
+	}
+	return tage;
 }
 
 static void cfs_set_ptldebug_header(struct ptldebug_header *header,
@@ -371,9 +359,9 @@ static void cfs_tty_write_message(const char *prefix, int mask, const char *msg)
 	tty_kref_put(tty);
 }
 
-static void cfs_print_to_console(struct ptldebug_header *hdr, int mask,
-				 const char *buf, int len, const char *file,
-				 const char *fn)
+static void cfs_vprint_to_console(struct ptldebug_header *hdr, int mask,
+				  struct va_format *vaf, const char *file,
+				  const char *fn)
 {
 	char *prefix = "Lustre";
 
@@ -382,32 +370,46 @@ static void cfs_print_to_console(struct ptldebug_header *hdr, int mask,
 
 	if (mask & D_CONSOLE) {
 		if (mask & D_EMERG)
-			pr_emerg("%sError: %.*s", prefix, len, buf);
+			pr_emerg("%sError: %pV", prefix, vaf);
 		else if (mask & D_ERROR)
-			pr_err("%sError: %.*s", prefix, len, buf);
+			pr_err("%sError: %pV", prefix, vaf);
 		else if (mask & D_WARNING)
-			pr_warn("%s: %.*s", prefix, len, buf);
+			pr_warn("%s: %pV", prefix, vaf);
 		else if (mask & libcfs_printk)
-			pr_info("%s: %.*s", prefix, len, buf);
+			pr_info("%s: %pV", prefix, vaf);
 	} else {
 		if (mask & D_EMERG)
-			pr_emerg("%sError: %d:%d:(%s:%d:%s()) %.*s", prefix,
+			pr_emerg("%sError: %d:%d:(%s:%d:%s()) %pV", prefix,
 				 hdr->ph_pid, hdr->ph_extern_pid, file,
-				 hdr->ph_line_num, fn, len, buf);
+				 hdr->ph_line_num, fn, vaf);
 		else if (mask & D_ERROR)
-			pr_err("%sError: %d:%d:(%s:%d:%s()) %.*s", prefix,
+			pr_err("%sError: %d:%d:(%s:%d:%s()) %pV", prefix,
 			       hdr->ph_pid, hdr->ph_extern_pid, file,
-			       hdr->ph_line_num, fn, len, buf);
+			       hdr->ph_line_num, fn, vaf);
 		else if (mask & D_WARNING)
-			pr_warn("%s: %d:%d:(%s:%d:%s()) %.*s", prefix,
+			pr_warn("%s: %d:%d:(%s:%d:%s()) %pV", prefix,
 				hdr->ph_pid, hdr->ph_extern_pid, file,
-				hdr->ph_line_num, fn, len, buf);
+				hdr->ph_line_num, fn, vaf);
 		else if (mask & (D_CONSOLE | libcfs_printk))
-			pr_info("%s: %.*s", prefix, len, buf);
+			pr_info("%s: %pV", prefix, vaf);
 	}
 
 	if (mask & D_TTY)
-		cfs_tty_write_message(prefix, mask, buf);
+		/* tty_write_msg doesn't handle formatting */
+		cfs_tty_write_message(prefix, mask, vaf->fmt);
+}
+
+static void cfs_print_to_console(struct ptldebug_header *hdr, int mask,
+				 const char *file, const char *fn,
+				 const char *fmt, ...)
+{
+	struct va_format vaf;
+	va_list args;
+
+	va_start(args, fmt);
+	vaf.fmt = fmt;
+	vaf.va = &args;
+	cfs_vprint_to_console(hdr, mask, &vaf, file, fn);
 }
 
 int libcfs_debug_msg(struct libcfs_debug_msg_data *msgdata,
@@ -510,6 +512,9 @@ int libcfs_debug_msg(struct libcfs_debug_msg_data *msgdata,
 		if (needed < 2 || *(string_buf + needed - 2) != '\r')
 			pr_info("Lustre: format at %s:%d:%s doesn't end in '\\r\\n'\n",
 				file, msgdata->msg_line, msgdata->msg_fn);
+		if (strnchr(string_buf, needed, '%'))
+			pr_info("Lustre: format at %s:%d:%s mustn't contain %%\n",
+				file, msgdata->msg_line, msgdata->msg_fn);
 	}
 
 	header.ph_len = known_size + needed;
@@ -574,36 +579,28 @@ console:
 	}
 
 	if (tcd) {
-		cfs_print_to_console(&header, mask, string_buf, needed, file,
-				     msgdata->msg_fn);
+		cfs_print_to_console(&header, mask, file, msgdata->msg_fn,
+				     "%s", string_buf);
 		cfs_trace_put_tcd(tcd);
 	} else {
-		string_buf = cfs_trace_get_console_buffer();
+		struct va_format vaf;
 
 		va_start(ap, format);
-		needed = vscnprintf(string_buf, CFS_TRACE_CONSOLE_BUFFER_SIZE,
-				    format, ap);
+		vaf.fmt = format;
+		vaf.va = &ap;
+		cfs_vprint_to_console(&header, mask,
+				      &vaf, file, msgdata->msg_fn);
 		va_end(ap);
-
-		cfs_print_to_console(&header, mask,
-				     string_buf, needed, file, msgdata->msg_fn);
-
-		put_cpu();
 	}
 
 	if (cdls != NULL && cdls->cdls_count != 0) {
-		string_buf = cfs_trace_get_console_buffer();
-
-		needed = scnprintf(string_buf, CFS_TRACE_CONSOLE_BUFFER_SIZE,
-				   "Skipped %d previous similar message%s\n",
-				   cdls->cdls_count,
-				   (cdls->cdls_count > 1) ? "s" : "");
-
 		/* Do not allow print this to TTY */
-		cfs_print_to_console(&header, mask & ~D_TTY, string_buf,
-				     needed, file, msgdata->msg_fn);
+		cfs_print_to_console(&header, mask & ~D_TTY, file,
+				     msgdata->msg_fn,
+				     "Skipped %d previous similar message%s\n",
+				     cdls->cdls_count,
+				     (cdls->cdls_count > 1) ? "s" : "");
 
-		put_cpu();
 		cdls->cdls_count = 0;
 	}
 
@@ -623,8 +620,8 @@ cfs_trace_assertion_failed(const char *str,
 
 	cfs_set_ptldebug_header(&hdr, msgdata, CDEBUG_STACK());
 
-	cfs_print_to_console(&hdr, D_EMERG, str, strlen(str),
-			     msgdata->msg_file, msgdata->msg_fn);
+	cfs_print_to_console(&hdr, D_EMERG, msgdata->msg_file, msgdata->msg_fn,
+			     "%s", str);
 
 	panic("Lustre debug assertion failure\n");
 
@@ -761,6 +758,7 @@ static void put_pages_on_daemon_list(struct page_collection *pc)
         }
 }
 
+#ifdef LNET_DUMP_ON_PANIC
 void cfs_trace_debug_print(void)
 {
 	struct page_collection pc;
@@ -778,25 +776,27 @@ void cfs_trace_debug_print(void)
 		page = tage->page;
 		p = page_address(page);
 		while (p < ((char *)page_address(page) + tage->used)) {
-                        struct ptldebug_header *hdr;
-                        int len;
-                        hdr = (void *)p;
-                        p += sizeof(*hdr);
-                        file = p;
-                        p += strlen(file) + 1;
-                        fn = p;
-                        p += strlen(fn) + 1;
-                        len = hdr->ph_len - (int)(p - (char *)hdr);
+			struct ptldebug_header *hdr;
+			int len;
+			hdr = (void *)p;
+			p += sizeof(*hdr);
+			file = p;
+			p += strlen(file) + 1;
+			fn = p;
+			p += strlen(fn) + 1;
+			len = hdr->ph_len - (int)(p - (char *)hdr);
 
-                        cfs_print_to_console(hdr, D_EMERG, p, len, file, fn);
+			cfs_print_to_console(hdr, D_EMERG, file, fn,
+					     "%.*s", len, p);
 
-                        p += len;
-                }
+			p += len;
+		}
 
 		list_del(&tage->linkage);
 		cfs_tage_free(tage);
 	}
 }
+#endif /* LNET_DUMP_ON_PANIC */
 
 int cfs_tracefile_dump_all_pages(char *filename)
 {
@@ -859,45 +859,18 @@ void cfs_trace_flush_pages(void)
 {
 	struct page_collection pc;
 	struct cfs_trace_page *tage;
-	struct cfs_trace_page *tmp;
 
 	pc.pc_want_daemon_pages = 1;
 	collect_pages(&pc);
-	list_for_each_entry_safe(tage, tmp, &pc.pc_pages, linkage) {
-
+	while (!list_empty(&pc.pc_pages)) {
+		tage = list_first_entry(&pc.pc_pages,
+					struct cfs_trace_page, linkage);
 		__LASSERT_TAGE_INVARIANT(tage);
 
 		list_del(&tage->linkage);
 		cfs_tage_free(tage);
 	}
 }
-
-int cfs_trace_copyin_string(char *knl_buffer, int knl_buffer_nob,
-			    const char __user *usr_buffer, int usr_buffer_nob)
-{
-        int    nob;
-
-        if (usr_buffer_nob > knl_buffer_nob)
-                return -EOVERFLOW;
-
-	if (copy_from_user(knl_buffer, usr_buffer, usr_buffer_nob))
-                return -EFAULT;
-
-        nob = strnlen(knl_buffer, usr_buffer_nob);
-	while (--nob >= 0)			/* strip trailing whitespace */
-                if (!isspace(knl_buffer[nob]))
-                        break;
-
-        if (nob < 0)                            /* empty string */
-                return -EINVAL;
-
-        if (nob == knl_buffer_nob)              /* no space to terminate */
-                return -EOVERFLOW;
-
-        knl_buffer[nob + 1] = 0;                /* terminate */
-        return 0;
-}
-EXPORT_SYMBOL(cfs_trace_copyin_string);
 
 int cfs_trace_copyout_string(char __user *usr_buffer, int usr_buffer_nob,
                              const char *knl_buffer, char *append)
@@ -924,40 +897,24 @@ int cfs_trace_copyout_string(char __user *usr_buffer, int usr_buffer_nob,
 }
 EXPORT_SYMBOL(cfs_trace_copyout_string);
 
-int cfs_trace_allocate_string_buffer(char **str, int nob)
-{
-	if (nob > 2 * PAGE_SIZE)	/* string must be "sensible" */
-                return -EINVAL;
-
-	*str = kmalloc(nob, GFP_KERNEL | __GFP_ZERO);
-        if (*str == NULL)
-                return -ENOMEM;
-
-        return 0;
-}
-
 int cfs_trace_dump_debug_buffer_usrstr(void __user *usr_str, int usr_str_nob)
 {
-        char         *str;
-        int           rc;
+	char *str;
+	char *path;
+	int rc;
 
-        rc = cfs_trace_allocate_string_buffer(&str, usr_str_nob + 1);
-        if (rc != 0)
-                return rc;
+	str = memdup_user_nul(usr_str, usr_str_nob);
+	if (!str)
+		return -ENOMEM;
 
-        rc = cfs_trace_copyin_string(str, usr_str_nob + 1,
-                                     usr_str, usr_str_nob);
-        if (rc != 0)
-                goto out;
-
-        if (str[0] != '/') {
-                rc = -EINVAL;
-                goto out;
-        }
-        rc = cfs_tracefile_dump_all_pages(str);
-out:
+	path = strim(str);
+	if (path[0] != '/')
+		rc = -EINVAL;
+	else
+		rc = cfs_tracefile_dump_all_pages(path);
 	kfree(str);
-        return rc;
+
+	return rc;
 }
 
 int cfs_trace_daemon_command(char *str)
@@ -1001,20 +958,17 @@ int cfs_trace_daemon_command(char *str)
 
 int cfs_trace_daemon_command_usrstr(void __user *usr_str, int usr_str_nob)
 {
-        char *str;
-        int   rc;
+	char *str;
+	int   rc;
 
-        rc = cfs_trace_allocate_string_buffer(&str, usr_str_nob + 1);
-        if (rc != 0)
-                return rc;
+	str = memdup_user_nul(usr_str, usr_str_nob);
+	if (!str)
+		return -ENOMEM;
 
-        rc = cfs_trace_copyin_string(str, usr_str_nob + 1,
-                                 usr_str, usr_str_nob);
-        if (rc == 0)
-                rc = cfs_trace_daemon_command(str);
-
+	rc = cfs_trace_daemon_command(strim(str));
 	kfree(str);
-        return rc;
+
+	return rc;
 }
 
 int cfs_trace_set_debug_mb(int mb)
@@ -1071,7 +1025,6 @@ int cfs_trace_get_debug_mb(void)
 static int tracefiled(void *arg)
 {
 	struct page_collection pc;
-	struct tracefiled_ctl *tctl = arg;
 	struct cfs_trace_page *tage;
 	struct cfs_trace_page *tmp;
 	struct file *filp;
@@ -1079,22 +1032,19 @@ static int tracefiled(void *arg)
 	int last_loop = 0;
 	int rc;
 
-	/* we're started late enough that we pick up init's fs context */
-	/* this is so broken in uml?  what on earth is going on? */
+	pc.pc_want_daemon_pages = 0;
 
-	complete(&tctl->tctl_start);
-
-	while (1) {
-		wait_queue_entry_t __wait;
-
-                pc.pc_want_daemon_pages = 0;
-                collect_pages(&pc);
+	while (!last_loop) {
+		schedule_timeout_interruptible(cfs_time_seconds(1));
+		if (kthread_should_stop())
+			last_loop = 1;
+		collect_pages(&pc);
 		if (list_empty(&pc.pc_pages))
-                        goto end_loop;
+			continue;
 
-                filp = NULL;
+		filp = NULL;
 		down_read(&cfs_tracefile_sem);
-                if (cfs_tracefile[0] != 0) {
+		if (cfs_tracefile[0] != 0) {
 			filp = filp_open(cfs_tracefile,
 					 O_CREAT | O_RDWR | O_LARGEFILE,
 					 0600);
@@ -1106,11 +1056,11 @@ static int tracefiled(void *arg)
 			}
 		}
 		up_read(&cfs_tracefile_sem);
-                if (filp == NULL) {
-                        put_pages_on_daemon_list(&pc);
+		if (filp == NULL) {
+			put_pages_on_daemon_list(&pc);
 			__LASSERT(list_empty(&pc.pc_pages));
-                        goto end_loop;
-                }
+			continue;
+		}
 
 		list_for_each_entry_safe(tage, tmp, &pc.pc_pages, linkage) {
 			struct dentry *de = file_dentry(filp);
@@ -1133,12 +1083,12 @@ static int tracefiled(void *arg)
 				__LASSERT(list_empty(&pc.pc_pages));
 				break;
 			}
-                }
+		}
 
 		filp_close(filp, NULL);
-                put_pages_on_daemon_list(&pc);
+		put_pages_on_daemon_list(&pc);
 		if (!list_empty(&pc.pc_pages)) {
-                        int i;
+			int i;
 
 			pr_alert("Lustre: trace pages aren't empty\n");
 			pr_err("Lustre: total cpus(%d): ", num_possible_cpus());
@@ -1157,62 +1107,40 @@ static int tracefiled(void *arg)
 			pr_err("Lustre: There are %d pages unwritten\n", i);
 		}
 		__LASSERT(list_empty(&pc.pc_pages));
-end_loop:
-		if (atomic_read(&tctl->tctl_shutdown)) {
-			if (last_loop == 0) {
-				last_loop = 1;
-				continue;
-			} else {
-				break;
-			}
-		}
-		init_wait(&__wait);
-		add_wait_queue(&tctl->tctl_waitq, &__wait);
-		schedule_timeout_interruptible(cfs_time_seconds(1));
-		remove_wait_queue(&tctl->tctl_waitq, &__wait);
-        }
-	complete(&tctl->tctl_stop);
-        return 0;
+	}
+
+	return 0;
 }
 
 int cfs_trace_start_thread(void)
 {
-        struct tracefiled_ctl *tctl = &trace_tctl;
-        int rc = 0;
+	struct task_struct *tsk;
+	int rc = 0;
 
-	mutex_lock(&cfs_trace_thread_mutex);
-        if (thread_running)
-                goto out;
+	if (tctl_task)
+		return 0;
 
-	init_completion(&tctl->tctl_start);
-	init_completion(&tctl->tctl_stop);
-	init_waitqueue_head(&tctl->tctl_waitq);
-	atomic_set(&tctl->tctl_shutdown, 0);
-
-	if (IS_ERR(kthread_run(tracefiled, tctl, "ktracefiled"))) {
+	tsk = kthread_create(tracefiled, NULL, "ktracefiled");
+	if (IS_ERR(tsk))
 		rc = -ECHILD;
-		goto out;
-	}
+	else if (cmpxchg(&tctl_task, NULL, tsk) != NULL)
+		/* already running */
+		kthread_stop(tsk);
+	else
+		wake_up_process(tsk);
 
-	wait_for_completion(&tctl->tctl_start);
-	thread_running = 1;
-out:
-	mutex_unlock(&cfs_trace_thread_mutex);
-        return rc;
+	return rc;
 }
 
 void cfs_trace_stop_thread(void)
 {
-	struct tracefiled_ctl *tctl = &trace_tctl;
+	struct task_struct *tsk;
 
-	mutex_lock(&cfs_trace_thread_mutex);
-	if (thread_running) {
+	tsk = xchg(&tctl_task, NULL);
+	if (tsk) {
 		pr_info("Lustre: shutting down debug daemon thread...\n");
-		atomic_set(&tctl->tctl_shutdown, 1);
-		wait_for_completion(&tctl->tctl_stop);
-		thread_running = 0;
+		kthread_stop(tsk);
 	}
-	mutex_unlock(&cfs_trace_thread_mutex);
 }
 
 /* percents to share the total debug memory for each type */
@@ -1259,23 +1187,8 @@ int cfs_tracefile_init(int max_pages)
 		tcd->tcd_shutting_down = 0;
 	}
 
-	for (i = 0; i < num_possible_cpus(); i++)
-		for (j = 0; j < 3; j++) {
-			cfs_trace_console_buffers[i][j] =
-				kmalloc(CFS_TRACE_CONSOLE_BUFFER_SIZE,
-					GFP_KERNEL);
-			if (!cfs_trace_console_buffers[i][j])
-				goto out_buffers;
-		}
-
 	return 0;
 
-out_buffers:
-	for (i = 0; i < num_possible_cpus(); i++)
-		for (j = 0; j < 3; j++) {
-			kfree(cfs_trace_console_buffers[i][j]);
-			cfs_trace_console_buffers[i][j] = NULL;
-		}
 out_trace_data:
 	for (i = 0; cfs_trace_data[i]; i++) {
 		kfree(cfs_trace_data[i]);
@@ -1289,7 +1202,6 @@ static void trace_cleanup_on_all_cpus(void)
 {
 	struct cfs_trace_cpu_data *tcd;
 	struct cfs_trace_page *tage;
-	struct cfs_trace_page *tmp;
 	int i, cpu;
 
 	for_each_possible_cpu(cpu) {
@@ -1299,7 +1211,10 @@ static void trace_cleanup_on_all_cpus(void)
 				continue;
 			tcd->tcd_shutting_down = 1;
 
-			list_for_each_entry_safe(tage, tmp, &tcd->tcd_pages, linkage) {
+			while (!list_empty(&tcd->tcd_pages)) {
+				tage = list_first_entry(&tcd->tcd_pages,
+							struct cfs_trace_page,
+							linkage);
 				__LASSERT_TAGE_INVARIANT(tage);
 
 				list_del(&tage->linkage);
@@ -1314,19 +1229,12 @@ static void cfs_trace_cleanup(void)
 {
 	struct page_collection pc;
 	int i;
-	int j;
 
 	INIT_LIST_HEAD(&pc.pc_pages);
 
 	trace_cleanup_on_all_cpus();
 
-	for (i = 0; i < num_possible_cpus(); i++)
-		for (j = 0; j < 3; j++) {
-			kfree(cfs_trace_console_buffers[i][j]);
-			cfs_trace_console_buffers[i][j] = NULL;
-		}
-
-	for (i = 0; cfs_trace_data[i]; i++) {
+	for (i = 0; i < CFS_TCD_TYPE_CNT && cfs_trace_data[i]; i++) {
 		kfree(cfs_trace_data[i]);
 		cfs_trace_data[i] = NULL;
 	}

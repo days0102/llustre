@@ -12,8 +12,6 @@ lfs-find \- Lustre client utility to list files with specific attributes
       [[\fB!\fR] \fB--component-flags|\fB--comp-flags\fR <[^]\fIflag\fB,\fR...>]
       [[\fB!\fR] \fB--component-start|\fB--comp-start\fR [\fB+-\fR]\fIn\fR[\fBKMGTPE\fR]]
       [[\fB!\fR] \fB--extension-size|\fB-z\fR [\fB+-\fR]\fIn\fR[\fBKMG\fR]]
-      [[\fB!\fR] \fB--gid\fR|\fB-g\fR|\fB--group\fR|\fB-G\fR <\fIgname\fR>|<\fIgid\fR>]
-      [[\fB!\fR] \fB--layout\fR|\fB-L mdt\fR,\fBraid0\fR,\fBreleased\fR]
       [[\fB!\fR] \fB--foreign\fR [<\fItype\fR>]]
 [[\fB!\fR] \fB--gid\fR|\fB-g\fR|\fB--group\fR|\fB-G\fR <\fIgname\fR>|<\fIgid\fR>]
       [[\fB!\fR] \fB--layout\fR|\fB-L mdt\fR,\fBraid0\fR,\fBreleased\fR]
@@ -21,7 +19,7 @@ lfs-find \- Lustre client utility to list files with specific attributes
       [\fB--maxdepth\fR|\fB-D\fI n\fR]
 [[\fB!\fR] \fB--mdt\fR|\fB--mdt-index\fR|\fB-m\fR <\fIuuid\fR|\fIindex\fR,...>]
       [[\fB!\fR] \fB--mdt-count\fR|\fB-T\fR [\fB+-\fR]\fIn\fR]
-[[\fB!\fR] \fB--mdt-hash\fR|\fB-H <\fIhashtype\fR>]
+[[\fB!\fR] \fB--mdt-hash\fR|\fB-H \fR<[^]\fIhashflag\fR,[^]\fIhashtype\fR,...>]
       [[\fB!\fR] \fB--mirror-count|\fB-N\fR [\fB+-\fR]\fIn\fR]
 [[\fB!\fR] \fB--mirror-state\fR <[^]\fIstate\fR>]
       [[\fB!\fR] \fB--mtime\fR|\fB-M\fR [\fB-+\fR]\fIn[smhdwy]\fR]
@@ -119,7 +117,7 @@ File has a foreign (non-Lustre/free format) layout and is of the given
 if specified.  Presently only
 .B none
 or
-.B daos
+.B symlink
 are defined types, though 32-bit numeric types can also be used.
 .TP
 .BR --gid | -g
@@ -365,9 +363,9 @@ Recursively list all mirrored files that have more than 2 mirrors.
 .B $ lfs find ! --mirror-state=ro /mnt/lustre
 Recursively list all out-of-sync mirrored files.
 .TP
-.B $ lfs find ! --foreign=daos /mnt/lustre
+.B $ lfs find ! --foreign=symlink /mnt/lustre
 Recursively list all but foreign files/dirs of
-.B daos
+.B symlink
 type.
 .SH BUGS
 The

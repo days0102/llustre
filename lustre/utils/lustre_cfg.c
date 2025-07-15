@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/utils/lustre_cfg.c
  *
@@ -1236,6 +1235,7 @@ int jt_lcfg_getparam(int argc, char **argv)
 	return rc;
 }
 
+#ifdef HAVE_SERVER_SUPPORT
 /**
  * Output information about nodemaps.
  * \param	argc		number of args
@@ -1279,6 +1279,7 @@ int jt_nodemap_info(int argc, char **argv)
 	}
 	return rc;
 }
+#endif
 
 static int setparam_cmdline(int argc, char **argv, struct param_opts *popt)
 {

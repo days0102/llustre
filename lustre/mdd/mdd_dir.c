@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/mdd/mdd_dir.c
  *
@@ -70,7 +69,7 @@ mdd_name_check(struct mdd_device *m, const struct lu_name *ln)
 static int
 __mdd_lookup(const struct lu_env *env, struct md_object *pobj,
 	     const struct lu_attr *pattr, const struct lu_name *lname,
-	     struct lu_fid* fid, int mask)
+	     struct lu_fid *fid, unsigned int may_mask)
 {
 	const char *name = lname->ln_name;
 	const struct dt_key *key = (const struct dt_key *)name;
@@ -92,7 +91,7 @@ __mdd_lookup(const struct lu_env *env, struct md_object *pobj,
 		       PFID(mdd_object_fid(mdd_obj)));
 	}
 
-	rc = mdd_permission_internal_locked(env, mdd_obj, pattr, mask,
+	rc = mdd_permission_internal_locked(env, mdd_obj, pattr, may_mask,
 					    DT_TGT_PARENT);
 	if (rc)
 		RETURN(rc);
@@ -124,7 +123,7 @@ int mdd_lookup(const struct lu_env *env,
 }
 
 /** Read the link EA into a temp buffer.
- * Uses the mdd_thread_info::mti_big_buf since it is generally large.
+ * Uses the mdd_thread_info::mti_link_buf since it is generally large.
  * A pointer to the buffer is stored in \a ldata::ld_buf.
  *
  * \retval 0 or error
@@ -181,9 +180,9 @@ int mdd_links_read(const struct lu_env *env,
 	return rc;
 }
 
-static int mdd_links_read_with_rec(const struct lu_env *env,
-				   struct mdd_object *mdd_obj,
-				   struct linkea_data *ldata)
+int mdd_links_read_with_rec(const struct lu_env *env,
+			    struct mdd_object *mdd_obj,
+			    struct linkea_data *ldata)
 {
 	int rc;
 
@@ -511,7 +510,7 @@ static inline int mdd_is_sticky(const struct lu_env *env,
 	if (cattr->la_uid == uc->uc_fsuid)
 		return 0;
 
-	return !md_capable(uc, CFS_CAP_FOWNER);
+	return !md_capable(uc, CAP_FOWNER);
 }
 
 static int mdd_may_delete_entry(const struct lu_env *env,
@@ -706,9 +705,8 @@ static int __mdd_index_insert(const struct lu_env *env, struct mdd_object *pobj,
 }
 
 /* delete named index, drop reference if isdir */
-static int __mdd_index_delete(const struct lu_env *env, struct mdd_object *pobj,
-			      const char *name, int is_dir,
-			      struct thandle *handle)
+int __mdd_index_delete(const struct lu_env *env, struct mdd_object *pobj,
+		       const char *name, int is_dir, struct thandle *handle)
 {
 	int rc;
 	ENTRY;
@@ -750,25 +748,17 @@ int mdd_declare_changelog_store(const struct lu_env *env,
 				const struct lu_name *sname,
 				struct thandle *handle)
 {
-	struct obd_device		*obd = mdd2obd_dev(mdd);
-	struct llog_ctxt		*ctxt;
-	struct llog_changelog_rec	*rec;
-	struct lu_buf			*buf;
-	struct thandle			*llog_th;
-	int				 reclen;
-	int				 rc;
+	struct obd_device *obd = mdd2obd_dev(mdd);
+	struct llog_ctxt *ctxt;
+	struct llog_rec_hdr rec_hdr;
+	struct thandle *llog_th;
+	int rc;
 
 	if (!mdd_changelog_enabled(env, mdd, type))
 		return 0;
 
-	reclen = mdd_llog_record_calc_size(env, tname, sname);
-	buf = lu_buf_check_and_alloc(&mdd_env_info(env)->mti_big_buf, reclen);
-	if (buf->lb_buf == NULL)
-		return -ENOMEM;
-
-	rec = buf->lb_buf;
-	rec->cr_hdr.lrh_len = reclen;
-	rec->cr_hdr.lrh_type = CHANGELOG_REC;
+	rec_hdr.lrh_len = mdd_llog_record_calc_size(env, tname, sname);
+	rec_hdr.lrh_type = CHANGELOG_REC;
 
 	ctxt = llog_get_context(obd, LLOG_CHANGELOG_ORIG_CTXT);
 	if (ctxt == NULL)
@@ -778,7 +768,7 @@ int mdd_declare_changelog_store(const struct lu_env *env,
 	if (IS_ERR(llog_th))
 		GOTO(out_put, rc = PTR_ERR(llog_th));
 
-	rc = llog_declare_add(env, ctxt->loc_handle, &rec->cr_hdr, llog_th);
+	rc = llog_declare_add(env, ctxt->loc_handle, &rec_hdr, llog_th);
 
 out_put:
 	llog_ctxt_put(ctxt);
@@ -1010,7 +1000,7 @@ int mdd_changelog_ns_store(const struct lu_env *env,
 	LASSERT(handle != NULL);
 
 	reclen = mdd_llog_record_calc_size(env, tname, sname);
-	buf = lu_buf_check_and_alloc(&mdd_env_info(env)->mti_big_buf, reclen);
+	buf = lu_buf_check_and_alloc(&mdd_env_info(env)->mti_chlg_buf, reclen);
 	if (buf->lb_buf == NULL)
 		RETURN(-ENOMEM);
 	rec = buf->lb_buf;
@@ -1254,7 +1244,7 @@ static inline int mdd_links_del(const struct lu_env *env,
 /** Read the link EA into a temp buffer.
  * Uses the name_buf since it is generally large.
  * \retval IS_ERR err
- * \retval ptr to \a lu_buf (always \a mti_big_buf)
+ * \retval ptr to \a lu_buf (always \a mti_link_buf)
  */
 struct lu_buf *mdd_links_get(const struct lu_env *env,
 			     struct mdd_object *mdd_obj)
@@ -1545,7 +1535,7 @@ int mdd_finish_unlink(const struct lu_env *env,
 		/* add new orphan and the object
 		 * will be deleted during mdd_close() */
 		obj->mod_flags |= DEAD_OBJ;
-		if (obj->mod_count) {
+		if (obj->mod_count || obj->mod_flags & REMOVED_OBJ) {
 			rc = mdd_orphan_insert(env, obj, th);
 			if (rc == 0)
 				CDEBUG(D_HA, "Object "DFID" is inserted into "
@@ -1582,12 +1572,14 @@ int mdd_finish_unlink(const struct lu_env *env,
 int mdd_unlink_sanity_check(const struct lu_env *env, struct mdd_object *pobj,
 			    const struct lu_attr *pattr,
 			    struct mdd_object *cobj,
-			    const struct lu_attr *cattr)
+			    const struct lu_attr *cattr,
+			    int check_empty)
 {
 	int rc;
 	ENTRY;
 
-	rc = mdd_may_delete(env, pobj, pattr, cobj, cattr, NULL, 1, 1);
+	rc = mdd_may_delete(env, pobj, pattr, cobj, cattr,
+			    NULL, 1, check_empty);
 
 	RETURN(rc);
 }
@@ -1679,6 +1671,263 @@ static bool mdd_hsm_archive_exists(const struct lu_env *env,
 		RETURN(true);
 	RETURN(false);
 }
+#if 0
+static int mdd_unpack_ent(struct lu_dirent *ent, __u16 *type)
+{
+	struct luda_type *lt;
+	int align = sizeof(*lt) - 1;
+	int len;
+
+	fid_le_to_cpu(&ent->lde_fid, &ent->lde_fid);
+	ent->lde_reclen = le16_to_cpu(ent->lde_reclen);
+	ent->lde_namelen = le16_to_cpu(ent->lde_namelen);
+	ent->lde_attrs = le32_to_cpu(ent->lde_attrs);
+
+	if (unlikely(!(ent->lde_attrs & LUDA_TYPE)))
+		return -EINVAL;
+
+	len = (ent->lde_namelen + align) & ~align;
+	lt = (struct luda_type *)(ent->lde_name + len);
+	*type = le16_to_cpu(lt->lt_type);
+
+	/*
+	 * Make sure the name is terminated with '\0'. The data (object type)
+	 * after ent::lde_name maybe broken, but we have stored such data in
+	 * the output parameter @type as above.
+	 */
+	ent->lde_name[ent->lde_namelen] = '\0';
+	return 0;
+}
+
+static int mdd_tree_remove_one(const struct lu_env *env, struct mdd_device *mdd,
+			       struct mdd_object *pobj,
+			       const struct lu_fid *fid,
+			       const char *name, bool is_dir)
+{
+	struct mdd_object *obj;
+	struct thandle *th;
+	int rc;
+
+	ENTRY;
+
+	obj = mdd_object_find(env, mdd, fid);
+	if (IS_ERR(obj))
+		RETURN(PTR_ERR(obj));
+
+	th = mdd_trans_create(env, mdd);
+	if (IS_ERR(th)) {
+		rc = PTR_ERR(th);
+		if (rc != -EINPROGRESS)
+			CERROR("%s: cannot get orphan thandle: rc = %d\n",
+			       mdd2obd_dev(mdd)->obd_name, rc);
+		GOTO(out_put, rc);
+	}
+
+	rc = mdo_declare_index_delete(env, pobj, name, th);
+	if (rc)
+		GOTO(out, rc);
+
+	if (!mdd_object_exists(obj))
+		GOTO(out, rc = -ENOENT);
+
+	rc = mdo_declare_ref_del(env, obj, th);
+	if (rc)
+		GOTO(out, rc);
+
+	if (S_ISDIR(mdd_object_type(obj))) {
+		rc = mdo_declare_ref_del(env, obj, th);
+		if (rc)
+			GOTO(out, rc);
+
+		rc = mdo_declare_ref_del(env, pobj, th);
+		if (rc)
+			GOTO(out, rc);
+	}
+
+	rc = mdo_declare_destroy(env, obj, th);
+	if (rc)
+		GOTO(out, rc);
+
+	rc = mdd_trans_start(env, mdd, th);
+	if (rc)
+		GOTO(out, rc);
+
+	mdd_write_lock(env, obj, DT_TGT_CHILD);
+	rc = __mdd_index_delete(env, pobj, name, is_dir, th);
+	/* FIXME: Should we remove object even dt_delete failed? */
+	if (rc)
+		GOTO(cleanup, rc);
+
+	rc = mdo_ref_del(env, obj, th);
+	if (rc)
+		GOTO(cleanup, rc);
+
+	if (is_dir)
+		/* unlink dot */
+		mdo_ref_del(env, obj, th);
+
+	rc = mdo_destroy(env, obj, th);
+cleanup:
+	mdd_write_unlock(env, obj);
+out:
+	mdd_trans_stop(env, mdd, 0, th);
+out_put:
+	mdd_object_put(env, obj);
+	RETURN(rc);
+}
+
+static int mdd_tree_remove2(const struct lu_env *env, struct md_object *pobj,
+			   struct md_object *cobj, const struct lu_name *lname,
+			   struct md_attr *ma)
+{
+	struct mdd_object *mdd_obj;
+	struct mdd_thread_info *info = mdd_env_info(env);
+	struct mdd_object *mdd_pobj = md2mdd_obj(pobj);
+	struct mdd_object *mdd_cobj = md2mdd_obj(cobj);
+	struct mdd_device *mdd = mdo2mdd(pobj);
+	struct lu_dirent *ent = &mdd_env_info(env)->mti_ent;
+	struct linkea_data *ldata = &info->mti_link_data;
+	const struct dt_it_ops *iops;
+	const struct lu_fid *root;
+	struct lu_fid fid;
+	struct dt_object *obj;
+	struct dt_it *it;
+	__u16 type;
+	int rc;
+
+	ENTRY;
+
+	CDEBUG(D_INODE,
+	       "Subtree removal for directory '%s'\n", lname->ln_name);
+	LASSERT(ma->ma_attr_flags & MDS_SUBTREE_REMOVAL);
+	root = mdd_object_fid(mdd_cobj);
+	fid = *root;
+	mdd_obj = mdd_cobj;
+repeat:
+	obj = mdd_object_child(mdd_obj);
+	if (!dt_try_as_dir(env, obj))
+		RETURN(-ENOTDIR);
+
+	iops = &obj->do_index_ops->dio_it;
+	it = iops->init(env, obj, LUDA_64BITHASH | LUDA_TYPE);
+	if (IS_ERR(it)) {
+		rc = PTR_ERR(it);
+		GOTO(out, rc);
+	}
+
+	rc = iops->load(env, it, 0);
+	if (rc < 0)
+		GOTO(out_put, rc);
+	if (rc == 0) {
+		CERROR("%s: loading iterator to remove the subtree, rc = 0\n",
+		       mdd2obd_dev(mdd)->obd_name);
+		rc = iops->next(env, it);
+	}
+
+	do {
+		rc = iops->rec(env, it, (struct dt_rec *)ent,
+			       LUDA_64BITHASH | LUDA_TYPE);
+		if (rc == 0)
+			rc = mdd_unpack_ent(ent, &type);
+		if (rc) {
+			CERROR("%s: failed to iterate backend: rc = %d\n",
+			       mdd2obd_dev(mdd)->obd_name, rc);
+			goto next;
+		}
+
+		/* skip dot and dotdot entries */
+		if (name_is_dot_or_dotdot(ent->lde_name, ent->lde_namelen))
+			goto next;
+
+		if (!fid_seq_in_fldb(fid_seq(&ent->lde_fid)))
+			goto next;
+
+		if (S_ISDIR(type)) {
+			iops->put(env, it);
+			iops->fini(env, it);
+
+			if (!lu_fid_eq(root, &fid))
+				mdd_object_put(env, mdd_obj);
+
+			fid = ent->lde_fid;
+			CDEBUG(D_INODE, "Sink to next level '%s' "DFID"\n",
+			       ent->lde_name, PFID(&fid));
+			mdd_obj = mdd_object_find(env, mdd, &fid);
+			if (IS_ERR(mdd_obj))
+				RETURN(PTR_ERR(mdd_obj));
+
+			/* Sink down to next level of the directory. */
+			GOTO(repeat, rc);
+		}
+
+		CDEBUG(D_INODE, "Removing entry: '%s' "DFID"\n",
+		       ent->lde_name, PFID(&ent->lde_fid));
+		rc = mdd_tree_remove_one(env, mdd, mdd_obj, &ent->lde_fid,
+					 ent->lde_name, S_ISDIR(type));
+		if (rc)
+			CERROR("%s: failed to remove '%s': rc = %d\n",
+			       mdd2obd_dev(mdd)->obd_name, ent->lde_name, rc);
+next:
+		rc = iops->next(env, it);
+	} while (rc == 0);
+
+out_put:
+	iops->put(env, it);
+	iops->fini(env, it);
+
+	/* Finish to iterator over a children subtree. */
+	if (!lu_fid_eq(root, &fid)) {
+		struct mdd_object *parent;
+		struct lu_name name;
+		struct lu_fid pfid;
+
+		rc = mdd_links_read_with_rec(env, mdd_obj, ldata);
+		mdd_object_put(env, mdd_obj);
+		if (rc)
+			GOTO(out, rc);
+
+		LASSERT(ldata->ld_leh != NULL);
+		/* Directory should only have one parent. */
+		if (ldata->ld_leh->leh_reccount > 1)
+			GOTO(out, rc = -EINVAL);
+
+		ldata->ld_lee = (struct link_ea_entry *)(ldata->ld_leh + 1);
+		linkea_entry_unpack(ldata->ld_lee, &ldata->ld_reclen,
+				    &name, &pfid);
+		if (lu_fid_eq(root, &pfid)) {
+			CDEBUG(D_INODE, "Top level '%s':"DFID" root="DFID"\n",
+			       name.ln_name, PFID(&fid), PFID(&pfid));
+			rc = mdd_tree_remove_one(env, mdd, mdd_cobj, &fid,
+						 name.ln_name, true);
+			if (rc)
+				GOTO(out, rc);
+
+			mdd_obj = mdd_cobj;
+			fid = pfid;
+		} else {
+			parent = mdd_object_find(env, mdd, &pfid);
+			if (IS_ERR(parent))
+				RETURN(PTR_ERR(parent));
+
+			CDEBUG(D_INODE, "Iter over '%s':"DFID" root="DFID"\n",
+			       name.ln_name, PFID(&fid), PFID(root));
+			rc = mdd_tree_remove_one(env, mdd, parent, &fid,
+						 name.ln_name, true);
+			if (rc)
+				GOTO(out, rc);
+
+			mdd_obj = parent;
+			fid = pfid;
+		}
+		GOTO(repeat, rc);
+	}
+
+	rc = mdd_tree_remove_one(env, mdd, mdd_pobj, root,
+				 lname->ln_name, true);
+out:
+	RETURN(rc);
+}
+#endif
 
 /**
  * Delete name entry and the object.
@@ -1702,6 +1951,7 @@ static int mdd_unlink(const struct lu_env *env, struct md_object *pobj,
 	struct mdd_device *mdd = mdo2mdd(pobj);
 	struct thandle    *handle;
 	int rc, is_dir = 0, cl_flags = 0;
+	int tree_remove = !!(ma->ma_attr_flags & MDS_SUBTREE_REMOVAL);
 	ENTRY;
 
 	/* let shutdown to start */
@@ -1732,9 +1982,27 @@ static int mdd_unlink(const struct lu_env *env, struct md_object *pobj,
 			cl_flags |= CLF_UNLINK_HSM_EXISTS;
 	}
 
-	rc = mdd_unlink_sanity_check(env, mdd_pobj, pattr, mdd_cobj, cattr);
+	rc = mdd_unlink_sanity_check(env, mdd_pobj, pattr, mdd_cobj,
+				     cattr, tree_remove == 0);
 	if (rc)
                 RETURN(rc);
+
+	if (mdd_cobj && is_dir) {
+		rc = mdd_dir_is_empty(env, mdd_cobj);
+		if (rc == -ENOTEMPTY && tree_remove) {
+			if (mdd->mdd_async_tree_remove) {
+				mdd_cobj->mod_flags |= REMOVED_OBJ;
+				rc = 0;
+			} else {
+				RETURN(mdd_tree_remove(env, mdd_pobj,
+						       mdd_cobj, name));
+				//RETURN(mdd_tree_remove2(env, pobj, cobj, lname, ma));
+			}
+		}
+
+		if (rc)
+			RETURN(rc);
+	}
 
 	handle = mdd_trans_create(env, mdd);
 	if (IS_ERR(handle))
@@ -1792,7 +2060,7 @@ static int mdd_unlink(const struct lu_env *env, struct md_object *pobj,
 
 	/* Enough for only unlink the entry */
 	if (unlikely(mdd_cobj == NULL))
-		GOTO(stop, rc);
+		GOTO(cleanup, rc);
 
 	if (cattr->la_nlink > 0 || mdd_cobj->mod_count > 0) {
 		/* update ctime of an unlinked file only if it is still
@@ -1843,6 +2111,10 @@ cleanup:
 
 stop:
 	rc = mdd_trans_stop(env, mdd, rc, handle);
+
+	if (mdd_cobj != NULL && mdd_cobj->mod_flags & REMOVED_OBJ &&
+	    mdd_cobj->mod_flags & DEAD_OBJ)
+		mdd_remove_item_add(mdd_cobj);
 
 	return rc;
 }
@@ -2092,7 +2364,7 @@ static int mdd_create_sanity_check(const struct lu_env *env,
 			   !lustre_in_group_p(uc,
 					      (cattr->la_valid & LA_GID) ?
 					      cattr->la_gid : pattr->la_gid) &&
-			   !md_capable(uc, CFS_CAP_FSETID)) {
+			   !md_capable(uc, CAP_FSETID)) {
 			cattr->la_mode &= ~S_ISGID;
 			cattr->la_valid |= LA_MODE;
 		}
@@ -2150,6 +2422,11 @@ static int mdd_declare_create_object(const struct lu_env *env,
 	const struct lu_buf *buf;
 	int rc;
 
+#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+	/* ldiskfs OSD needs this information for credit allocation */
+	if (def_acl_buf)
+		hint->dah_acl_len = def_acl_buf->lb_len;
+#endif
 	rc = mdd_declare_create_object_internal(env, p, c, attr, handle, spec,
 						hint);
 	if (rc)
@@ -2303,6 +2580,7 @@ static int mdd_acl_init(const struct lu_env *env, struct mdd_object *pobj,
 			struct lu_buf *acl_buf)
 {
 	int	rc;
+
 	ENTRY;
 
 	if (S_ISLNK(la->la_mode)) {
@@ -2316,9 +2594,12 @@ static int mdd_acl_init(const struct lu_env *env, struct mdd_object *pobj,
 			   XATTR_NAME_ACL_DEFAULT);
 	mdd_read_unlock(env, pobj);
 	if (rc > 0) {
+		/* ACL buffer size is not enough, need realloc */
+		if (rc > acl_buf->lb_len)
+			RETURN(-ERANGE);
+
 		/* If there are default ACL, fix mode/ACL by default ACL */
 		def_acl_buf->lb_len = rc;
-		LASSERT(def_acl_buf->lb_len <= acl_buf->lb_len);
 		memcpy(acl_buf->lb_buf, def_acl_buf->lb_buf, rc);
 		acl_buf->lb_len = rc;
 		rc = __mdd_fix_mode_acl(env, acl_buf, &la->la_mode);
@@ -2572,22 +2853,23 @@ int mdd_create(const struct lu_env *env, struct md_object *pobj,
 		      const struct lu_name *lname, struct md_object *child,
 		      struct md_op_spec *spec, struct md_attr *ma)
 {
-	struct mdd_thread_info	*info = mdd_env_info(env);
-	struct lu_attr		*la = &info->mti_la_for_fix;
-	struct mdd_object	*mdd_pobj = md2mdd_obj(pobj);
-	struct mdd_object	*son = md2mdd_obj(child);
-	struct mdd_device	*mdd = mdo2mdd(pobj);
-	struct lu_attr		*attr = &ma->ma_attr;
-	struct thandle		*handle;
-	struct lu_attr		*pattr = &info->mti_pattr;
-	struct lu_buf		acl_buf;
-	struct lu_buf		def_acl_buf;
-	struct lu_buf		hsm_buf;
-	struct linkea_data	*ldata = &info->mti_link_data;
-	const char		*name = lname->ln_name;
+	struct mdd_thread_info *info = mdd_env_info(env);
+	struct lu_attr *la = &info->mti_la_for_fix;
+	struct mdd_object *mdd_pobj = md2mdd_obj(pobj);
+	struct mdd_object *son = md2mdd_obj(child);
+	struct mdd_device *mdd = mdo2mdd(pobj);
+	struct lu_attr *attr = &ma->ma_attr;
+	struct thandle *handle;
+	struct lu_attr *pattr = &info->mti_pattr;
+	struct lu_buf acl_buf;
+	struct lu_buf def_acl_buf;
+	struct lu_buf hsm_buf;
+	struct linkea_data *ldata = &info->mti_link_data;
+	const char *name = lname->ln_name;
 	struct dt_allocation_hint *hint = &mdd_env_info(env)->mti_hint;
-	int			 rc;
-	int			 rc2;
+	int acl_size = LUSTRE_POSIX_ACL_MAX_SIZE_OLD;
+	int rc, rc2;
+
 	ENTRY;
 
 	rc = mdd_la_get(env, mdd_pobj, pattr);
@@ -2606,13 +2888,23 @@ int mdd_create(const struct lu_env *env, struct md_object *pobj,
 	if (IS_ERR(handle))
 		GOTO(out_free, rc = PTR_ERR(handle));
 
-	lu_buf_check_and_alloc(&info->mti_xattr_buf,
-			min_t(unsigned int, mdd->mdd_dt_conf.ddp_max_ea_size,
-			      XATTR_SIZE_MAX));
-	acl_buf = info->mti_xattr_buf;
-	def_acl_buf.lb_buf = info->mti_key;
-	def_acl_buf.lb_len = sizeof(info->mti_key);
+use_bigger_buffer:
+	acl_buf = *lu_buf_check_and_alloc(&info->mti_xattr_buf, acl_size);
+	if (!acl_buf.lb_buf)
+		GOTO(out_stop, rc = -ENOMEM);
+
+	def_acl_buf = *lu_buf_check_and_alloc(&info->mti_big_buf, acl_size);
+	if (!def_acl_buf.lb_buf)
+		GOTO(out_stop, rc = -ENOMEM);
+
 	rc = mdd_acl_init(env, mdd_pobj, attr, &def_acl_buf, &acl_buf);
+	if (unlikely(rc == -ERANGE &&
+		     acl_size == LUSTRE_POSIX_ACL_MAX_SIZE_OLD)) {
+		/* use maximum-sized xattr buffer for too-big default ACL */
+		acl_size = min_t(unsigned int, mdd->mdd_dt_conf.ddp_max_ea_size,
+				 XATTR_SIZE_MAX);
+		goto use_bigger_buffer;
+	}
 	if (rc < 0)
 		GOTO(out_stop, rc);
 
@@ -3309,8 +3601,12 @@ static int mdd_migrate_sanity_check(const struct lu_env *env,
 	if (mdd_object_exists(tobj))
 		RETURN(-EEXIST);
 
-	rc = mdd_rename_sanity_check(env, spobj, spattr, tpobj, tpattr, sobj,
-				     attr, NULL, NULL);
+	rc = mdd_may_delete(env, spobj, spattr, sobj, attr, NULL, 1, 0);
+	if (rc)
+		RETURN(rc);
+
+	rc = mdd_may_create(env, tpobj, tpattr, NULL, true);
+
 	RETURN(rc);
 }
 
@@ -4064,11 +4360,6 @@ static int mdd_migrate_cmd_check(struct mdd_device *mdd,
 {
 	__u32 lum_stripe_count = lum->lum_stripe_count;
 	__u32 lmv_hash_type = lmv->lmv_hash_type;
-	char *mdt_hash_name[] = { "none",
-				  LMV_HASH_NAME_ALL_CHARS,
-				  LMV_HASH_NAME_FNV_1A_64,
-				  LMV_HASH_NAME_CRUSH,
-	};
 
 	if (!lmv_is_sane(lmv))
 		return -EBADF;

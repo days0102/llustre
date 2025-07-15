@@ -27,12 +27,10 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #define DEBUG_SUBSYSTEM S_LNET
 
-#include <linux/kallsyms.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
@@ -48,6 +46,7 @@
 
 #include <libcfs/linux/linux-time.h>
 #include <libcfs/linux/linux-wait.h>
+#include <libcfs/linux/linux-misc.h>
 
 #ifndef HAVE_KTIME_GET_TS64
 void ktime_get_ts64(struct timespec64 *ts)
@@ -109,7 +108,9 @@ static int (*cfs_apply_workqueue_attrs_t)(struct workqueue_struct *wq,
 int cfs_apply_workqueue_attrs(struct workqueue_struct *wq,
 			      const struct workqueue_attrs *attrs)
 {
-	return cfs_apply_workqueue_attrs_t(wq, attrs);
+	if (cfs_apply_workqueue_attrs_t)
+		return cfs_apply_workqueue_attrs_t(wq, attrs);
+	return 0;
 }
 EXPORT_SYMBOL_GPL(cfs_apply_workqueue_attrs);
 
@@ -123,10 +124,10 @@ void __init cfs_arch_init(void)
 	wait_bit_init();
 #endif
 	cfs_apply_workqueue_attrs_t =
-		(void *)kallsyms_lookup_name("apply_workqueue_attrs");
+		(void *)cfs_kallsyms_lookup_name("apply_workqueue_attrs");
 #ifndef HAVE_XARRAY_SUPPORT
 	radix_tree_node_cachep =
-		(void *)kallsyms_lookup_name("radix_tree_node_cachep");
+		(void *)cfs_kallsyms_lookup_name("radix_tree_node_cachep");
 #endif
 }
 

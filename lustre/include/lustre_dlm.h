@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 /** \defgroup LDLM Lustre Distributed Lock Manager
@@ -783,13 +782,10 @@ struct ldlm_lock {
 	 */
 	struct portals_handle	l_handle;
 	/**
-	 * Internal spinlock protects l_resource.  We should hold this lock
-	 * first before taking res_lock.
-	 */
-	spinlock_t		l_lock;
-	/**
 	 * Pointer to actual resource this lock is in.
-	 * ldlm_lock_change_resource() can change this.
+	 * ldlm_lock_change_resource() can change this on the client.
+	 * When this is possible, rcu must be used to stablise
+	 * the resource while we lock and check it hasn't been changed.
 	 */
 	struct ldlm_resource	*l_resource;
 	/**
@@ -1061,9 +1057,13 @@ struct ldlm_resource {
 
 	/**
 	 * List item for list in namespace hash.
-	 * protected by ns_lock
+	 * protected by ns_lock.
+	 * Shared with linkage for RCU-delayed free.
 	 */
-	struct hlist_node	lr_hash;
+	union {
+		struct hlist_node	lr_hash;
+		struct rcu_head		lr_rcu;
+	};
 
 	/** Reference count for this resource */
 	atomic_t		lr_refcount;
@@ -1222,7 +1222,7 @@ static inline int ldlm_lvbo_fill(struct ldlm_lock *lock, void *buf, int *len)
 		/* init lvb now if not already */
 		rc = ldlm_lvbo_init(lock->l_resource);
 		if (rc < 0) {
-			CERROR("lock %p: delayed lvb init failed (rc %d)",
+			CERROR("lock %p: delayed lvb init failed (rc %d)\n",
 			       lock, rc);
 			return rc;
 		}
@@ -1422,6 +1422,8 @@ struct ldlm_callback_suite {
  */
 int ldlm_server_blocking_ast(struct ldlm_lock *, struct ldlm_lock_desc *,
 			     void *data, int flag);
+int tgt_blocking_ast(struct ldlm_lock *lock, struct ldlm_lock_desc *desc,
+		     void *data, int flag);
 int ldlm_server_completion_ast(struct ldlm_lock *lock, __u64 flags, void *data);
 int ldlm_server_glimpse_ast(struct ldlm_lock *lock, void *data);
 int ldlm_glimpse_locks(struct ldlm_resource *res,
@@ -1433,9 +1435,9 @@ int ldlm_glimpse_locks(struct ldlm_resource *res,
  * MDT or OST to pass through LDLM requests to LDLM for handling
  * @{
  */
-int ldlm_handle_enqueue0(struct ldlm_namespace *ns, struct ptlrpc_request *req,
-			 const struct ldlm_request *dlm_req,
-			 const struct ldlm_callback_suite *cbs);
+int ldlm_handle_enqueue(struct ldlm_namespace *ns, struct req_capsule *pill,
+			const struct ldlm_request *dlm_req,
+			const struct ldlm_callback_suite *cbs);
 int ldlm_handle_convert0(struct ptlrpc_request *req,
 			 const struct ldlm_request *dlm_req);
 int ldlm_handle_cancel(struct ptlrpc_request *req);
@@ -1726,10 +1728,10 @@ int ldlm_prep_elc_req(struct obd_export *exp, struct ptlrpc_request *req,
 		      struct list_head *cancels, int count);
 
 struct ptlrpc_request *ldlm_enqueue_pack(struct obd_export *exp, int lvb_len);
-int ldlm_handle_enqueue0(struct ldlm_namespace *ns, struct ptlrpc_request *req,
-			 const struct ldlm_request *dlm_req,
-			 const struct ldlm_callback_suite *cbs);
-int ldlm_cli_enqueue_fini(struct obd_export *exp, struct ptlrpc_request *req,
+int ldlm_handle_enqueue(struct ldlm_namespace *ns, struct req_capsule *pill,
+			const struct ldlm_request *dlm_req,
+			const struct ldlm_callback_suite *cbs);
+int ldlm_cli_enqueue_fini(struct obd_export *exp, struct req_capsule *pill,
 			  struct ldlm_enqueue_info *einfo, __u8 with_policy,
 			  __u64 *flags, void *lvb, __u32 lvb_len,
 			  const struct lustre_handle *lockh, int rc);
@@ -1744,6 +1746,14 @@ int ldlm_cli_enqueue_local(const struct lu_env *env,
 			   void *data, __u32 lvb_len, enum lvb_type lvb_type,
 			   const __u64 *client_cookie,
 			   struct lustre_handle *lockh);
+int ldlm_cli_lock_create_pack(struct obd_export *exp,
+			      struct ldlm_request *dlmreq,
+			      struct ldlm_enqueue_info *einfo,
+			      const struct ldlm_res_id *res_id,
+			      union ldlm_policy_data const *policy,
+			      __u64 *flags, void *lvb, __u32 lvb_len,
+			      enum lvb_type lvb_type,
+			      struct lustre_handle *lockh);
 int ldlm_cli_convert_req(struct ldlm_lock *lock, __u32 *flags, __u64 new_bits);
 int ldlm_cli_convert(struct ldlm_lock *lock,
 		     enum ldlm_cancel_flags cancel_flags);

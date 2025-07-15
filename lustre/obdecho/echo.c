@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/obdecho/echo.c
  *
@@ -39,7 +38,6 @@
 
 #include <obd_support.h>
 #include <obd_class.h>
-#include <lustre_debug.h>
 #include <lustre_dlm.h>
 #include <lprocfs_status.h>
 
@@ -714,7 +712,7 @@ static struct tgt_opc_slice esd_common_slice[] = {
  * this device is just serving incoming requests immediately
  * without building a stack of lu_devices.
  */
-static struct lu_device_operations echo_srv_lu_ops = { 0 };
+static const struct lu_device_operations echo_srv_lu_ops = { 0 };
 
 /**
  * Initialize Echo Server device with parameters in the config log \a cfg.
@@ -768,8 +766,13 @@ static int echo_srv_init0(const struct lu_env *env,
 						LDLM_NAMESPACE_SERVER,
 						LDLM_NAMESPACE_MODEST,
 						LDLM_NS_TYPE_OST);
-	if (!obd->obd_namespace)
-		RETURN(-ENOMEM);
+	if (IS_ERR(obd->obd_namespace)) {
+		rc = PTR_ERR(obd->obd_namespace);
+		CERROR("%s: unable to create server namespace: rc = %d\n",
+		       obd->obd_name, rc);
+		obd->obd_namespace = NULL;
+		RETURN(rc);
+	}
 
 	obd->obd_vars = lprocfs_echo_obd_vars;
 	if (!lprocfs_obd_setup(obd, true) &&

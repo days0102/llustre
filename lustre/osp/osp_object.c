@@ -427,7 +427,7 @@ static int osp_get_attr_from_reply(const struct lu_env *env,
 		return -EPROTO;
 
 	LASSERT(req != NULL);
-	if (ptlrpc_req_need_swab(req))
+	if (req_capsule_req_need_swab(&req->rq_pill))
 		lustre_swab_obdo(wobdo);
 
 	lustre_get_wire_obdo(NULL, lobdo, wobdo);
@@ -589,7 +589,7 @@ int osp_attr_get(const struct lu_env *env, struct dt_object *dt,
 			if (cache)
 				obj->opo_non_exist = 1;
 		} else {
-			CERROR("%s:osp_attr_get update error "DFID": rc = %d\n",
+			CERROR("%s: osp_attr_get update error "DFID": rc = %d\n",
 			       dev->dd_lu_dev.ld_obd->obd_name,
 			       PFID(lu_object_fid(&dt->do_lu)), rc);
 		}
@@ -1366,6 +1366,17 @@ int osp_invalidate(const struct lu_env *env, struct dt_object *dt)
 	RETURN(0);
 }
 
+bool osp_check_stale(struct dt_object *dt)
+{
+	struct osp_object *obj = dt2osp_obj(dt);
+
+	if (is_ost_obj(&dt->do_lu) && obj->opo_non_exist)
+		return true;
+
+	return obj->opo_stale;
+}
+
+
 /**
  * Implement OSP layer dt_object_operations::do_declare_create() interface.
  *
@@ -1446,7 +1457,7 @@ static int osp_declare_create(const struct lu_env *env, struct dt_object *dt,
 	 * in declaration we need to reserve object so that we don't block
 	 * awaiting precreation RPC to complete
 	 */
-	rc = osp_precreate_reserve(env, d);
+	rc = osp_precreate_reserve(env, d, !hint || hint->dah_can_block);
 	/*
 	 * we also need to declare update to local "last used id" file for
 	 * recovery if object isn't used for a reason, we need to release
@@ -1879,7 +1890,7 @@ static int osp_it_fetch(const struct lu_env *env, struct osp_it *it)
 
 	it->ooi_rec_size = ii->ii_recsize;
 	it->ooi_valid_npages = npages;
-	if (ptlrpc_rep_need_swab(req))
+	if (req_capsule_rep_need_swab(&req->rq_pill))
 		it->ooi_swab = 1;
 
 	it->ooi_next = ii->ii_hash_end;
@@ -2202,7 +2213,7 @@ static int osp_index_try(const struct lu_env *env,
 	return 0;
 }
 
-static struct dt_object_operations osp_obj_ops = {
+static const struct dt_object_operations osp_obj_ops = {
 	.do_declare_attr_get	= osp_declare_attr_get,
 	.do_attr_get		= osp_attr_get,
 	.do_declare_attr_set	= osp_declare_attr_set,
@@ -2378,7 +2389,7 @@ static int osp_object_invariant(const struct lu_object *o)
 	LBUG();
 }
 
-struct lu_object_operations osp_lu_obj_ops = {
+const struct lu_object_operations osp_lu_obj_ops = {
 	.loo_object_init	= osp_object_init,
 	.loo_object_free	= osp_object_free,
 	.loo_object_release	= osp_object_release,

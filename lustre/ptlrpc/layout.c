@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/ptlrpc/layout.c
  *
@@ -47,7 +46,6 @@
 #include <linux/module.h>
 
 #include <llog_swab.h>
-#include <lustre_debug.h>
 #include <lustre_swab.h>
 #include <obd.h>
 #include <obd_support.h>
@@ -545,6 +543,27 @@ static const struct req_msg_field *ldlm_intent_getxattr_server[] = {
 	&RMF_EAVALS_LENS
 };
 
+static const struct req_msg_field *ldlm_intent_setattr_client[] = {
+	&RMF_PTLRPC_BODY,
+	&RMF_DLM_REQ,
+	&RMF_LDLM_INTENT,
+	&RMF_REC_REINT,
+	&RMF_CAPA1,
+	&RMF_MDT_EPOCH,
+	&RMF_EADATA,
+	&RMF_LOGCOOKIES,
+};
+
+static const struct req_msg_field *ldlm_intent_setattr_server[] = {
+	&RMF_PTLRPC_BODY,
+	&RMF_DLM_REP,
+	&RMF_MDT_BODY,
+	&RMF_MDT_MD,
+	&RMF_ACL,
+	&RMF_CAPA1,
+	&RMF_CAPA2
+};
+
 static const struct req_msg_field *mds_get_root_client[] = {
 	&RMF_PTLRPC_BODY,
 	&RMF_MDT_BODY,
@@ -584,15 +603,22 @@ static const struct req_msg_field *mds_setattr_server[] = {
         &RMF_CAPA2
 };
 
-static const struct req_msg_field *mds_update_client[] = {
+static const struct req_msg_field *mds_create_server[] = {
 	&RMF_PTLRPC_BODY,
-	&RMF_OUT_UPDATE_HEADER,
-	&RMF_OUT_UPDATE_BUF,
+	&RMF_MDT_BODY,
+	&RMF_MDT_MD,
+	&RMF_CAPA1,
 };
 
-static const struct req_msg_field *mds_update_server[] = {
+static const struct req_msg_field *mds_batch_client[] = {
 	&RMF_PTLRPC_BODY,
-	&RMF_OUT_UPDATE_REPLY,
+	&RMF_BUT_HEADER,
+	&RMF_BUT_BUF,
+};
+
+static const struct req_msg_field *mds_batch_server[] = {
+	&RMF_PTLRPC_BODY,
+	&RMF_BUT_REPLY,
 };
 
 static const struct req_msg_field *llog_origin_handle_create_client[] = {
@@ -766,6 +792,77 @@ static const struct req_msg_field *obd_lfsck_reply[] = {
 	&RMF_LFSCK_REPLY,
 };
 
+static const struct req_msg_field *mds_batch_getattr_client[] = {
+	&RMF_DLM_REQ,
+	&RMF_LDLM_INTENT,
+	&RMF_MDT_BODY,     /* coincides with mds_getattr_name_client[] */
+	&RMF_CAPA1,
+	&RMF_NAME,
+	&RMF_FILE_SECCTX_NAME
+};
+
+static const struct req_msg_field *mds_batch_getattr_server[] = {
+	&RMF_DLM_REP,
+	&RMF_MDT_BODY,
+	&RMF_MDT_MD,
+	&RMF_ACL,
+	&RMF_CAPA1,
+	&RMF_FILE_SECCTX,
+	&RMF_DEFAULT_MDT_MD,
+	&RMF_FILE_ENCCTX,
+};
+
+static const struct req_msg_field *create_exlock_client[] = {
+	&RMF_DLM_REQ,
+	&RMF_REC_REINT,
+	&RMF_NAME,
+	&RMF_EADATA,
+	&RMF_FILE_SECCTX_NAME,
+	&RMF_FILE_SECCTX,
+	&RMF_FILE_ENCCTX,
+};
+
+static const struct req_msg_field *create_exlock_server[] = {
+	&RMF_DLM_REP,
+	&RMF_MDT_BODY,
+	&RMF_MDT_MD,
+};
+
+static const struct req_msg_field *create_lockless_client[] = {
+	&RMF_REC_REINT,
+	&RMF_NAME,
+	&RMF_EADATA,
+	&RMF_FILE_SECCTX_NAME,
+	&RMF_FILE_SECCTX,
+	&RMF_FILE_ENCCTX,
+};
+
+static const struct req_msg_field *create_lockless_server[] = {
+	&RMF_MDT_BODY,
+	&RMF_MDT_MD,
+};
+
+static const struct req_msg_field *setattr_exlock_client[] = {
+	&RMF_DLM_REQ,
+	&RMF_REC_REINT,
+};
+
+static const struct req_msg_field *setattr_exlock_server[] = {
+	&RMF_DLM_REP,
+};
+
+static const struct req_msg_field *setattr_lockless_client[] = {
+	&RMF_REC_REINT,
+};
+
+static const struct req_msg_field *exlock_only_client[] = {
+	&RMF_DLM_REQ,
+};
+
+static const struct req_msg_field *exlock_only_server[] = {
+	&RMF_DLM_REP,
+};
+
 static struct req_format *req_formats[] = {
 	&RQF_OBD_PING,
 	&RQF_OBD_SET_INFO,
@@ -798,6 +895,7 @@ static struct req_format *req_formats[] = {
 	&RQF_MDS_REINT_CREATE_ACL,
 	&RQF_MDS_REINT_CREATE_SLAVE,
 	&RQF_MDS_REINT_CREATE_SYM,
+	&RQF_MDS_REINT_CREATE_REG,
 	&RQF_MDS_REINT_OPEN,
 	&RQF_MDS_REINT_UNLINK,
 	&RQF_MDS_REINT_LINK,
@@ -816,7 +914,9 @@ static struct req_format *req_formats[] = {
 	&RQF_MDS_HSM_REQUEST,
 	&RQF_MDS_SWAP_LAYOUTS,
 	&RQF_MDS_RMFID,
+#ifdef HAVE_SERVER_SUPPORT
 	&RQF_OUT_UPDATE,
+#endif
 	&RQF_OST_CONNECT,
 	&RQF_OST_DISCONNECT,
 	&RQF_OST_QUOTACTL,
@@ -855,6 +955,7 @@ static struct req_format *req_formats[] = {
 	&RQF_LDLM_INTENT_CREATE,
 	&RQF_LDLM_INTENT_GETXATTR,
 	&RQF_LDLM_INTENT_QUOTA,
+	&RQF_LDLM_INTENT_SETATTR,
 	&RQF_QUOTA_DQACQ,
 	&RQF_LLOG_ORIGIN_HANDLE_CREATE,
 	&RQF_LLOG_ORIGIN_HANDLE_NEXT_BLOCK,
@@ -863,6 +964,13 @@ static struct req_format *req_formats[] = {
 	&RQF_CONNECT,
 	&RQF_LFSCK_NOTIFY,
 	&RQF_LFSCK_QUERY,
+	&RQF_BUT_GETATTR,
+	&RQF_BUT_CREATE_EXLOCK,
+	&RQF_BUT_CREATE_LOCKLESS,
+	&RQF_BUT_SETATTR_EXLOCK,
+	&RQF_BUT_SETATTR_LOCKLESS,
+	&RQF_BUT_EXLOCK_ONLY,
+	&RQF_MDS_BATCH,
 };
 
 struct req_msg_field {
@@ -1286,15 +1394,6 @@ struct req_msg_field RMF_MDS_HSM_REQUEST =
 		    lustre_swab_hsm_request, NULL);
 EXPORT_SYMBOL(RMF_MDS_HSM_REQUEST);
 
-struct req_msg_field RMF_OUT_UPDATE = DEFINE_MSGFL("object_update", 0, -1,
-				lustre_swab_object_update_request, NULL);
-EXPORT_SYMBOL(RMF_OUT_UPDATE);
-
-struct req_msg_field RMF_OUT_UPDATE_REPLY =
-			DEFINE_MSGFL("object_update_reply", 0, -1,
-				    lustre_swab_object_update_reply, NULL);
-EXPORT_SYMBOL(RMF_OUT_UPDATE_REPLY);
-
 struct req_msg_field RMF_SWAP_LAYOUTS =
 	DEFINE_MSGF("swap_layouts", 0, sizeof(struct  mdc_swap_layouts),
 		    lustre_swab_swap_layouts, NULL);
@@ -1322,14 +1421,19 @@ struct req_msg_field RMF_OST_LADVISE =
 		    lustre_swab_ladvise, NULL);
 EXPORT_SYMBOL(RMF_OST_LADVISE);
 
-struct req_msg_field RMF_OUT_UPDATE_HEADER = DEFINE_MSGF("out_update_header", 0,
-				-1, lustre_swab_out_update_header, NULL);
-EXPORT_SYMBOL(RMF_OUT_UPDATE_HEADER);
+struct req_msg_field RMF_BUT_REPLY =
+			DEFINE_MSGF("batch_update_reply", 0, -1,
+				    lustre_swab_batch_update_reply, NULL);
+EXPORT_SYMBOL(RMF_BUT_REPLY);
 
-struct req_msg_field RMF_OUT_UPDATE_BUF = DEFINE_MSGF("update_buf",
-			RMF_F_STRUCT_ARRAY, sizeof(struct out_update_buffer),
-			lustre_swab_out_update_buffer, NULL);
-EXPORT_SYMBOL(RMF_OUT_UPDATE_BUF);
+struct req_msg_field RMF_BUT_HEADER = DEFINE_MSGF("but_update_header", 0,
+				-1, lustre_swab_but_update_header, NULL);
+EXPORT_SYMBOL(RMF_BUT_HEADER);
+
+struct req_msg_field RMF_BUT_BUF = DEFINE_MSGF("but_update_buf",
+			RMF_F_STRUCT_ARRAY, sizeof(struct but_update_buffer),
+			lustre_swab_but_update_buffer, NULL);
+EXPORT_SYMBOL(RMF_BUT_BUF);
 
 /*
  * Request formats.
@@ -1499,6 +1603,11 @@ struct req_format RQF_MDS_REINT_CREATE_SYM =
                         mds_reint_create_sym_client, mdt_body_capa);
 EXPORT_SYMBOL(RQF_MDS_REINT_CREATE_SYM);
 
+struct req_format RQF_MDS_REINT_CREATE_REG =
+	DEFINE_REQ_FMT0("MDS_REINT_CREATE_REG",
+			mds_reint_create_acl_client, mds_create_server);
+EXPORT_SYMBOL(RQF_MDS_REINT_CREATE_REG);
+
 struct req_format RQF_MDS_REINT_OPEN =
         DEFINE_REQ_FMT0("MDS_REINT_OPEN",
                         mds_reint_open_client, mds_reint_open_server);
@@ -1552,10 +1661,10 @@ struct req_format RQF_MDS_GET_INFO =
                         mds_getinfo_server);
 EXPORT_SYMBOL(RQF_MDS_GET_INFO);
 
-struct req_format RQF_OUT_UPDATE =
-	DEFINE_REQ_FMT0("OUT_UPDATE", mds_update_client,
-			mds_update_server);
-EXPORT_SYMBOL(RQF_OUT_UPDATE);
+struct req_format RQF_MDS_BATCH =
+	DEFINE_REQ_FMT0("MDS_BATCH", mds_batch_client,
+			mds_batch_server);
+EXPORT_SYMBOL(RQF_MDS_BATCH);
 
 struct req_format RQF_LDLM_ENQUEUE =
         DEFINE_REQ_FMT0("LDLM_ENQUEUE",
@@ -1633,6 +1742,11 @@ struct req_format RQF_LDLM_INTENT_GETXATTR =
 			ldlm_intent_getxattr_client,
 			ldlm_intent_getxattr_server);
 EXPORT_SYMBOL(RQF_LDLM_INTENT_GETXATTR);
+
+struct req_format RQF_LDLM_INTENT_SETATTR =
+	DEFINE_REQ_FMT0("LDLM_INTENT_SETATTR",
+			ldlm_intent_setattr_client, ldlm_intent_setattr_server);
+EXPORT_SYMBOL(RQF_LDLM_INTENT_SETATTR);
 
 struct req_format RQF_MDS_CLOSE =
         DEFINE_REQ_FMT0("MDS_CLOSE",
@@ -1807,6 +1921,34 @@ struct req_format RQF_OST_LADVISE =
 	DEFINE_REQ_FMT0("OST_LADVISE", ost_ladvise, ost_body_only);
 EXPORT_SYMBOL(RQF_OST_LADVISE);
 
+struct req_format RQF_BUT_GETATTR =
+	DEFINE_REQ_FMT0("MDS_BATCH_GETATTR", mds_batch_getattr_client,
+			mds_batch_getattr_server);
+EXPORT_SYMBOL(RQF_BUT_GETATTR);
+
+struct req_format RQF_BUT_CREATE_EXLOCK =
+	DEFINE_REQ_FMT0("CREATE_EXLOCK", create_exlock_client,
+					 create_exlock_server);
+EXPORT_SYMBOL(RQF_BUT_CREATE_EXLOCK);
+
+struct req_format RQF_BUT_CREATE_LOCKLESS =
+	DEFINE_REQ_FMT0("CREATE_LOCKLESS", create_lockless_client,
+					   create_lockless_server);
+EXPORT_SYMBOL(RQF_BUT_CREATE_LOCKLESS);
+
+struct req_format RQF_BUT_SETATTR_EXLOCK =
+	DEFINE_REQ_FMT0("SETATTR_EXLOCK", setattr_exlock_client,
+					  setattr_exlock_server);
+EXPORT_SYMBOL(RQF_BUT_SETATTR_EXLOCK);
+
+struct req_format RQF_BUT_SETATTR_LOCKLESS =
+	DEFINE_REQ_FMT0("SETATTR_LOCKLESS", setattr_lockless_client, empty);
+EXPORT_SYMBOL(RQF_BUT_SETATTR_LOCKLESS);
+
+struct req_format RQF_BUT_EXLOCK_ONLY =
+	DEFINE_REQ_FMT0("EXLOCK_ONLY", exlock_only_client, exlock_only_server);
+EXPORT_SYMBOL(RQF_BUT_EXLOCK_ONLY);
+
 /* Convenience macro */
 #define FMT_FIELD(fmt, i, j) (fmt)->rf_fields[(i)].d[(j)]
 
@@ -1895,13 +2037,13 @@ void req_capsule_init(struct req_capsule *pill,
         if (req != NULL && pill == &req->rq_pill && req->rq_pill_init)
                 return;
 
-        memset(pill, 0, sizeof *pill);
+	pill->rc_fmt = NULL;
         pill->rc_req = req;
         pill->rc_loc = location;
-        req_capsule_init_area(pill);
+	req_capsule_init_area(pill);
 
-        if (req != NULL && pill == &req->rq_pill)
-                req->rq_pill_init = 1;
+	if (req != NULL && pill == &req->rq_pill)
+		req->rq_pill_init = 1;
 }
 EXPORT_SYMBOL(req_capsule_init);
 
@@ -1919,10 +2061,7 @@ static int __req_format_is_sane(const struct req_format *fmt)
 static struct lustre_msg *__req_msg(const struct req_capsule *pill,
                                     enum req_location loc)
 {
-        struct ptlrpc_request *req;
-
-        req = pill->rc_req;
-        return loc == RCL_CLIENT ? req->rq_reqmsg : req->rq_repmsg;
+	return loc == RCL_CLIENT ? pill->rc_reqmsg : pill->rc_repmsg;
 }
 
 /**
@@ -1992,16 +2131,101 @@ int req_capsule_server_pack(struct req_capsule *pill)
 	LASSERT(fmt != NULL);
 
 	count = req_capsule_filled_sizes(pill, RCL_SERVER);
-	rc = lustre_pack_reply(pill->rc_req, count,
-			       pill->rc_area[RCL_SERVER], NULL);
-	if (rc != 0) {
-		DEBUG_REQ(D_ERROR, pill->rc_req,
-			  "Cannot pack %d fields in format '%s'",
-			  count, fmt->rf_name);
+	if (req_capsule_ptlreq(pill)) {
+		rc = lustre_pack_reply(pill->rc_req, count,
+				       pill->rc_area[RCL_SERVER], NULL);
+		if (rc != 0) {
+			DEBUG_REQ(D_ERROR, pill->rc_req,
+				  "Cannot pack %d fields in format '%s'",
+				   count, fmt->rf_name);
+		}
+	} else { /* SUB request */
+		struct ptlrpc_request *req = pill->rc_req;
+		__u32 used_len;
+		__u32 msg_len;
+
+		msg_len = lustre_msg_size_v2(count, pill->rc_area[RCL_SERVER]);
+		used_len = (char *)pill->rc_repmsg - (char *)req->rq_repmsg;
+		/* Overflow the reply buffer */
+		if (used_len + msg_len > req->rq_replen) {
+			__u32 len;
+			__u32 max;
+
+			if (!req_capsule_has_field(&req->rq_pill,
+						   &RMF_BUT_REPLY, RCL_SERVER))
+				return -EINVAL;
+
+			if (!req_capsule_field_present(&req->rq_pill,
+						       &RMF_BUT_REPLY,
+						       RCL_SERVER))
+				return -EINVAL;
+
+			if (used_len + msg_len > BUT_MAXREPSIZE)
+				return -EOVERFLOW;
+
+			len = req_capsule_get_size(&req->rq_pill,
+						   &RMF_BUT_REPLY, RCL_SERVER);
+			/*
+			 * Currently just increase the batch reply buffer
+			 * by 2.
+			 */
+			LASSERT(req->rq_replen <= BUT_MAXREPSIZE);
+			max = BUT_MAXREPSIZE - req->rq_replen;
+			if (len > max)
+				len += max;
+			else
+				len += len;
+			rc = req_capsule_server_grow(&req->rq_pill,
+						     &RMF_BUT_REPLY, len);
+			if (rc)
+				return rc;
+
+			pill->rc_repmsg =
+				(struct lustre_msg *)((char *)req->rq_repmsg +
+						      used_len);
+		}
+		if (msg_len > pill->rc_reqmsg->lm_repsize)
+			/* TODO: Check whether there is enough buffer size */
+			CDEBUG(D_INFO,
+			       "Overflow pack %d fields in format '%s' for "
+			       "the SUB request with message len %u:%u\n",
+			       count, fmt->rf_name, msg_len,
+			       pill->rc_reqmsg->lm_repsize);
+
+		rc = 0;
+		lustre_init_msg_v2(pill->rc_repmsg, count,
+				   pill->rc_area[RCL_SERVER], NULL);
 	}
+
 	return rc;
 }
 EXPORT_SYMBOL(req_capsule_server_pack);
+
+int req_capsule_client_pack(struct req_capsule *pill)
+{
+	const struct req_format *fmt;
+	int count;
+	int rc = 0;
+
+	LASSERT(pill->rc_loc == RCL_CLIENT);
+	fmt = pill->rc_fmt;
+	LASSERT(fmt != NULL);
+
+	count = req_capsule_filled_sizes(pill, RCL_CLIENT);
+	if (req_capsule_ptlreq(pill)) {
+		struct ptlrpc_request *req = pill->rc_req;
+
+		rc = lustre_pack_request(req, req->rq_import->imp_msg_magic,
+					 count, pill->rc_area[RCL_CLIENT],
+					 NULL);
+	} else {
+		/* Sub request in a batch PTLRPC request */
+		lustre_init_msg_v2(pill->rc_reqmsg, count,
+				   pill->rc_area[RCL_CLIENT], NULL);
+	}
+	return rc;
+}
+EXPORT_SYMBOL(req_capsule_client_pack);
 
 /**
  * Returns the PTLRPC request or reply (\a loc) buffer offset of a \a pill
@@ -2023,6 +2247,26 @@ __u32 __req_capsule_offset(const struct req_capsule *pill,
         return offset;
 }
 
+void req_capsule_set_swabbed(struct req_capsule *pill, enum req_location loc,
+			    __u32 index)
+{
+	if (loc == RCL_CLIENT)
+		req_capsule_set_req_swabbed(pill, index);
+	else
+		req_capsule_set_rep_swabbed(pill, index);
+}
+
+bool req_capsule_need_swab(struct req_capsule *pill, enum req_location loc,
+			   __u32 index)
+{
+	if (loc == RCL_CLIENT)
+		return (req_capsule_req_need_swab(pill) &&
+			!req_capsule_req_swabbed(pill, index));
+
+	return (req_capsule_rep_need_swab(pill) &&
+	       !req_capsule_rep_swabbed(pill, index));
+}
+
 /**
  * Helper for __req_capsule_get(); swabs value / array of values and/or dumps
  * them if desired.
@@ -2040,12 +2284,11 @@ swabber_dumper_helper(struct req_capsule *pill,
 	int size;
 	int rc = 0;
 	bool do_swab;
-	bool inout = loc == RCL_CLIENT;
 	bool array = field->rmf_flags & RMF_F_STRUCT_ARRAY;
 
 	swabber = swabber ?: field->rmf_swabber;
 
-	if (ptlrpc_buf_need_swab(pill->rc_req, inout, offset) &&
+	if (req_capsule_need_swab(pill, loc, offset) &&
 	    (swabber != NULL || field->rmf_swab_len != NULL) && value != NULL)
 		do_swab = true;
 	else
@@ -2106,7 +2349,7 @@ swabber_dumper_helper(struct req_capsule *pill,
 		}
         }
         if (do_swab)
-                ptlrpc_buf_set_swabbed(pill->rc_req, inout, offset);
+		req_capsule_set_swabbed(pill, loc, offset);
 
 	return rc;
 }
@@ -2176,11 +2419,12 @@ static void *__req_capsule_get(struct req_capsule *pill,
         value = getter(msg, offset, len);
 
         if (value == NULL) {
+		LASSERT(pill->rc_req != NULL);
                 DEBUG_REQ(D_ERROR, pill->rc_req,
-			  "Wrong buffer for field '%s' (%u of %u) in format '%s', %u vs. %u (%s)",
-			  field->rmf_name, offset, lustre_msg_bufcount(msg),
-			  fmt->rf_name, lustre_msg_buflen(msg, offset), len,
-			  rcl_names[loc]);
+			   "Wrong buffer for field '%s' (%u of %u) in format '%s', %u vs. %u (%s)",
+			   field->rmf_name, offset, lustre_msg_bufcount(msg),
+			   fmt->rf_name, lustre_msg_buflen(msg, offset), len,
+			   rcl_names[loc]);
         } else {
                 swabber_dumper_helper(pill, field, loc, offset, value, len,
                                       dump, swabber);
@@ -2409,10 +2653,18 @@ EXPORT_SYMBOL(req_capsule_get_size);
  */
 __u32 req_capsule_msg_size(struct req_capsule *pill, enum req_location loc)
 {
-        return lustre_msg_size(pill->rc_req->rq_import->imp_msg_magic,
-                               pill->rc_fmt->rf_fields[loc].nr,
-                               pill->rc_area[loc]);
+	if (req_capsule_ptlreq(pill)) {
+		return lustre_msg_size(pill->rc_req->rq_import->imp_msg_magic,
+				       pill->rc_fmt->rf_fields[loc].nr,
+				       pill->rc_area[loc]);
+	} else { /* SUB request in a batch request */
+		int count;
+
+		count = req_capsule_filled_sizes(pill, loc);
+		return lustre_msg_size_v2(count, pill->rc_area[loc]);
+	}
 }
+EXPORT_SYMBOL(req_capsule_msg_size);
 
 /**
  * While req_capsule_msg_size() computes the size of a PTLRPC request or reply
@@ -2566,16 +2818,17 @@ void req_capsule_shrink(struct req_capsule *pill,
 	LASSERTF(newlen <= len, "%s:%s, oldlen=%u, newlen=%u\n",
 		 fmt->rf_name, field->rmf_name, len, newlen);
 
+	len = lustre_shrink_msg(msg, offset, newlen, 1);
 	if (loc == RCL_CLIENT) {
-		pill->rc_req->rq_reqlen = lustre_shrink_msg(msg, offset, newlen,
-							    1);
+		if (req_capsule_ptlreq(pill))
+			pill->rc_req->rq_reqlen = len;
 	} else {
-		pill->rc_req->rq_replen = lustre_shrink_msg(msg, offset, newlen,
-							    1);
 		/* update also field size in reply lenghts arrays for possible
 		 * reply re-pack due to req_capsule_server_grow() call.
 		 */
 		req_capsule_set_size(pill, field, loc, newlen);
+		if (req_capsule_ptlreq(pill))
+			pill->rc_req->rq_replen = len;
 	}
 }
 EXPORT_SYMBOL(req_capsule_shrink);
@@ -2584,24 +2837,75 @@ int req_capsule_server_grow(struct req_capsule *pill,
 			    const struct req_msg_field *field,
 			    __u32 newlen)
 {
-	struct ptlrpc_reply_state *rs = pill->rc_req->rq_reply_state, *nrs;
-	char *from, *to;
+	struct ptlrpc_request *req = pill->rc_req;
+	struct ptlrpc_reply_state *rs = req->rq_reply_state, *nrs;
+	char *from, *to, *sptr = NULL;
+	__u32 slen = 0, snewlen = 0;
+	__u32 offset, len, max, diff;
 	int rc;
-	__u32 offset, len;
 
 	LASSERT(pill->rc_fmt != NULL);
 	LASSERT(__req_format_is_sane(pill->rc_fmt));
 	LASSERT(req_capsule_has_field(pill, field, RCL_SERVER));
 	LASSERT(req_capsule_field_present(pill, field, RCL_SERVER));
 
-	len = req_capsule_get_size(pill, field, RCL_SERVER);
-	offset = __req_capsule_offset(pill, field, RCL_SERVER);
+	if (req_capsule_subreq(pill)) {
+		if (!req_capsule_has_field(&req->rq_pill, &RMF_BUT_REPLY,
+					   RCL_SERVER))
+			return -EINVAL;
+
+		if (!req_capsule_field_present(&req->rq_pill, &RMF_BUT_REPLY,
+					       RCL_SERVER))
+			return -EINVAL;
+
+		len = req_capsule_get_size(&req->rq_pill, &RMF_BUT_REPLY,
+					   RCL_SERVER);
+		sptr = req_capsule_server_get(&req->rq_pill, &RMF_BUT_REPLY);
+		slen = req_capsule_get_size(pill, field, RCL_SERVER);
+
+		LASSERT(len >= (char *)pill->rc_repmsg - sptr +
+			       lustre_packed_msg_size(pill->rc_repmsg));
+		if (len >= (char *)pill->rc_repmsg - sptr +
+			   lustre_packed_msg_size(pill->rc_repmsg) - slen +
+			   newlen) {
+			req_capsule_set_size(pill, field, RCL_SERVER, newlen);
+			offset = __req_capsule_offset(pill, field, RCL_SERVER);
+			lustre_grow_msg(pill->rc_repmsg, offset, newlen);
+			return 0;
+		}
+
+		/*
+		 * Currently first try to increase the reply buffer by
+		 * 2 * newlen with reply buffer limit of BUT_MAXREPSIZE.
+		 * TODO: Enlarge the reply buffer properly according to the
+		 * left SUB requests in the batch PTLRPC request.
+		 */
+		snewlen = newlen;
+		diff = snewlen - slen;
+		max = BUT_MAXREPSIZE - req->rq_replen;
+		if (diff > max)
+			return -EOVERFLOW;
+
+		if (diff * 2 + len < max)
+			newlen = (len + diff) * 2;
+		else
+			newlen = len + max;
+
+		req_capsule_set_size(pill, field, RCL_SERVER, snewlen);
+		req_capsule_set_size(&req->rq_pill, &RMF_BUT_REPLY, RCL_SERVER,
+				     newlen);
+		offset = __req_capsule_offset(&req->rq_pill, &RMF_BUT_REPLY,
+					      RCL_SERVER);
+	} else {
+		len = req_capsule_get_size(pill, field, RCL_SERVER);
+		offset = __req_capsule_offset(pill, field, RCL_SERVER);
+		req_capsule_set_size(pill, field, RCL_SERVER, newlen);
+	}
 
 	CDEBUG(D_INFO, "Reply packed: %d, allocated: %d, field len %d -> %d\n",
 	       lustre_packed_msg_size(rs->rs_msg), rs->rs_repbuf_len,
 				      len, newlen);
 
-	req_capsule_set_size(pill, field, RCL_SERVER, newlen);
 	/**
 	 * There can be enough space in current reply buffer, make sure
 	 * that rs_repbuf is not a wrapper but real reply msg, otherwise
@@ -2610,21 +2914,26 @@ int req_capsule_server_grow(struct req_capsule *pill,
 	if (rs->rs_msg == rs->rs_repbuf &&
 	    rs->rs_repbuf_len >=
 	    lustre_packed_msg_size(rs->rs_msg) - len + newlen) {
-		pill->rc_req->rq_replen = lustre_grow_msg(rs->rs_msg, offset,
-							  newlen);
+		req->rq_replen = lustre_grow_msg(rs->rs_msg, offset, newlen);
 		return 0;
 	}
 
 	/* Re-allocate replay state */
-	pill->rc_req->rq_reply_state = NULL;
-	rc = req_capsule_server_pack(pill);
+	req->rq_reply_state = NULL;
+	rc = req_capsule_server_pack(&req->rq_pill);
 	if (rc) {
 		/* put old values back, the caller should decide what to do */
-		req_capsule_set_size(pill, field, RCL_SERVER, len);
+		if (req_capsule_subreq(pill)) {
+			req_capsule_set_size(&req->rq_pill, &RMF_BUT_REPLY,
+					     RCL_SERVER, len);
+			req_capsule_set_size(pill, field, RCL_SERVER, slen);
+		} else {
+			req_capsule_set_size(pill, field, RCL_SERVER, len);
+		}
 		pill->rc_req->rq_reply_state = rs;
 		return rc;
 	}
-	nrs = pill->rc_req->rq_reply_state;
+	nrs = req->rq_reply_state;
 	LASSERT(lustre_packed_msg_size(nrs->rs_msg) >
 		lustre_packed_msg_size(rs->rs_msg));
 
@@ -2634,7 +2943,17 @@ int req_capsule_server_grow(struct req_capsule *pill,
 	memcpy(to, from,
 	       (char *)rs->rs_msg + lustre_packed_msg_size(rs->rs_msg) - from);
 	lustre_msg_set_buflen(nrs->rs_msg, offset, len);
-	pill->rc_req->rq_replen = lustre_grow_msg(nrs->rs_msg, offset, newlen);
+	req->rq_replen = lustre_grow_msg(nrs->rs_msg, offset, newlen);
+
+	if (req_capsule_subreq(pill)) {
+		char *ptr;
+
+		ptr = req_capsule_server_get(&req->rq_pill, &RMF_BUT_REPLY);
+		pill->rc_repmsg = (struct lustre_msg *)(ptr +
+				  ((char *)pill->rc_repmsg - sptr));
+		offset = __req_capsule_offset(pill, field, RCL_SERVER);
+		lustre_grow_msg(pill->rc_repmsg, offset, snewlen);
+	}
 
         if (rs->rs_difficult) {
                 /* copy rs data */
@@ -2657,14 +2976,51 @@ int req_capsule_server_grow(struct req_capsule *pill,
 }
 EXPORT_SYMBOL(req_capsule_server_grow);
 
+#ifdef HAVE_SERVER_SUPPORT
+static const struct req_msg_field *mds_update_client[] = {
+	&RMF_PTLRPC_BODY,
+	&RMF_OUT_UPDATE_HEADER,
+	&RMF_OUT_UPDATE_BUF,
+};
+
+static const struct req_msg_field *mds_update_server[] = {
+	&RMF_PTLRPC_BODY,
+	&RMF_OUT_UPDATE_REPLY,
+};
+
+struct req_msg_field RMF_OUT_UPDATE = DEFINE_MSGFL("object_update", 0, -1,
+				lustre_swab_object_update_request, NULL);
+EXPORT_SYMBOL(RMF_OUT_UPDATE);
+
+struct req_msg_field RMF_OUT_UPDATE_REPLY =
+			DEFINE_MSGFL("object_update_reply", 0, -1,
+				    lustre_swab_object_update_reply, NULL);
+EXPORT_SYMBOL(RMF_OUT_UPDATE_REPLY);
+
+struct req_msg_field RMF_OUT_UPDATE_HEADER = DEFINE_MSGF("out_update_header", 0,
+				-1, lustre_swab_out_update_header, NULL);
+EXPORT_SYMBOL(RMF_OUT_UPDATE_HEADER);
+
+struct req_msg_field RMF_OUT_UPDATE_BUF = DEFINE_MSGF("update_buf",
+			RMF_F_STRUCT_ARRAY, sizeof(struct out_update_buffer),
+			lustre_swab_out_update_buffer, NULL);
+EXPORT_SYMBOL(RMF_OUT_UPDATE_BUF);
+
+struct req_format RQF_OUT_UPDATE =
+	DEFINE_REQ_FMT0("OUT_UPDATE", mds_update_client,
+			mds_update_server);
+EXPORT_SYMBOL(RQF_OUT_UPDATE);
+
 int req_check_sepol(struct req_capsule *pill)
 {
 	int rc = 0;
-#ifdef HAVE_SERVER_SUPPORT
 	struct obd_export *export;
 	struct lu_nodemap *nm = NULL;
 	const char *sepol = NULL;
 	const char *nm_sepol = NULL;
+
+	if (req_capsule_subreq(pill))
+		return 0;
 
 	if (!pill->rc_req)
 		return -EPROTO;
@@ -2694,8 +3050,37 @@ nm:
 
 	if (!IS_ERR_OR_NULL(nm))
 		nodemap_putref(nm);
-#endif
 
 	return rc;
 }
 EXPORT_SYMBOL(req_check_sepol);
+#endif
+
+void req_capsule_subreq_init(struct req_capsule *pill,
+			     const struct req_format *fmt,
+			     struct ptlrpc_request *req,
+			     struct lustre_msg *reqmsg,
+			     struct lustre_msg *repmsg,
+			     enum req_location loc)
+{
+	req_capsule_init(pill, req, loc);
+	req_capsule_set(pill, fmt);
+	pill->rc_reqmsg = reqmsg;
+	pill->rc_repmsg = repmsg;
+}
+EXPORT_SYMBOL(req_capsule_subreq_init);
+
+void req_capsule_set_replen(struct req_capsule *pill)
+{
+	if (req_capsule_ptlreq(pill)) {
+		ptlrpc_request_set_replen(pill->rc_req);
+	} else { /* SUB request in a batch request */
+		int count;
+
+		count = req_capsule_filled_sizes(pill, RCL_SERVER);
+		pill->rc_reqmsg->lm_repsize =
+				lustre_msg_size_v2(count,
+						   pill->rc_area[RCL_SERVER]);
+	}
+}
+EXPORT_SYMBOL(req_capsule_set_replen);

@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/lustre/llite/llite_nfs.c
  *
@@ -104,7 +103,7 @@ struct inode *search_inode_for_lustre(struct super_block *sb,
 				PFID(fid), rc);
 		RETURN(ERR_PTR(rc));
 	}
-	rc = ll_prep_inode(&inode, req, sb, NULL);
+	rc = ll_prep_inode(&inode, &req->rq_pill, sb, NULL);
 	ptlrpc_req_finished(req);
 	if (rc)
 		RETURN(ERR_PTR(rc));
@@ -376,7 +375,7 @@ static struct dentry *ll_get_parent(struct dentry *dchild)
 	RETURN(dentry);
 }
 
-struct export_operations lustre_export_operations = {
+const struct export_operations lustre_export_operations = {
 	.get_parent = ll_get_parent,
 	.encode_fh  = ll_encode_fh,
 	.get_name   = ll_get_name,

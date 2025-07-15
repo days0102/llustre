@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/llite/dir.c
  *
@@ -103,16 +102,18 @@
  * returned page, page hash collision has to be handled. Pages in the
  * hash chain, except first one, are termed "overflow pages".
  *
- * Solution to index uniqueness problem is to not cache overflow
- * pages. Instead, when page hash collision is detected, all overflow pages
- * from emerging chain are immediately requested from the server and placed in
- * a special data structure (struct ll_dir_chain). This data structure is used
- * by ll_readdir() to process entries from overflow pages. When readdir
- * invocation finishes, overflow pages are discarded. If page hash collision
- * chain weren't completely processed, next call to readdir will again detect
- * page hash collision, again read overflow pages in, process next portion of
- * entries and again discard the pages. This is not as wasteful as it looks,
- * because, given reasonable hash, page hash collisions are extremely rare.
+ * Proposed (unimplimented) solution to index uniqueness problem is to
+ * not cache overflow pages.  Instead, when page hash collision is
+ * detected, all overflow pages from emerging chain should be
+ * immediately requested from the server and placed in a special data
+ * structure.  This data structure can be used by ll_readdir() to
+ * process entries from overflow pages.  When readdir invocation
+ * finishes, overflow pages are discarded.  If page hash collision chain
+ * weren't completely processed, next call to readdir will again detect
+ * page hash collision, again read overflow pages in, process next
+ * portion of entries and again discard the pages.  This is not as
+ * wasteful as it looks, because, given reasonable hash, page hash
+ * collisions are extremely rare.
  *
  * 1. directory positioning
  *
@@ -141,7 +142,7 @@
  *
  */
 struct page *ll_get_dir_page(struct inode *dir, struct md_op_data *op_data,
-			     __u64 offset, struct ll_dir_chain *chain)
+			     __u64 offset)
 {
 	struct md_callback	cb_op;
 	struct page		*page;
@@ -190,14 +191,11 @@ int ll_dir_read(struct inode *inode, __u64 *ppos, struct md_op_data *op_data,
 	bool                  is_api32 = ll_need_32bit_api(sbi);
 	bool                  is_hash64 = sbi->ll_flags & LL_SBI_64BIT_HASH;
 	struct page          *page;
-	struct ll_dir_chain   chain;
 	bool                  done = false;
 	int                   rc = 0;
 	ENTRY;
 
-	ll_dir_chain_init(&chain);
-
-	page = ll_get_dir_page(inode, op_data, pos, &chain);
+	page = ll_get_dir_page(inode, op_data, pos);
 
 	while (rc == 0 && !done) {
 		struct lu_dirpage *dp;
@@ -234,7 +232,7 @@ int ll_dir_read(struct inode *inode, __u64 *ppos, struct md_op_data *op_data,
 				lhash = hash;
 			fid_le_to_cpu(&fid, &ent->lde_fid);
 			ino = cl_fid_build_ino(&fid, is_api32);
-			type = IFTODT(lu_dirent_type_get(ent));
+			type = S_DT(lu_dirent_type_get(ent));
 			/* For ll_nfs_get_name_filldir(), it will try to access
 			 * 'ent' through 'lde_name', so the parameter 'name'
 			 * for 'filldir()' must be part of the 'ent'. */
@@ -271,8 +269,7 @@ int ll_dir_read(struct inode *inode, __u64 *ppos, struct md_op_data *op_data,
 					le32_to_cpu(dp->ldp_flags) &
 					LDF_COLLIDE);
 			next = pos;
-			page = ll_get_dir_page(inode, op_data, pos,
-					       &chain);
+			page = ll_get_dir_page(inode, op_data, pos);
 		}
 	}
 #ifdef HAVE_DIR_CONTEXT
@@ -280,7 +277,6 @@ int ll_dir_read(struct inode *inode, __u64 *ppos, struct md_op_data *op_data,
 #else
 	*ppos = pos;
 #endif
-	ll_dir_chain_fini(&chain);
 	RETURN(rc);
 }
 
@@ -355,6 +351,7 @@ static int ll_readdir(struct file *filp, void *cookie, filldir_t filldir)
 	}
 
 	op_data->op_fid3 = pfid;
+	op_data->op_bias |= wbc_md_op_bias(ll_i2wbci(inode));
 
 #ifdef HAVE_DIR_CONTEXT
 	ctx->pos = pos;
@@ -402,7 +399,8 @@ out:
  *                      <0 if the creation is failed.
  */
 static int ll_dir_setdirstripe(struct dentry *dparent, struct lmv_user_md *lump,
-			       size_t len, const char *dirname, umode_t mode)
+			       size_t len, const char *dirname, umode_t mode,
+			       bool createonly)
 {
 	struct inode *parent = dparent->d_inode;
 	struct ptlrpc_request *request = NULL;
@@ -508,16 +506,19 @@ static int ll_dir_setdirstripe(struct dentry *dparent, struct lmv_user_md *lump,
 	}
 
 	op_data->op_cli_flags |= CLI_SET_MEA;
+	if (createonly)
+		op_data->op_bias |= MDS_SETSTRIPE_CREATE;
+
 	err = md_create(sbi->ll_md_exp, op_data, lump, len, mode,
 			from_kuid(&init_user_ns, current_fsuid()),
 			from_kgid(&init_user_ns, current_fsgid()),
-			cfs_curproc_cap_pack(), 0, &request);
+			cfs_curproc_cap_pack(), 0, 0, &request);
 	if (err)
 		GOTO(out_request, err);
 
 	CFS_FAIL_TIMEOUT(OBD_FAIL_LLITE_SETDIRSTRIPE_PAUSE, cfs_fail_val);
 
-	err = ll_prep_inode(&inode, request, parent->i_sb, NULL);
+	err = ll_prep_inode(&inode, &request->rq_pill, parent->i_sb, NULL);
 	if (err)
 		GOTO(out_inode, err);
 
@@ -545,8 +546,7 @@ static int ll_dir_setdirstripe(struct dentry *dparent, struct lmv_user_md *lump,
 	}
 
 out_inode:
-	if (inode != NULL)
-		iput(inode);
+	iput(inode);
 out_request:
 	ptlrpc_req_finished(request);
 out_op_data:
@@ -1142,14 +1142,16 @@ int quotactl_ioctl(struct ll_sb_info *sbi, struct if_quotactl *qctl)
 	case LUSTRE_Q_SETDEFAULT:
 	case LUSTRE_Q_SETQUOTAPOOL:
 	case LUSTRE_Q_SETINFOPOOL:
-		if (!cfs_capable(CFS_CAP_SYS_ADMIN))
+	case LUSTRE_Q_SETDEFAULT_POOL:
+		if (!capable(CAP_SYS_ADMIN))
 			RETURN(-EPERM);
 		break;
 	case Q_GETQUOTA:
 	case LUSTRE_Q_GETDEFAULT:
 	case LUSTRE_Q_GETQUOTAPOOL:
+	case LUSTRE_Q_GETDEFAULT_POOL:
 		if (check_owner(type, id) &&
-		    (!cfs_capable(CFS_CAP_SYS_ADMIN)))
+		    (!capable(CAP_SYS_ADMIN)))
 			RETURN(-EPERM);
 		break;
 	case Q_GETINFO:
@@ -1278,7 +1280,7 @@ int ll_rmfid(struct file *file, void __user *arg)
 	int i, rc, *rcs = NULL;
 	ENTRY;
 
-	if (!cfs_capable(CFS_CAP_DAC_READ_SEARCH) &&
+	if (!capable(CAP_DAC_READ_SEARCH) &&
 	    !(ll_i2sbi(file_inode(file))->ll_flags & LL_SBI_USER_FID2PATH))
 		RETURN(-EPERM);
 	/* Only need to get the buflen */
@@ -1300,7 +1302,7 @@ int ll_rmfid(struct file *file, void __user *arg)
 		GOTO(free_rcs, rc = -EFAULT);
 
 	/* Call mdc_iocontrol */
-	rc = md_rmfid(ll_i2mdexp(file_inode(file)), lfa, rcs, NULL);
+	rc = md_rmfid(ll_i2mdexp(file_inode(file)), lfa, rcs, 0, NULL);
 	if (!rc) {
 		for (i = 0; i < nr; i++)
 			if (rcs[i])
@@ -1350,7 +1352,7 @@ static long ll_dir_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	struct dentry *dentry = file_dentry(file);
 	struct inode *inode = file_inode(file);
 	struct ll_sb_info *sbi = ll_i2sbi(inode);
-	struct obd_ioctl_data *data;
+	struct obd_ioctl_data *data = NULL;
 	int rc = 0;
 	ENTRY;
 
@@ -1388,14 +1390,12 @@ static long ll_dir_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return 0;
 	}
 	case IOC_MDC_LOOKUP: {
-				     int namelen, len = 0;
-		char *buf = NULL;
+		int namelen, len = 0;
 		char *filename;
 
-		rc = obd_ioctl_getdata(&buf, &len, (void __user *)arg);
+		rc = obd_ioctl_getdata(&data, &len, (void __user *)arg);
 		if (rc != 0)
 			RETURN(rc);
-		data = (void *)buf;
 
 		filename = data->ioc_inlbuf1;
 		namelen = strlen(filename);
@@ -1411,24 +1411,23 @@ static long ll_dir_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			GOTO(out_free, rc);
 		}
 out_free:
-		OBD_FREE_LARGE(buf, len);
-                return rc;
-        }
+		OBD_FREE_LARGE(data, len);
+		return rc;
+	}
 	case LL_IOC_LMV_SETSTRIPE: {
 		struct lmv_user_md  *lum;
-		char		*buf = NULL;
-		char		*filename;
-		int		 namelen = 0;
-		int		 lumlen = 0;
-		umode_t		 mode;
-		int		 len;
-		int		 rc;
+		char *filename;
+		int namelen = 0;
+		int lumlen = 0;
+		umode_t mode;
+		bool createonly = false;
+		int len;
+		int rc;
 
-		rc = obd_ioctl_getdata(&buf, &len, (void __user *)arg);
+		rc = obd_ioctl_getdata(&data, &len, (void __user *)arg);
 		if (rc)
 			RETURN(rc);
 
-		data = (void *)buf;
 		if (data->ioc_inlbuf1 == NULL || data->ioc_inlbuf2 == NULL ||
 		    data->ioc_inllen1 == 0 || data->ioc_inllen2 == 0)
 			GOTO(lmv_out_free, rc = -EINVAL);
@@ -1465,9 +1464,11 @@ out_free:
 		}
 
 		mode = data->ioc_type;
-		rc = ll_dir_setdirstripe(dentry, lum, lumlen, filename, mode);
+		createonly = data->ioc_obdo1.o_flags & OBD_FL_OBDMDEXISTS;
+		rc = ll_dir_setdirstripe(dentry, lum, lumlen, filename, mode,
+					 createonly);
 lmv_out_free:
-		OBD_FREE_LARGE(buf, len);
+		OBD_FREE_LARGE(data, len);
 		RETURN(rc);
 
 	}
@@ -1507,7 +1508,7 @@ lmv_out_free:
 		if (copy_from_user(&lumv1, lumv1p, sizeof(lumv1)))
 			RETURN(-EFAULT);
 
-		if (inode->i_sb->s_root == file_dentry(file))
+		if (is_root_inode(inode))
 			set_default = 1;
 
 		switch (lumv1.lmm_magic) {
@@ -1661,6 +1662,16 @@ finish_req:
 		ptlrpc_req_finished(root_request);
 		return rc;
 	}
+
+	case LL_IOC_UNLOCK_FOREIGN:
+		/* if not a foreign symlink do nothing */
+		if (ll_foreign_is_removable(dentry, true)) {
+			CDEBUG(D_INFO,
+			       "prevent rmdir of non-foreign dir ("DFID")\n",
+			       PFID(ll_inode2fid(inode)));
+			RETURN(-EOPNOTSUPP);
+		}
+		RETURN(0);
 
 	case LL_IOC_REMOVE_ENTRY: {
 		char		*filename = NULL;
@@ -1900,8 +1911,11 @@ out_quotactl:
 		OBD_FREE(qctl, qctl_len);
 		RETURN(rc);
         }
-        case OBD_IOC_GETDTNAME:
-        case OBD_IOC_GETMDNAME:
+	case OBD_IOC_GETNAME_OLD:
+		/* fall through */
+	case OBD_IOC_GETDTNAME:
+		/* fall through */
+	case OBD_IOC_GETMDNAME:
                 RETURN(ll_get_obd_name(inode, cmd, arg));
         case LL_IOC_FLUSHCTX:
                 RETURN(ll_flush_ctx(inode));
@@ -2038,7 +2052,7 @@ out_hur:
 		RETURN(rc);
 	}
 	case LL_IOC_HSM_CT_START:
-		if (!cfs_capable(CFS_CAP_SYS_ADMIN))
+		if (!capable(CAP_SYS_ADMIN))
 			RETURN(-EPERM);
 
 		rc = copy_and_ct_start(cmd, sbi->ll_md_exp,
@@ -2085,17 +2099,15 @@ out_hur:
 	}
 	case LL_IOC_MIGRATE: {
 		struct lmv_user_md *lum;
-		char *buf = NULL;
 		int len;
 		char *filename;
 		int namelen = 0;
 		int rc;
 
-		rc = obd_ioctl_getdata(&buf, &len, (void __user *)arg);
+		rc = obd_ioctl_getdata(&data, &len, (void __user *)arg);
 		if (rc)
 			RETURN(rc);
 
-		data = (struct obd_ioctl_data *)buf;
 		if (data->ioc_inlbuf1 == NULL || data->ioc_inlbuf2 == NULL ||
 		    data->ioc_inllen1 == 0 || data->ioc_inllen2 == 0)
 			GOTO(migrate_free, rc = -EINVAL);
@@ -2119,7 +2131,7 @@ out_hur:
 
 		rc = ll_migrate(inode, file, lum, filename);
 migrate_free:
-		OBD_FREE_LARGE(buf, len);
+		OBD_FREE_LARGE(data, len);
 
 		RETURN(rc);
 	}
@@ -2191,6 +2203,10 @@ out_detach:
 			return -EOPNOTSUPP;
 		return llcrypt_ioctl_get_key_status(file, (void __user *)arg);
 #endif
+	case LL_IOC_WBC_STATE:
+		/* fall through */
+	case LL_IOC_WBC_UNRESERVE:
+		RETURN(wbc_ioctl(file, cmd, arg));
 	default:
 		RETURN(obd_iocontrol(cmd, sbi->ll_dt_exp, 0, NULL,
 				     (void __user *)arg));

@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/osd-zfs/osd_io.c
  *
@@ -614,11 +613,9 @@ static inline uint64_t osd_roundup2blocksz(uint64_t size,
 	size += offset % blksz;
 
 	if (likely(is_power_of_2(blksz)))
-		return PO2_ROUNDUP_TYPED(size, blksz, uint64_t);
-
-	size += blksz - 1;
-	do_div(size, blksz);
-	return size * blksz;
+		return round_up(size, blksz);
+	else
+		return DIV_ROUND_UP_ULL(size, blksz) * blksz;
 }
 
 static int osd_declare_write_commit(const struct lu_env *env,
@@ -1221,7 +1218,7 @@ static loff_t osd_lseek(const struct lu_env *env, struct dt_object *dt,
 	RETURN(result);
 }
 
-struct dt_body_operations osd_body_ops = {
+const struct dt_body_operations osd_body_ops = {
 	.dbo_read			= osd_read,
 	.dbo_declare_write		= osd_declare_write,
 	.dbo_write			= osd_write,
@@ -1239,7 +1236,7 @@ struct dt_body_operations osd_body_ops = {
 	.dbo_lseek			= osd_lseek,
 };
 
-struct dt_body_operations osd_body_scrub_ops = {
+const struct dt_body_operations osd_body_scrub_ops = {
 	.dbo_read			= osd_read_no_record,
 	.dbo_declare_write		= osd_declare_write,
 	.dbo_write			= osd_write,

@@ -263,7 +263,7 @@ static int lprocfs_quota_seq_show(struct seq_file *p, void *v)
 	return 0;
 }
 
-struct seq_operations lprocfs_quota_seq_sops = {
+static const struct seq_operations lprocfs_quota_seq_sops = {
 	.start	= lprocfs_quota_seq_start,
 	.stop	= lprocfs_quota_seq_stop,
 	.next	= lprocfs_quota_seq_next,
@@ -352,7 +352,7 @@ static int lprocfs_quota_seq_release(struct inode *inode, struct file *file)
 	return seq_release(inode, file);
 }
 
-struct file_operations lprocfs_quota_seq_fops = {
+const struct file_operations lprocfs_quota_seq_fops = {
 	.owner		= THIS_MODULE,
 	.open		= lprocfs_quota_seq_open,
 	.read		= seq_read,

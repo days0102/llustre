@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #include <linux/errno.h>
@@ -54,21 +53,22 @@ void policy_from_vma(union ldlm_policy_data *policy, struct vm_area_struct *vma,
 struct vm_area_struct *our_vma(struct mm_struct *mm, unsigned long addr,
                                size_t count)
 {
-        struct vm_area_struct *vma, *ret = NULL;
-        ENTRY;
+	struct vm_area_struct *vma, *ret = NULL;
+	ENTRY;
 
-        /* mmap_sem must have been held by caller. */
-        LASSERT(!down_write_trylock(&mm->mmap_sem));
+	/* mmap_lock must have been held by caller. */
+	LASSERT(!mmap_write_trylock(mm));
 
-        for(vma = find_vma(mm, addr);
-            vma != NULL && vma->vm_start < (addr + count); vma = vma->vm_next) {
-                if (vma->vm_ops && vma->vm_ops == &ll_file_vm_ops &&
-                    vma->vm_flags & VM_SHARED) {
-                        ret = vma;
-                        break;
-                }
-        }
-        RETURN(ret);
+	for (vma = find_vma(mm, addr);
+	     vma != NULL && vma->vm_start < (addr + count);
+	     vma = vma->vm_next) {
+		if (vma->vm_ops && vma->vm_ops == &ll_file_vm_ops &&
+		    vma->vm_flags & VM_SHARED) {
+			ret = vma;
+			break;
+		}
+	}
+	RETURN(ret);
 }
 
 /**
@@ -111,6 +111,9 @@ restart:
 	else if (vma->vm_flags & VM_RAND_READ)
 		io->ci_rand_read = 1;
 
+	if (vma->vm_flags & VM_WRITE)
+		fio->ft_writable = 1;
+
 	rc = cl_io_init(env, io, CIT_FAULT, io->ci_obj);
 	if (rc == 0) {
 		struct vvp_io *vio = vvp_env_io(env);
@@ -123,7 +126,6 @@ restart:
 		io->ci_lockreq = CILR_MANDATORY;
 		vio->vui_fd = fd;
 	} else {
-		LASSERT(rc < 0);
 		cl_io_fini(env, io);
 		if (io->ci_need_restart)
 			goto restart;
@@ -206,7 +208,7 @@ static int ll_page_mkwrite0(struct vm_area_struct *vma, struct page *vmpage,
                 }
 
 		if (result == 0)
-			ll_file_set_flag(lli, LLIF_DATA_MODIFIED);
+			set_bit(LLIF_DATA_MODIFIED, &lli->lli_flags);
         }
         EXIT;
 
@@ -510,23 +512,6 @@ static void ll_vm_close(struct vm_area_struct *vma)
 	LASSERT(atomic_read(&vob->vob_mmap_cnt) >= 0);
 	pcc_vm_close(vma);
 	EXIT;
-}
-
-/* XXX put nice comment here.  talk about __free_pte -> dirty pages and
- * nopage's reference passing to the pte */
-int ll_teardown_mmaps(struct address_space *mapping, __u64 first, __u64 last)
-{
-        int rc = -ENOENT;
-        ENTRY;
-
-	LASSERTF(last > first, "last %llu first %llu\n", last, first);
-        if (mapping_mapped(mapping)) {
-                rc = 0;
-		unmap_mapping_range(mapping, first + PAGE_SIZE - 1,
-				    last - first + 1, 0);
-        }
-
-        RETURN(rc);
 }
 
 static const struct vm_operations_struct ll_file_vm_ops = {

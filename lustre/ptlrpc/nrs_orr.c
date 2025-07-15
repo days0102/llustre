@@ -35,7 +35,6 @@
  * Author: Liang Zhen <liang@whamcloud.com>
  * Author: Nikitas Angelinas <nikitas_angelinas@xyratex.com>
  */
-#ifdef HAVE_SERVER_SUPPORT
 
 /**
  * \addtogoup nrs
@@ -524,7 +523,7 @@ static struct cfs_hash_ops nrs_trr_hash_ops = {
  * \retval 1 e1 < e2
  */
 static int
-orr_req_compare(struct cfs_binheap_node *e1, struct cfs_binheap_node *e2)
+orr_req_compare(struct binheap_node *e1, struct binheap_node *e2)
 {
 	struct ptlrpc_nrs_request *nrq1;
 	struct ptlrpc_nrs_request *nrq2;
@@ -579,7 +578,7 @@ orr_req_compare(struct cfs_binheap_node *e1, struct cfs_binheap_node *e2)
 /**
  * ORR binary heap operations
  */
-static struct cfs_binheap_ops nrs_orr_heap_ops = {
+static struct binheap_ops nrs_orr_heap_ops = {
 	.hop_enter	= NULL,
 	.hop_exit	= NULL,
 	.hop_compare	= orr_req_compare,
@@ -632,7 +631,7 @@ static int nrs_orr_start(struct ptlrpc_nrs_policy *policy, char *arg)
 	/*
 	 * Binary heap instance for sorted incoming requests.
 	 */
-	orrd->od_binheap = cfs_binheap_create(&nrs_orr_heap_ops,
+	orrd->od_binheap = binheap_create(&nrs_orr_heap_ops,
 					      CBH_FLAG_ATOMIC_GROW, 4096, NULL,
 					      nrs_pol2cptab(policy),
 					      nrs_pol2cptid(policy));
@@ -695,7 +694,7 @@ static int nrs_orr_start(struct ptlrpc_nrs_policy *policy, char *arg)
 out_cache:
 	kmem_cache_destroy(orrd->od_cache);
 out_binheap:
-	cfs_binheap_destroy(orrd->od_binheap);
+	binheap_destroy(orrd->od_binheap);
 out_orrd:
 	OBD_FREE_PTR(orrd);
 
@@ -720,9 +719,9 @@ static void nrs_orr_stop(struct ptlrpc_nrs_policy *policy)
 	LASSERT(orrd->od_binheap != NULL);
 	LASSERT(orrd->od_obj_hash != NULL);
 	LASSERT(orrd->od_cache != NULL);
-	LASSERT(cfs_binheap_is_empty(orrd->od_binheap));
+	LASSERT(binheap_is_empty(orrd->od_binheap));
 
-	cfs_binheap_destroy(orrd->od_binheap);
+	binheap_destroy(orrd->od_binheap);
 	cfs_hash_putref(orrd->od_obj_hash);
 	kmem_cache_destroy(orrd->od_cache);
 
@@ -943,7 +942,7 @@ struct ptlrpc_nrs_request *nrs_orr_req_get(struct ptlrpc_nrs_policy *policy,
 					   bool peek, bool force)
 {
 	struct nrs_orr_data	  *orrd = policy->pol_private;
-	struct cfs_binheap_node	  *node = cfs_binheap_root(orrd->od_binheap);
+	struct binheap_node	  *node = binheap_root(orrd->od_binheap);
 	struct ptlrpc_nrs_request *nrq;
 
 	nrq = unlikely(node == NULL) ? NULL :
@@ -957,7 +956,7 @@ struct ptlrpc_nrs_request *nrs_orr_req_get(struct ptlrpc_nrs_policy *policy,
 
 		LASSERT(nrq->nr_u.orr.or_round <= orro->oo_round);
 
-		cfs_binheap_remove(orrd->od_binheap, &nrq->nr_node);
+		binheap_remove(orrd->od_binheap, &nrq->nr_node);
 		orro->oo_active--;
 
 		if (strncmp(policy->pol_desc->pd_name, NRS_POL_NAME_ORR,
@@ -977,7 +976,7 @@ struct ptlrpc_nrs_request *nrs_orr_req_get(struct ptlrpc_nrs_policy *policy,
 			       nrq->nr_u.orr.or_round);
 
 		/** Peek at the next request to be served */
-		node = cfs_binheap_root(orrd->od_binheap);
+		node = binheap_root(orrd->od_binheap);
 
 		/** No more requests */
 		if (unlikely(node == NULL)) {
@@ -1077,7 +1076,7 @@ static int nrs_orr_req_add(struct ptlrpc_nrs_policy *policy,
 	nrq->nr_u.orr.or_round = orro->oo_round;
 	nrq->nr_u.orr.or_sequence = orro->oo_sequence;
 
-	rc = cfs_binheap_insert(orrd->od_binheap, &nrq->nr_node);
+	rc = binheap_insert(orrd->od_binheap, &nrq->nr_node);
 	if (rc == 0) {
 		orro->oo_active++;
 		if (--orro->oo_quantum == 0)
@@ -1107,9 +1106,9 @@ static void nrs_orr_req_del(struct ptlrpc_nrs_policy *policy,
 
 	LASSERT(nrq->nr_u.orr.or_round <= orro->oo_round);
 
-	is_root = &nrq->nr_node == cfs_binheap_root(orrd->od_binheap);
+	is_root = &nrq->nr_node == binheap_root(orrd->od_binheap);
 
-	cfs_binheap_remove(orrd->od_binheap, &nrq->nr_node);
+	binheap_remove(orrd->od_binheap, &nrq->nr_node);
 	orro->oo_active--;
 
 	/**
@@ -1118,7 +1117,7 @@ static void nrs_orr_req_del(struct ptlrpc_nrs_policy *policy,
 	 */
 	if (unlikely(is_root)) {
 		/** Peek at the next request to be served */
-		struct cfs_binheap_node *node = cfs_binheap_root(orrd->od_binheap);
+		struct binheap_node *node = binheap_root(orrd->od_binheap);
 
 		/** No more requests */
 		if (unlikely(node == NULL)) {
@@ -1969,5 +1968,3 @@ struct ptlrpc_nrs_pol_conf nrs_conf_trr = {
 /** @} ORR/TRR policy */
 
 /** @} nrs */
-
-#endif /* HAVE_SERVER_SUPPORT */

@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/osp/osp_sync.c
  *
@@ -997,7 +996,7 @@ static void osp_sync_process_committed(const struct lu_env *env,
 	struct ptlrpc_request	*req;
 	struct llog_ctxt	*ctxt;
 	struct llog_handle	*llh;
-	int			*arr;
+	int			*arr, arr_size;
 	LIST_HEAD(list);
 	struct list_head	 *le;
 	struct llog_logid	 lgid;
@@ -1037,10 +1036,16 @@ static void osp_sync_process_committed(const struct lu_env *env,
 
 	list_for_each(le, &list)
 		count++;
-	if (count > 2)
-		OBD_ALLOC_PTR_ARRAY_LARGE(arr, count);
-	else
+	if (count > 2) {
+		arr_size = sizeof(int) * count;
+		/* limit cookie array to order 2 */
+		arr_size = arr_size < (PAGE_SIZE * 4) ? arr_size :
+			(PAGE_SIZE * 4);
+		OBD_ALLOC_LARGE(arr, arr_size);
+	} else {
 		arr = NULL;
+		arr_size = 0;
+	}
 	i = 0;
 	while (!list_empty(&list)) {
 		struct osp_job_req_args	*jra;
@@ -1069,7 +1074,7 @@ static void osp_sync_process_committed(const struct lu_env *env,
 				rc = llog_cat_cancel_records(env, llh, 1,
 							     &jra->jra_lcookie);
 				if (rc)
-					CERROR("%s: can't cancel record: %d\n",
+					CERROR("%s: can't cancel record: rc = %d\n",
 					       obd->obd_name, rc);
 			}
 		} else {
@@ -1078,20 +1083,25 @@ static void osp_sync_process_committed(const struct lu_env *env,
 		}
 		ptlrpc_req_finished(req);
 		done++;
-	}
-	if (arr && i > 0) {
-		rc = llog_cat_cancel_arr_rec(env, llh, &lgid, i, arr);
+		if (arr &&
+		    ((i * sizeof(int)) == arr_size ||
+		     (list_empty(&list) && i > 0))) {
+			rc = llog_cat_cancel_arr_rec(env, llh, &lgid, i, arr);
 
-		if (rc)
-			CERROR("%s: can't cancel %d records rc: %d\n",
-			       obd->obd_name, i, rc);
-		else
-			CDEBUG(D_OTHER, "%s: massive records cancel id "DFID\
-			       " num %d\n", obd->obd_name,
-			       PFID(&lgid.lgl_oi.oi_fid), i);
+			if (rc)
+				CERROR("%s: can't cancel %d records: rc = %d\n",
+				       obd->obd_name, i, rc);
+			else
+				CDEBUG(D_OTHER, "%s: massive records cancel id "DFID" num %d\n",
+				       obd->obd_name, PFID(&lgid.lgl_oi.oi_fid),
+				       i);
+			i = 0;
+		}
+
 	}
+
 	if (arr)
-		OBD_FREE_PTR_ARRAY_LARGE(arr, count);
+		OBD_FREE_LARGE(arr, arr_size);
 
 	llog_ctxt_put(ctxt);
 
@@ -1272,7 +1282,7 @@ next:
 
 		CERROR("%s: llog process with osp_sync_process_queues "
 		       "failed: %d\n", d->opd_obd->obd_name, rc);
-		GOTO(close, rc);
+		GOTO(wait, rc);
 	}
 	LASSERTF(rc == 0 || rc == LLOG_PROC_BREAK,
 		 "%u changes, %u in progress, %u in flight: %d\n",
@@ -1287,6 +1297,7 @@ next:
 		 atomic_read(&d->opd_sync_rpcs_in_progress),
 		 atomic_read(&d->opd_sync_rpcs_in_flight));
 
+wait:
 	/* wait till all the requests are completed */
 	count = 0;
 	while (atomic_read(&d->opd_sync_rpcs_in_progress) > 0) {
@@ -1306,7 +1317,6 @@ next:
 
 	}
 
-close:
 	llog_cat_close(env, llh);
 	rc = llog_cleanup(env, ctxt);
 	if (rc)
@@ -1432,7 +1442,7 @@ static int osp_sync_llog_init(const struct lu_env *env, struct osp_device *d)
 	LASSERT(lgh != NULL);
 	ctxt->loc_handle = lgh;
 
-	rc = llog_init_handle(env, lgh, LLOG_F_IS_CAT, NULL);
+	rc = llog_init_handle(env, lgh, LLOG_F_IS_CAT | LLOG_F_RM_ON_ERR, NULL);
 	if (rc)
 		GOTO(out_close, rc);
 

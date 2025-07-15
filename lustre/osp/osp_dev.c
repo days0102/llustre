@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/osp/osp_dev.c
  *
@@ -934,7 +933,7 @@ out:
 	RETURN(rc);
 }
 
-const struct dt_device_operations osp_dt_ops = {
+static const struct dt_device_operations osp_dt_ops = {
 	.dt_statfs	 = osp_statfs,
 	.dt_sync	 = osp_sync,
 	.dt_trans_create = osp_trans_create,
@@ -1530,19 +1529,18 @@ static int osp_obd_statfs(const struct lu_env *env, struct obd_export *exp,
 {
 	struct obd_statfs	*msfs;
 	struct ptlrpc_request	*req;
-	struct obd_import	*imp = NULL;
+	struct obd_import	*imp = NULL, *imp0;
 	int			 rc;
 
 	ENTRY;
 
 	/* Since the request might also come from lprocfs, so we need
-	 * sync this with client_disconnect_export Bug15684 */
-	down_read(&exp->exp_obd->u.cli.cl_sem);
-	if (exp->exp_obd->u.cli.cl_import)
-		imp = class_import_get(exp->exp_obd->u.cli.cl_import);
-	up_read(&exp->exp_obd->u.cli.cl_sem);
-	if (!imp)
-		RETURN(-ENODEV);
+	 * sync this with client_disconnect_export Bug15684
+	 */
+	with_imp_locked(exp->exp_obd, imp0, rc)
+		imp = class_import_get(imp0);
+	if (rc)
+		RETURN(rc);
 
 	req = ptlrpc_request_alloc(imp, &RQF_OST_STATFS);
 
@@ -1844,7 +1842,7 @@ struct lu_context_key osp_txn_key = {
 };
 LU_TYPE_INIT_FINI(osp, &osp_thread_key, &osp_txn_key);
 
-static struct lu_device_type_operations osp_device_type_ops = {
+static const struct lu_device_type_operations osp_device_type_ops = {
 	.ldto_init           = osp_type_init,
 	.ldto_fini           = osp_type_fini,
 
@@ -1901,14 +1899,14 @@ static int __init osp_init(void)
 	if (rc)
 		return rc;
 
-	rc = class_register_type(&osp_obd_device_ops, NULL, false, NULL,
+	rc = class_register_type(&osp_obd_device_ops, NULL, false,
 				 LUSTRE_OSP_NAME, &osp_device_type);
 	if (rc != 0) {
 		lu_kmem_fini(osp_caches);
 		return rc;
 	}
 
-	rc = class_register_type(&lwp_obd_device_ops, NULL, false, NULL,
+	rc = class_register_type(&lwp_obd_device_ops, NULL, false,
 				 LUSTRE_LWP_NAME, &lwp_device_type);
 	if (rc != 0) {
 		class_unregister_type(LUSTRE_OSP_NAME);

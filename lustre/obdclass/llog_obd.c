@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #define DEBUG_SUBSYSTEM S_LOG
@@ -143,7 +142,7 @@ EXPORT_SYMBOL(llog_cleanup);
 
 int llog_setup(const struct lu_env *env, struct obd_device *obd,
 	       struct obd_llog_group *olg, int index,
-	       struct obd_device *disk_obd, struct llog_operations *op)
+	       struct obd_device *disk_obd, const struct llog_operations *op)
 {
 	struct llog_ctxt *ctxt;
 	int rc = 0;

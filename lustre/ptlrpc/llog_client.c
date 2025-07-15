@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/ptlrpc/llog_client.c
  *
@@ -54,7 +53,7 @@
 	} else {                                                      \
 		CERROR("ctxt->loc_imp == NULL for context idx %d."    \
 		       "Unable to complete MDS/OSS recovery,"         \
-		       "but I'll try again next time.  Not fatal.\n", \
+		       "but I'll try again next time. Not fatal.\n", \
 		       ctxt->loc_idx);                                \
 		imp = NULL;                                           \
 		mutex_unlock(&ctxt->loc_mutex);                       \
@@ -343,7 +342,7 @@ static int llog_client_close(const struct lu_env *env,
 	return 0;
 }
 
-struct llog_operations llog_client_ops = {
+const struct llog_operations llog_client_ops = {
 	.lop_next_block		= llog_client_next_block,
 	.lop_prev_block		= llog_client_prev_block,
 	.lop_read_header	= llog_client_read_header,

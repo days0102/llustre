@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/ptlrpc/pinger.c
  *
@@ -74,19 +73,20 @@ int ptlrpc_obd_ping(struct obd_device *obd)
 {
 	int rc;
 	struct ptlrpc_request *req;
+	struct obd_import *imp;
 
 	ENTRY;
 
-	req = ptlrpc_prep_ping(obd->u.cli.cl_import);
-	if (!req)
-		RETURN(-ENOMEM);
-
-	req->rq_send_state = LUSTRE_IMP_FULL;
-
-	rc = ptlrpc_queue_wait(req);
-
-	ptlrpc_req_finished(req);
-
+	with_imp_locked(obd, imp, rc) {
+		req = ptlrpc_prep_ping(imp);
+		if (!req) {
+			rc = -ENOMEM;
+			continue;
+		}
+		req->rq_send_state = LUSTRE_IMP_FULL;
+		rc = ptlrpc_queue_wait(req);
+		ptlrpc_req_finished(req);
+	}
 	RETURN(rc);
 }
 EXPORT_SYMBOL(ptlrpc_obd_ping);
@@ -134,8 +134,9 @@ static int ptlrpc_ping(struct obd_import *imp)
 
 	ENTRY;
 
-	if (ptlrpc_check_import_is_idle(imp))
-		RETURN(ptlrpc_disconnect_and_idle_import(imp));
+	if (ptlrpc_check_import_is_idle(imp) &&
+	    ptlrpc_disconnect_and_idle_import(imp) == 1)
+			RETURN(0);
 
 	req = ptlrpc_prep_ping(imp);
 	if (!req) {
@@ -281,17 +282,13 @@ static void ptlrpc_pinger_main(struct work_struct *ws)
 	time64_t this_ping, time_after_ping;
 	timeout_t time_to_next_wake;
 	struct obd_import *imp;
-	struct list_head *iter;
 
 	do {
 		this_ping = ktime_get_seconds();
 
 		mutex_lock(&pinger_mutex);
 
-		list_for_each(iter, &pinger_imports) {
-			imp = list_entry(iter, struct obd_import,
-					 imp_pinger_chain);
-
+		list_for_each_entry(imp, &pinger_imports, imp_pinger_chain) {
 			ptlrpc_pinger_process_import(imp, this_ping);
 			/* obd_timeout might have changed */
 			if (imp->imp_pingable && imp->imp_next_ping &&

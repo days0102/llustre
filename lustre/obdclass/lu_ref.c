@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/obdclass/lu_ref.c
  *
@@ -360,7 +359,7 @@ static int lu_ref_seq_show(struct seq_file *seq, void *p)
 	return 0;
 }
 
-static struct seq_operations lu_ref_seq_ops = {
+static const struct seq_operations lu_ref_seq_ops = {
 	.start = lu_ref_seq_start,
 	.stop  = lu_ref_seq_stop,
 	.next  = lu_ref_seq_next,
@@ -405,12 +404,12 @@ static int lu_ref_seq_release(struct inode *inode, struct file *file)
 	return seq_release(inode, file);
 }
 
-static struct file_operations lu_ref_dump_fops = {
-	.owner   = THIS_MODULE,
-	.open    = lu_ref_seq_open,
-	.read    = seq_read,
-	.llseek  = seq_lseek,
-	.release = lu_ref_seq_release
+static const struct file_operations lu_ref_dump_fops = {
+	.owner		= THIS_MODULE,
+	.open		= lu_ref_seq_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= lu_ref_seq_release
 };
 
 #endif /* CONFIG_PROC_FS */

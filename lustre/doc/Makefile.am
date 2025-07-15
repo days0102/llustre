@@ -29,7 +29,6 @@
 
 #
 # This file is part of Lustre, http://www.lustre.org/
-# Lustre is a trademark of Sun Microsystems, Inc.
 #
 
 MANFILES =					\
@@ -47,6 +46,7 @@ MANFILES =					\
 	lfs-df.1				\
 	lfs-fid2path.1				\
 	lfs-find.1				\
+	lfs-flushctx.1				\
 	lfs-getdirstripe.1			\
 	lfs-getname.1				\
 	lfs-getsom.1				\
@@ -177,7 +177,8 @@ LIBMAN = 					\
 	llapi_rmfid.3				\
 	llapi_search_mdt.3			\
 	llapi_search_ost.3			\
-	llapi_search_tgt.3
+	llapi_search_tgt.3			\
+	llapi_unlink_foreign.3
 
 SERVER_MANFILES =				\
 	lctl-barrier.8				\

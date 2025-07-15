@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/lov/lov_pack.c
  *
@@ -166,8 +165,14 @@ static ssize_t lov_lsm_pack_foreign(const struct lov_stripe_md *lsm, void *buf,
 	if (buf_size == 0)
 		RETURN(lfm_size);
 
-	if (buf_size < lfm_size)
+	/* if buffer too small return ERANGE but copy the size the
+	 * caller has requested anyway. This may be useful to get
+	 * only the header without the need to alloc the full size
+	 */
+	if (buf_size < lfm_size) {
+		memcpy(lfm, lsm_foreign(lsm), buf_size);
 		RETURN(-ERANGE);
+	}
 
 	/* full foreign LOV is already avail in its cache
 	 * no need to translate format fields to little-endian
@@ -461,13 +466,6 @@ int lov_getstripe(const struct lu_env *env, struct lov_object *obj,
 		lmm_size = lmmk_size;
 	}
 
-	/**
-	 * Return stripe_count=1 instead of 0 for DoM files to avoid
-	 * divide-by-zero for older userspace that calls this ioctl,
-	 * e.g. lustre ADIO driver.
-	 */
-	if ((lum.lmm_stripe_count == 0) && (lum.lmm_pattern & LOV_PATTERN_MDT))
-		lum.lmm_stripe_count = 1;
 	/**
 	 * User specified limited buffer size, usually the buffer is
 	 * from ll_lov_setstripe(), and the buffer can only hold basic

@@ -29,7 +29,6 @@
 
 #
 # This file is part of Lustre, http://www.lustre.org/
-# Lustre is a trademark of Sun Microsystems, Inc.
 #
 
 SUBDIRS = lustre uapi/linux/lustre
@@ -48,11 +47,9 @@ EXTRA_DIST = \
 	lustre_barrier.h \
 	lustre_compat.h \
 	lustre_crypto.h \
-	lustre_debug.h \
 	lustre_disk.h \
 	lustre_dlm_flags.h \
 	lustre_dlm.h \
-	lustre_eacl.h \
 	lustre_errno.h \
 	lustre_export.h \
 	lustre_fid.h \

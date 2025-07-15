@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/ptlrpc/recover.c
  *
@@ -67,17 +66,16 @@ void ptlrpc_initiate_recovery(struct obd_import *imp)
  */
 int ptlrpc_replay_next(struct obd_import *imp, int *inflight)
 {
-        int rc = 0;
-	struct list_head *tmp, *pos;
-        struct ptlrpc_request *req = NULL;
-        __u64 last_transno;
-        ENTRY;
+	int rc = 0;
+	struct ptlrpc_request *req = NULL;
+	__u64 last_transno;
+	ENTRY;
 
-        *inflight = 0;
+	*inflight = 0;
 
-        /* It might have committed some after we last spoke, so make sure we
-         * get rid of them now.
-         */
+	/* It might have committed some after we last spoke, so make sure we
+	 * get rid of them now.
+	 */
 	spin_lock(&imp->imp_lock);
 	imp->imp_last_transno_checked = 0;
 	ptlrpc_free_committed(imp);
@@ -89,9 +87,8 @@ int ptlrpc_replay_next(struct obd_import *imp, int *inflight)
 
 	/* Replay all the committed open requests on committed_list first */
 	if (!list_empty(&imp->imp_committed_list)) {
-		tmp = imp->imp_committed_list.prev;
-		req = list_entry(tmp, struct ptlrpc_request,
-				     rq_replay_list);
+		req = list_last_entry(&imp->imp_committed_list,
+				      struct ptlrpc_request, rq_replay_list);
 
 		/* The last request on committed_list hasn't been replayed */
 		if (req->rq_transno > last_transno) {
@@ -103,8 +100,8 @@ int ptlrpc_replay_next(struct obd_import *imp, int *inflight)
 			while (imp->imp_replay_cursor !=
 			       &imp->imp_committed_list) {
 				req = list_entry(imp->imp_replay_cursor,
-						     struct ptlrpc_request,
-						     rq_replay_list);
+						 struct ptlrpc_request,
+						 rq_replay_list);
 				if (req->rq_transno > last_transno)
 					break;
 
@@ -123,13 +120,14 @@ int ptlrpc_replay_next(struct obd_import *imp, int *inflight)
 	/* All the requests in committed list have been replayed, let's replay
 	 * the imp_replay_list */
 	if (req == NULL) {
-		list_for_each_safe(tmp, pos, &imp->imp_replay_list) {
-			req = list_entry(tmp, struct ptlrpc_request,
-					     rq_replay_list);
+		struct ptlrpc_request *tmp;
 
-			if (req->rq_transno > last_transno)
+		list_for_each_entry(tmp, &imp->imp_replay_list,
+				    rq_replay_list) {
+			if (tmp->rq_transno > last_transno) {
+				req = tmp;
 				break;
-			req = NULL;
+			}
 		}
 	}
 
@@ -159,8 +157,8 @@ int ptlrpc_replay_next(struct obd_import *imp, int *inflight)
 
 		rc = ptlrpc_replay_req(req);
 		if (rc) {
-			CERROR("recovery replay error %d for req "
-			       "%llu\n", rc, req->rq_xid);
+			CERROR("recovery replay error %d for req %llu\n",
+			       rc, req->rq_xid);
 			RETURN(rc);
 		}
 		*inflight = 1;
@@ -174,7 +172,7 @@ int ptlrpc_replay_next(struct obd_import *imp, int *inflight)
  */
 int ptlrpc_resend(struct obd_import *imp)
 {
-        struct ptlrpc_request *req, *next;
+	struct ptlrpc_request *req;
 
         ENTRY;
 
@@ -190,7 +188,7 @@ int ptlrpc_resend(struct obd_import *imp)
                 RETURN(-1);
         }
 
-	list_for_each_entry_safe(req, next, &imp->imp_sending_list, rq_list) {
+	list_for_each_entry(req, &imp->imp_sending_list, rq_list) {
 		LASSERTF((long)req > PAGE_SIZE && req != LP_POISON,
 			 "req %p bad\n", req);
 		LASSERTF(req->rq_type != LI_POISON, "req %p freed\n", req);
@@ -213,13 +211,10 @@ int ptlrpc_resend(struct obd_import *imp)
  */
 void ptlrpc_wake_delayed(struct obd_import *imp)
 {
-	struct list_head *tmp, *pos;
 	struct ptlrpc_request *req;
 
 	spin_lock(&imp->imp_lock);
-	list_for_each_safe(tmp, pos, &imp->imp_delayed_list) {
-		req = list_entry(tmp, struct ptlrpc_request, rq_list);
-
+	list_for_each_entry(req, &imp->imp_delayed_list, rq_list) {
 		DEBUG_REQ(D_HA, req, "waking (set %p):", req->rq_set);
 		ptlrpc_client_wake_req(req);
 	}

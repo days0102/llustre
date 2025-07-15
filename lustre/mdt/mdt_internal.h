@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/mdt/mdt_internal.h
  *
@@ -56,7 +55,6 @@
 #include <lustre_req_layout.h>
 #include <lustre_sec.h>
 #include <lustre_idmap.h>
-#include <lustre_eacl.h>
 #include <lustre_quota.h>
 #include <lustre_linkea.h>
 #include <lustre_lmv.h>
@@ -293,7 +291,9 @@ struct mdt_device {
 				   mdt_skip_lfsck:1,
 				   mdt_readonly:1,
 				   /* dir restripe migrate dirent only */
-				   mdt_dir_restripe_nsonly:1;
+				   mdt_dir_restripe_nsonly:1,
+				   /* subdirectory mount of remote dir */
+				   mdt_enable_remote_subdir_mount:1;
 
 				   /* user with gid can create remote/striped
 				    * dir, and set default dir stripe */
@@ -440,6 +440,11 @@ struct mdt_thread_info {
 	 */
 	struct req_capsule        *mti_pill;
 
+	/*
+	 * SUB request pill in a batch request.
+	 */
+	struct req_capsule	    mti_sub_pill;
+
 	/* although we have export in req, there are cases when it is not
 	 * available, e.g. closing files upon export destroy */
 	struct obd_export          *mti_exp;
@@ -484,6 +489,12 @@ struct mdt_thread_info {
 	/* big_lmm buffer was used and must be used in reply */
 				   mti_big_lmm_used:1,
 				   mti_big_acl_used:1,
+	/* Batch processing environment */
+				   mti_batch_env:1,
+				   mti_intent_lock:1,
+				   mti_parent_locked:1,
+	/* Request to grant EX WBC lock to the client for the child. */
+				   mti_exlock_update:1,
 				   mti_som_valid:1;
 
 	/* opdata for mdt_reint_open(), has the same as
@@ -573,14 +584,10 @@ static inline struct mdt_thread_info *mdt_th_info(const struct lu_env *env)
 }
 
 struct cdt_req_progress {
-	struct mutex		 crp_lock;	/**< protect tree */
-	struct interval_node	*crp_root;	/**< tree to track extent
+	spinlock_t		 crp_lock;	/**< protect tree */
+	struct interval_tree_root crp_root;	/**< tree to track extent
 						 *   moved */
-	struct interval_node	**crp_node;	/**< buffer for tree nodes
-						 *   vector of fixed size
-						 *   vectors */
-	int			 crp_cnt;	/**< # of used nodes */
-	int			 crp_max;	/**< # of allocated nodes */
+	__u64			 crp_total;
 };
 
 struct cdt_agent_req {
@@ -851,6 +858,7 @@ int mdt_name_unpack(struct req_capsule *pill,
 		    enum mdt_name_flags flags);
 int mdt_close_unpack(struct mdt_thread_info *info);
 int mdt_reint_unpack(struct mdt_thread_info *info, __u32 op);
+int mdt_batch_unpack(struct mdt_thread_info *info, __u32 op);
 void mdt_fix_lov_magic(struct mdt_thread_info *info, void *eadata);
 int mdt_reint_rec(struct mdt_thread_info *, struct mdt_lock_handle *);
 #ifdef CONFIG_LUSTRE_FS_POSIX_ACL
@@ -888,6 +896,8 @@ int mdt_lock_new_child(struct mdt_thread_info *info,
 		       struct mdt_lock_handle *child_lockh);
 void mdt_mfd_set_mode(struct mdt_file_data *mfd, u64 open_flags);
 int mdt_reint_open(struct mdt_thread_info *info, struct mdt_lock_handle *lhc);
+void mdt_prep_ma_buf_from_rep(struct mdt_thread_info *info,
+			      struct mdt_object *obj, struct md_attr *ma);
 struct mdt_file_data *mdt_open_handle2mfd(struct mdt_export_data *med,
 					const struct lustre_handle *open_handle,
 					bool is_replay);
@@ -946,6 +956,7 @@ int mdt_lookup_version_check(struct mdt_thread_info *info,
 			     struct mdt_object *p,
 			     const struct lu_name *lname,
 			     struct lu_fid *fid, int idx);
+void mdt_thread_info_reset(struct mdt_thread_info *info);
 void mdt_thread_info_init(struct ptlrpc_request *req,
 			  struct mdt_thread_info *mti);
 void mdt_thread_info_fini(struct mdt_thread_info *mti);
@@ -1017,6 +1028,9 @@ __u32 mdt_identity_get_perm(struct md_identity *, lnet_nid_t);
 /* mdt/mdt_recovery.c */
 __u64 mdt_req_from_lrd(struct ptlrpc_request *req, struct tg_reply_data *trd);
 
+/* mdt/mdt_batch.c */
+int mdt_batch(struct tgt_session_info *tsi);
+
 /* mdt/mdt_hsm.c */
 int mdt_hsm_state_get(struct tgt_session_info *tsi);
 int mdt_hsm_state_set(struct tgt_session_info *tsi);
@@ -1083,7 +1097,6 @@ struct cdt_agent_req *mdt_cdt_alloc_request(__u32 archive_id, __u64 flags,
 void mdt_cdt_free_request(struct cdt_agent_req *car);
 int mdt_cdt_add_request(struct coordinator *cdt, struct cdt_agent_req *new_car);
 struct cdt_agent_req *mdt_cdt_find_request(struct coordinator *cdt, u64 cookie);
-void mdt_cdt_get_work_done(struct cdt_agent_req *car, __u64 *done_sz);
 void mdt_cdt_get_request(struct cdt_agent_req *car);
 void mdt_cdt_put_request(struct cdt_agent_req *car);
 struct cdt_agent_req *mdt_cdt_update_request(struct coordinator *cdt,
@@ -1414,7 +1427,7 @@ static inline bool mdt_is_rootadmin(struct mdt_thread_info *info)
 
 	uc = mdt_ucred(info);
 	is_admin = (uc->uc_uid == 0 && uc->uc_gid == 0 &&
-		    md_capable(uc, CFS_CAP_SYS_ADMIN));
+		    md_capable(uc, CAP_SYS_ADMIN));
 
 	mdt_exit_ucred(info);
 

@@ -552,7 +552,7 @@ struct lfsck_component {
 	struct lfsck_instance	*lc_lfsck;
 	struct dt_object	*lc_obj;
 	struct lfsck_sub_trace_obj lc_sub_trace_objs[LFSCK_STF_COUNT];
-	struct lfsck_operations *lc_ops;
+	const struct lfsck_operations *lc_ops;
 	void			*lc_file_ram;
 	void			*lc_file_disk;
 	void			*lc_data;
@@ -849,7 +849,7 @@ struct lfsck_assistant_data {
 	struct ptlrpc_thread			 lad_thread;
 	struct task_struct			*lad_task;
 
-	struct lfsck_assistant_operations	*lad_ops;
+	const struct lfsck_assistant_operations	*lad_ops;
 
 	struct cfs_bitmap				*lad_bitmap;
 
@@ -948,7 +948,7 @@ void lfsck_component_cleanup(const struct lu_env *env,
 			     struct lfsck_component *com);
 void lfsck_instance_cleanup(const struct lu_env *env,
 			    struct lfsck_instance *lfsck);
-void lfsck_bits_dump(struct seq_file *m, int bits, const char *names[],
+void lfsck_bits_dump(struct seq_file *m, int bits, const char *const names[],
 		     const char *prefix);
 void lfsck_time_dump(struct seq_file *m, time64_t time, const char *name);
 void lfsck_pos_dump(struct seq_file *m, struct lfsck_position *pos,
@@ -960,7 +960,7 @@ void lfsck_control_speed(struct lfsck_instance *lfsck);
 void lfsck_control_speed_by_self(struct lfsck_component *com);
 void lfsck_thread_args_fini(struct lfsck_thread_args *lta);
 struct lfsck_assistant_data *
-lfsck_assistant_data_init(struct lfsck_assistant_operations *lao,
+lfsck_assistant_data_init(const struct lfsck_assistant_operations *lao,
 			  const char *name);
 struct lfsck_assistant_object *
 lfsck_assistant_object_init(const struct lu_env *env, const struct lu_fid *fid,
@@ -1103,8 +1103,8 @@ int lfsck_layout_setup(const struct lu_env *env, struct lfsck_instance *lfsck);
 
 extern const char dot[];
 extern const char dotdot[];
-extern const char *lfsck_flags_names[];
-extern const char *lfsck_param_names[];
+extern const char *const lfsck_flags_names[];
+extern const char *const lfsck_param_names[];
 extern struct lu_context_key lfsck_thread_key;
 
 static inline struct dt_device *lfsck_obj2dev(struct dt_object *obj)

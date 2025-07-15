@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 
 #ifndef _OBD_SUPPORT
@@ -233,6 +232,7 @@ extern char obd_jobid_var[];
 #define OBD_FAIL_MDS_FLD_LOOKUP			0x15c
 #define OBD_FAIL_MDS_CHANGELOG_REORDER	0x15d
 #define OBD_FAIL_MDS_LLOG_UMOUNT_RACE   0x15e
+#define OBD_FAIL_MDS_CHANGELOG_RACE	 0x15f
 #define OBD_FAIL_MDS_INTENT_DELAY		0x160
 #define OBD_FAIL_MDS_XATTR_REP			0x161
 #define OBD_FAIL_MDS_TRACK_OVERFLOW	 0x162
@@ -244,6 +244,8 @@ extern char obd_jobid_var[];
 #define OBD_FAIL_MDS_STATFS_SPOOF	 0x168
 #define OBD_FAIL_MDS_REINT_OPEN		 0x169
 #define OBD_FAIL_MDS_REINT_OPEN2	 0x16a
+#define OBD_FAIL_MDS_COMMITRW_DELAY	 0x16b
+#define OBD_FAIL_MDS_BATCH_NET		 0x16c
 
 /* layout lock */
 #define OBD_FAIL_MDS_NO_LL_GETATTR	 0x170
@@ -276,6 +278,8 @@ extern char obd_jobid_var[];
 #define OBD_FAIL_OSD_TXN_START				0x19a
 #define OBD_FAIL_OSD_DUPLICATE_MAP			0x19b
 #define OBD_FAIL_OSD_REF_DEL				0x19c
+#define OBD_FAIL_OSD_OI_ENOSPC				0x19d
+#define OBD_FAIL_OSD_DOTDOT_ENOSPC			0x19e
 
 #define OBD_FAIL_OFD_SET_OID				0x1e0
 
@@ -392,6 +396,7 @@ extern char obd_jobid_var[];
 #define OBD_FAIL_LDLM_PROLONG_PAUSE	 0x32b
 #define OBD_FAIL_LDLM_LOCAL_CANCEL_PAUSE 0x32c
 #define OBD_FAIL_LDLM_LOCK_REPLAY	 0x32d
+#define OBD_FAIL_LDLM_REPLAY_PAUSE	 0x32e
 
 /* LOCKLESS IO */
 #define OBD_FAIL_LDLM_SET_CONTENTION     0x385
@@ -451,6 +456,9 @@ extern char obd_jobid_var[];
 #define OBD_FAIL_PTLRPC_RESEND_RACE	 0x525
 #define OBD_FAIL_PTLRPC_ROUND_XID	 0x530
 #define OBD_FAIL_PTLRPC_CONNECT_RACE	 0x531
+#define OBD_FAIL_NET_ERROR_RPC		 0x532
+#define OBD_FAIL_PTLRPC_IDLE_RACE	 0x533
+#define OBD_FAIL_PTLRPC_ENQ_RESEND	 0x534
 
 #define OBD_FAIL_OBD_PING_NET            0x600
 /*	OBD_FAIL_OBD_LOG_CANCEL_NET      0x601 obsolete since 1.5 */
@@ -588,6 +596,9 @@ extern char obd_jobid_var[];
 #define OBD_FAIL_LLITE_PCC_ATTACH_PAUSE		    0x1414
 #define OBD_FAIL_LLITE_SHORT_COMMIT		    0x1415
 #define OBD_FAIL_LLITE_CREATE_FILE_PAUSE2	    0x1416
+#define OBD_FAIL_LLITE_RACE_MOUNT		    0x1417
+#define OBD_FAIL_LLITE_MEMFS_LOOKUP_PAUSE	    0x1418
+#define OBD_FAIL_LLITE_WBC_FLUSH_PAUSE		    0x1419
 
 #define OBD_FAIL_FID_INDIR	0x1501
 #define OBD_FAIL_FID_INLMA	0x1502
@@ -653,6 +664,7 @@ extern char obd_jobid_var[];
 #define OBD_FAIL_OUT_ENOSPC             0x1704
 #define OBD_FAIL_INVALIDATE_UPDATE	0x1705
 #define OBD_FAIL_OUT_UPDATE_DROP        0x1707
+#define OBD_FAIL_OUT_OBJECT_MISS	0x1708
 
 /* MIGRATE */
 #define OBD_FAIL_MIGRATE_ENTRIES		0x1801
@@ -701,6 +713,7 @@ extern char obd_jobid_var[];
 #define OBD_FAIL_OSP_CANT_PROCESS_LLOG		0x2105
 #define OBD_FAIL_OSP_INVALID_LOGID		0x2106
 #define OBD_FAIL_OSP_CON_EVENT_DELAY		0x2107
+#define OBD_FAIL_OSP_PRECREATE_PAUSE		0x2108
 
 /* barrier */
 #define OBD_FAIL_MGS_BARRIER_READ_NET		0x2200
@@ -828,8 +841,7 @@ do {									      \
 #define __OBD_VMALLOC_VERBOSE(ptr, cptab, cpt, size)			      \
 do {									      \
 	(ptr) = cptab == NULL ?						      \
-		__vmalloc(size, GFP_NOFS | __GFP_HIGHMEM | __GFP_ZERO,	      \
-			  PAGE_KERNEL) :				      \
+		__ll_vmalloc(size, GFP_NOFS | __GFP_HIGHMEM | __GFP_ZERO) :   \
 		cfs_cpt_vzalloc(cptab, cpt, size);			      \
 	if (unlikely((ptr) == NULL)) {                                        \
 		CERROR("vmalloc of '" #ptr "' (%d bytes) failed\n",           \
@@ -965,6 +977,7 @@ do {                                                                          \
 #define KEY_IS(str) \
         (keylen >= (sizeof(str)-1) && memcmp(key, str, (sizeof(str)-1)) == 0)
 
+#ifdef HAVE_SERVER_SUPPORT
 /* LUSTRE_LMA_FL_MASKS defines which flags will be stored in LMA */
 
 static inline int lma_to_lustre_flags(__u32 lma_flags)
@@ -978,6 +991,7 @@ static inline int lustre_to_lma_flags(__u32 la_flags)
 	return (((la_flags & LUSTRE_ORPHAN_FL) ? LMAI_ORPHAN : 0) |
 		((la_flags & LUSTRE_ENCRYPT_FL) ? LMAI_ENCRYPT : 0));
 }
+#endif /* HAVE_SERVER_SUPPORT */
 
 /* Convert wire LUSTRE_*_FL to corresponding client local VFS S_* values
  * for the client inode i_flags.  The LUSTRE_*_FL are the Lustre wire
@@ -986,28 +1000,28 @@ static inline int lustre_to_lma_flags(__u32 la_flags)
  * versions. These flags are set/cleared via FSFILT_IOC_{GET,SET}_FLAGS.
  * See b=16526 for a full history.
  */
-static inline int ll_ext_to_inode_flags(int flags)
+static inline int ll_ext_to_inode_flags(int ext_flags)
 {
-	return (((flags & LUSTRE_SYNC_FL)      ? S_SYNC      : 0) |
-		((flags & LUSTRE_NOATIME_FL)   ? S_NOATIME   : 0) |
-		((flags & LUSTRE_APPEND_FL)    ? S_APPEND    : 0) |
-		((flags & LUSTRE_DIRSYNC_FL)   ? S_DIRSYNC   : 0) |
+	return (((ext_flags & LUSTRE_SYNC_FL)      ? S_SYNC      : 0) |
+		((ext_flags & LUSTRE_NOATIME_FL)   ? S_NOATIME   : 0) |
+		((ext_flags & LUSTRE_APPEND_FL)    ? S_APPEND    : 0) |
+		((ext_flags & LUSTRE_DIRSYNC_FL)   ? S_DIRSYNC   : 0) |
 #if defined(S_ENCRYPTED)
-		((flags & LUSTRE_ENCRYPT_FL)   ? S_ENCRYPTED : 0) |
+		((ext_flags & LUSTRE_ENCRYPT_FL)   ? S_ENCRYPTED : 0) |
 #endif
-		((flags & LUSTRE_IMMUTABLE_FL) ? S_IMMUTABLE : 0));
+		((ext_flags & LUSTRE_IMMUTABLE_FL) ? S_IMMUTABLE : 0));
 }
 
-static inline int ll_inode_to_ext_flags(int iflags)
+static inline int ll_inode_to_ext_flags(int inode_flags)
 {
-	return (((iflags & S_SYNC)      ? LUSTRE_SYNC_FL      : 0) |
-		((iflags & S_NOATIME)   ? LUSTRE_NOATIME_FL   : 0) |
-		((iflags & S_APPEND)    ? LUSTRE_APPEND_FL    : 0) |
-		((iflags & S_DIRSYNC)   ? LUSTRE_DIRSYNC_FL   : 0) |
+	return (((inode_flags & S_SYNC)      ? LUSTRE_SYNC_FL      : 0) |
+		((inode_flags & S_NOATIME)   ? LUSTRE_NOATIME_FL   : 0) |
+		((inode_flags & S_APPEND)    ? LUSTRE_APPEND_FL    : 0) |
+		((inode_flags & S_DIRSYNC)   ? LUSTRE_DIRSYNC_FL   : 0) |
 #if defined(S_ENCRYPTED)
-		((iflags & S_ENCRYPTED) ? LUSTRE_ENCRYPT_FL   : 0) |
+		((inode_flags & S_ENCRYPTED) ? LUSTRE_ENCRYPT_FL   : 0) |
 #endif
-		((iflags & S_IMMUTABLE) ? LUSTRE_IMMUTABLE_FL : 0));
+		((inode_flags & S_IMMUTABLE) ? LUSTRE_IMMUTABLE_FL : 0));
 }
 
 struct obd_heat_instance {

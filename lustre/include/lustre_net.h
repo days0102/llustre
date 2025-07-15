@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  */
 /** \defgroup PtlRPC Portal RPC and networking module.
  *
@@ -373,6 +372,9 @@
  */
 #define OUT_MAXREQSIZE	(1000 * 1024)
 #define OUT_MAXREPSIZE	MDS_MAXREPSIZE
+
+#define BUT_MAXREQSIZE	OUT_MAXREQSIZE
+#define BUT_MAXREPSIZE	BUT_MAXREQSIZE
 
 /** MDS_BUFSIZE = max_reqsize (w/o LOV EA) + max sptlrpc payload size */
 #define MDS_BUFSIZE		max(MDS_MAXREQSIZE + SPTLRPC_MAX_PAYLOAD, \
@@ -944,6 +946,10 @@ struct ptlrpc_srv_req {
 #define rq_user_desc		rq_srv.sr_user_desc
 #define rq_ops			rq_srv.sr_ops
 #define rq_rqbd			rq_srv.sr_rqbd
+#define rq_reqmsg		rq_pill.rc_reqmsg
+#define rq_repmsg		rq_pill.rc_repmsg
+#define rq_req_swab_mask	rq_pill.rc_req_swab_mask
+#define rq_rep_swab_mask	rq_pill.rc_rep_swab_mask
 
 /**
  * Represents remote procedure call.
@@ -1030,16 +1036,14 @@ struct ptlrpc_request {
         int rq_replen;
 	/** Pool if request is from preallocated list */
 	struct ptlrpc_request_pool	*rq_pool;
-	/** Request message - what client sent */
-	struct lustre_msg *rq_reqmsg;
-        /** Reply message - server response */
-        struct lustre_msg *rq_repmsg;
         /** Transaction number */
         __u64 rq_transno;
         /** xid */
         __u64				 rq_xid;
 	/** bulk match bits */
 	__u64				 rq_mbits;
+	/** reply match bits */
+	__u64				 rq_rep_mbits;
 	/**
 	 * List item to for replay list. Not yet committed requests get linked
 	 * there.
@@ -1102,10 +1106,6 @@ struct ptlrpc_request {
 	unsigned int			 rq_reply_off;
 	/** @} */
 
-	/** Fields that help to see if request and reply were swabbed or not */
-	__u32				 rq_req_swab_mask;
-	__u32				 rq_rep_swab_mask;
-
 	/** how many early replies (for stats) */
 	int				 rq_early_count;
 	/** Server-side, export on which request was received */
@@ -1162,11 +1162,7 @@ static inline int ptlrpc_req_interpret(const struct lu_env *env,
 /** \addtogroup  nrs
  * @{
  */
-int ptlrpc_nrs_policy_register(struct ptlrpc_nrs_pol_conf *conf);
-int ptlrpc_nrs_policy_unregister(struct ptlrpc_nrs_pol_conf *conf);
 void ptlrpc_nrs_req_hp_move(struct ptlrpc_request *req);
-void nrs_policy_get_info_locked(struct ptlrpc_nrs_policy *policy,
-				struct ptlrpc_nrs_pol_info *info);
 
 /*
  * Can the request be moved from the regular NRS head to the high-priority NRS
@@ -1188,60 +1184,40 @@ static inline bool ptlrpc_nrs_req_can_move(struct ptlrpc_request *req)
 }
 /** @} nrs */
 
-/**
- * Returns true if request buffer at offset \a index was already swabbed
- */
-static inline bool lustre_req_swabbed(struct ptlrpc_request *req, size_t index)
+static inline bool req_capsule_ptlreq(struct req_capsule *pill)
 {
-	LASSERT(index < sizeof(req->rq_req_swab_mask) * 8);
-	return req->rq_req_swab_mask & BIT(index);
+	struct ptlrpc_request *req = pill->rc_req;
+
+	return req != NULL && pill == &req->rq_pill;
 }
 
-/**
- * Returns true if request reply buffer at offset \a index was already swabbed
- */
-static inline bool lustre_rep_swabbed(struct ptlrpc_request *req, size_t index)
+static inline bool req_capsule_subreq(struct req_capsule *pill)
 {
-	LASSERT(index < sizeof(req->rq_rep_swab_mask) * 8);
-	return req->rq_rep_swab_mask & BIT(index);
+	struct ptlrpc_request *req = pill->rc_req;
+
+	return req == NULL || pill != &req->rq_pill;
 }
 
 /**
  * Returns true if request needs to be swabbed into local cpu byteorder
  */
-static inline bool ptlrpc_req_need_swab(struct ptlrpc_request *req)
+static inline bool req_capsule_req_need_swab(struct req_capsule *pill)
 {
-	return lustre_req_swabbed(req, MSG_PTLRPC_HEADER_OFF);
+	struct ptlrpc_request *req = pill->rc_req;
+
+	return req && req_capsule_req_swabbed(&req->rq_pill,
+					      MSG_PTLRPC_HEADER_OFF);
 }
 
 /**
  * Returns true if request reply needs to be swabbed into local cpu byteorder
  */
-static inline bool ptlrpc_rep_need_swab(struct ptlrpc_request *req)
+static inline bool req_capsule_rep_need_swab(struct req_capsule *pill)
 {
-	return lustre_rep_swabbed(req, MSG_PTLRPC_HEADER_OFF);
-}
+	struct ptlrpc_request *req = pill->rc_req;
 
-/**
- * Mark request buffer at offset \a index that it was already swabbed
- */
-static inline void lustre_set_req_swabbed(struct ptlrpc_request *req,
-					  size_t index)
-{
-	LASSERT(index < sizeof(req->rq_req_swab_mask) * 8);
-	LASSERT((req->rq_req_swab_mask & BIT(index)) == 0);
-	req->rq_req_swab_mask |= BIT(index);
-}
-
-/**
- * Mark request reply buffer at offset \a index that it was already swabbed
- */
-static inline void lustre_set_rep_swabbed(struct ptlrpc_request *req,
-					  size_t index)
-{
-	LASSERT(index < sizeof(req->rq_rep_swab_mask) * 8);
-	LASSERT((req->rq_rep_swab_mask & BIT(index)) == 0);
-	req->rq_rep_swab_mask |= BIT(index);
+	return req && req_capsule_rep_swabbed(&req->rq_pill,
+					      MSG_PTLRPC_HEADER_OFF);
 }
 
 /**
@@ -2264,9 +2240,7 @@ struct ptlrpc_service *ptlrpc_register_service(
 				struct ptlrpc_service_conf *conf,
 				struct kset *parent,
 				struct dentry *debugfs_entry);
-void ptlrpc_stop_all_threads(struct ptlrpc_service *svc);
 
-int ptlrpc_start_threads(struct ptlrpc_service *svc);
 int ptlrpc_unregister_service(struct ptlrpc_service *service);
 int ptlrpc_service_health_check(struct ptlrpc_service *);
 void ptlrpc_server_drop_request(struct ptlrpc_request *req);
@@ -2313,10 +2287,6 @@ int ptlrpc_reconnect_import(struct obd_import *imp);
 				 MDS_REG_MAXREQSIZE : OUT_MAXREQSIZE)
 #define PTLRPC_MAX_BUFLEN	(OST_IO_MAXREQSIZE > MD_MAX_BUFLEN ? \
 				 OST_IO_MAXREQSIZE : MD_MAX_BUFLEN)
-bool ptlrpc_buf_need_swab(struct ptlrpc_request *req, const int inout,
-			  __u32 index);
-void ptlrpc_buf_set_swabbed(struct ptlrpc_request *req, const int inout,
-			    __u32 index);
 int ptlrpc_unpack_rep_msg(struct ptlrpc_request *req, int len);
 int ptlrpc_unpack_req_msg(struct ptlrpc_request *req, int len);
 
@@ -2727,7 +2697,7 @@ int llog_origin_handle_next_block(struct ptlrpc_request *req);
 int llog_origin_handle_read_header(struct ptlrpc_request *req);
 
 /* ptlrpc/llog_client.c */
-extern struct llog_operations llog_client_ops;
+extern const struct llog_operations llog_client_ops;
 /** @} net */
 
 #endif

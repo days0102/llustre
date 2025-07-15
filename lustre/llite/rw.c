@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/llite/rw.c
  *
@@ -85,17 +84,33 @@ static unsigned long ll_ra_count_get(struct ll_sb_info *sbi,
 				     unsigned long pages,
 				     unsigned long pages_min)
 {
-        struct ll_ra_info *ra = &sbi->ll_ra_info;
-        long ret;
+	struct ll_ra_info *ra = &sbi->ll_ra_info;
+	long ret;
+
         ENTRY;
 
-        /* If read-ahead pages left are less than 1M, do not do read-ahead,
-         * otherwise it will form small read RPC(< 1M), which hurt server
-         * performance a lot. */
+	/**
+	 * Don't try readahead agreesively if we are limited
+	 * LRU pages, otherwise, it could cause deadlock.
+	 */
+	pages = min(sbi->ll_cache->ccc_lru_max >> 2, pages);
+	/**
+	 * if this happen, we reserve more pages than needed,
+	 * this will make us leak @ra_cur_pages, because
+	 * ll_ra_count_put() acutally freed @pages.
+	 */
+	if (WARN_ON_ONCE(pages_min > pages))
+		pages_min = pages;
+
+	/*
+	 * If read-ahead pages left are less than 1M, do not do read-ahead,
+	 * otherwise it will form small read RPC(< 1M), which hurt server
+	 * performance a lot.
+	 */
 	ret = min(ra->ra_max_pages - atomic_read(&ra->ra_cur_pages),
 		  pages);
-        if (ret < 0 || ret < min_t(long, PTLRPC_MAX_BRW_PAGES, pages))
-                GOTO(out, ret = 0);
+	if (ret < 0 || ret < min_t(long, PTLRPC_MAX_BRW_PAGES, pages))
+		GOTO(out, ret = 0);
 
 	if (atomic_add_return(ret, &ra->ra_cur_pages) > ra->ra_max_pages) {
 		atomic_sub(ret, &ra->ra_cur_pages);
@@ -227,8 +242,10 @@ static int ll_read_ahead_page(const struct lu_env *env, struct cl_io *io,
 	cl_page_assume(env, io, page);
 	vpg = cl2vvp_page(cl_object_page_slice(clob, page));
 	if (!vpg->vpg_defer_uptodate && !PageUptodate(vmpage)) {
-		vpg->vpg_defer_uptodate = 1;
-		vpg->vpg_ra_used = 0;
+		if (hint == MAYNEED) {
+			vpg->vpg_defer_uptodate = 1;
+			vpg->vpg_ra_used = 0;
+		}
 		cl_page_list_add(queue, page);
 	} else {
 		/* skip completed pages */
@@ -691,10 +708,26 @@ static int ll_readahead(const struct lu_env *env, struct cl_io *io,
 	struct cl_object *clob;
 	int ret = 0;
 	__u64 kms;
+	struct ll_sb_info *sbi;
+	struct ll_ra_info *ra;
+
 	ENTRY;
+
+        ENTRY;
 
 	clob = io->ci_obj;
 	inode = vvp_object_inode(clob);
+	sbi = ll_i2sbi(inode);
+	ra = &sbi->ll_ra_info;
+
+	/**
+	 * In case we have a limited max_cached_mb, readahead
+	 * should be stopped if it have run out of all LRU slots.
+	 */
+	if (atomic_read(&ra->ra_cur_pages) >= sbi->ll_cache->ccc_lru_max) {
+		ll_ra_stats_inc(inode, RA_STAT_MAX_IN_FLIGHT);
+		RETURN(0);
+	}
 
 	memset(ria, 0, sizeof(*ria));
 	ret = ll_readahead_file_kms(env, io, &kms);
@@ -777,6 +810,14 @@ static int ll_readahead(const struct lu_env *env, struct cl_io *io,
 			vio->vui_ra_start_idx + vio->vui_ra_pages - 1;
 		pages_min = vio->vui_ra_start_idx + vio->vui_ra_pages -
 				ria->ria_start_idx;
+		 /**
+		  * For performance reason, exceeding @ra_max_pages
+		  * are allowed, but this should be limited with RPC
+		  * size in case a large block size read issued. Trim
+		  * to RPC boundary.
+		  */
+		pages_min = min(pages_min, ras->ras_rpc_pages -
+				(ria->ria_start_idx % ras->ras_rpc_pages));
 	}
 
 	/* don't over reserved for mmap range read */
@@ -1692,6 +1733,15 @@ static int kickoff_async_readahead(struct file *file, unsigned long pages)
 	pgoff_t start_idx = ras_align(ras, ras->ras_next_readahead_idx);
 	pgoff_t end_idx = start_idx + pages - 1;
 
+	/**
+	 * In case we have a limited max_cached_mb, readahead
+	 * should be stopped if it have run out of all LRU slots.
+	 */
+	if (atomic_read(&ra->ra_cur_pages) >= sbi->ll_cache->ccc_lru_max) {
+		ll_ra_stats_inc(inode, RA_STAT_MAX_IN_FLIGHT);
+		return 0;
+	}
+
 	throttle = min(ra->ra_async_pages_per_file_threshold,
 		       ra->ra_max_pages_per_file);
 	/*
@@ -1770,6 +1820,7 @@ int ll_readpage(struct file *file, struct page *vmpage)
 	struct cl_page *page;
 	struct ll_sb_info *sbi = ll_i2sbi(inode);
 	int result;
+
 	ENTRY;
 
 	lcc = ll_cl_find(file);

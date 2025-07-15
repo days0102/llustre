@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/osp/osp_precreate.c
  *
@@ -675,6 +674,9 @@ static int osp_precreate_send(const struct lu_env *env, struct osp_device *d)
 	if (rc) {
 		CERROR("%s: can't precreate: rc = %d\n", d->opd_obd->obd_name,
 		       rc);
+		if (req->rq_net_err)
+			/* have osp_precreate_reserve() to wait for repeat */
+			rc = -ENOTCONN;
 		GOTO(out_req, rc);
 	}
 	LASSERT(req->rq_transno == 0);
@@ -721,6 +723,9 @@ out_req:
 	/* now we can wakeup all users awaiting for objects */
 	osp_pre_update_status(d, rc);
 	wake_up(&d->opd_pre_user_waitq);
+
+	/* pause to let osp_precreate_reserve to go first */
+	CFS_FAIL_TIMEOUT(OBD_FAIL_OSP_PRECREATE_PAUSE, 2);
 
 	ptlrpc_req_finished(req);
 	RETURN(rc);
@@ -1406,7 +1411,8 @@ static int osp_precreate_ready_condition(const struct lu_env *env,
  * \retval		-EAGAIN try later, slow precreation in progress
  * \retval		-EIO when no access to OST
  */
-int osp_precreate_reserve(const struct lu_env *env, struct osp_device *d)
+int osp_precreate_reserve(const struct lu_env *env, struct osp_device *d,
+			  bool can_block)
 {
 	time64_t expire = ktime_get_seconds() + obd_timeout;
 	int precreated, rc, synced = 0;
@@ -1491,6 +1497,12 @@ int osp_precreate_reserve(const struct lu_env *env, struct osp_device *d)
 
 		if (ktime_get_seconds() >= expire) {
 			rc = -ETIMEDOUT;
+			break;
+		}
+
+		if (!can_block) {
+			LASSERT(d->opd_pre);
+			rc = -ENOBUFS;
 			break;
 		}
 
@@ -1630,12 +1642,12 @@ int osp_object_truncate(const struct lu_env *env, struct dt_object *dt,
 	 * XXX: decide how do we do here with resend
 	 * if we don't resend, then client may see wrong file size
 	 * if we do resend, then MDS thread can get stuck for quite long
-	 * and if we don't resend, then client will also get -EWOULDBLOCK !!
+	 * and if we don't resend, then client will also get -EAGAIN !!
 	 * (see LU-7975 and sanity/test_27F use cases)
 	 * but let's decide not to resend/delay this truncate request to OST
 	 * and allow Client to decide to resend, in a less agressive way from
 	 * after_reply(), by returning -EINPROGRESS instead of
-	 * -EAGAIN/-EWOULDBLOCK upon return from ptlrpc_queue_wait() at the
+	 * -EAGAIN/-EAGAIN upon return from ptlrpc_queue_wait() at the
 	 * end of this routine
 	 */
 	req->rq_no_resend = req->rq_no_delay = 1;
@@ -1665,14 +1677,14 @@ int osp_object_truncate(const struct lu_env *env, struct dt_object *dt,
 
 	rc = ptlrpc_queue_wait(req);
 	if (rc) {
-		/* -EWOULDBLOCK/-EAGAIN means OST is unreachable at the moment
+		/* -EAGAIN/-EWOULDBLOCK means OST is unreachable at the moment
 		 * since we have decided not to resend/delay, but this could
 		 * lead to wrong size to be seen at Client side and even process
 		 * trying to open to exit/fail if not itself handling -EAGAIN.
 		 * So it should be better to return -EINPROGRESS instead and
 		 * leave the decision to resend at Client side in after_reply()
 		 */
-		if (rc == -EWOULDBLOCK) {
+		if (rc == -EAGAIN) {
 			rc = -EINPROGRESS;
 			CDEBUG(D_HA, "returning -EINPROGRESS instead of "
 			       "-EWOULDBLOCK/-EAGAIN to allow Client to "

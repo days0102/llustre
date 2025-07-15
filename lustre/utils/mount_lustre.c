@@ -27,7 +27,6 @@
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
- * Lustre is a trademark of Sun Microsystems, Inc.
  *
  * lustre/utils/mount_lustre.c
  *
@@ -105,6 +104,8 @@ void usage(FILE *out)
 		"\t\tnomgs: only start target MDS/OSS, using existing MGS\n"
 		"\t\tnoscrub: do NOT auto start OI scrub unless requested\n"
 		"\t\tskip_lfsck: do NOT auto resume paused/crashed LFSCK\n"
+		"\t\tmax_sectors_kb=<size>: set device max_sectors_kb to size or leaves it untouched if size=0\n"
+		"\t\t\tIf not specified, device max_sectors_kb will be set to max_hw_sectors_kb\n"
 		"\t\tmd_stripe_cache_size=<num>: set MD RAID device stripe cache size\n"
 		"\t<cliopt>: one or more comma separated client options:\n"
 		"\t\texclude=<ostname>[:<ostname>]: list of inactive OSTs (e.g. lustre-OST0001)\n"
@@ -560,7 +561,8 @@ static int parse_ldd(char *source, struct mount_opts *mop,
 		clear_update_ondisk(source, ldd);
 
 	/* Since we never rewrite ldd, ignore temp flags */
-	ldd->ldd_flags &= ~(LDD_F_VIRGIN | LDD_F_WRITECONF);
+	ldd->ldd_flags &= ~(LDD_F_VIRGIN | LDD_F_WRITECONF |
+			    LDD_F_NO_LOCAL_LOGS);
 
 	/* This is to make sure default options go first */
 	temp_options = strdup(options);
@@ -588,6 +590,9 @@ static int parse_ldd(char *source, struct mount_opts *mop,
 		} else if (ldd->ldd_svname[rc - 8] == '=') {
 			ldd->ldd_svname[rc - 8] = '-';
 			ldd->ldd_flags |= LDD_F_WRITECONF;
+		} else if (ldd->ldd_svname[rc - 8] == '+') {
+			ldd->ldd_svname[rc - 8] = '-';
+			ldd->ldd_flags |= LDD_F_NO_LOCAL_LOGS;
 		}
 	}
 	/* backend osd type */
@@ -631,6 +636,11 @@ static int parse_ldd(char *source, struct mount_opts *mop,
 	}
 	if (ldd->ldd_flags & LDD_F_WRITECONF) {
 		rc = append_option(options, options_len, "writeconf", NULL);
+		if (rc != 0)
+			return rc;
+	}
+	if (ldd->ldd_flags & LDD_F_NO_LOCAL_LOGS) {
+		rc = append_option(options, options_len, "nolocallogs", NULL);
 		if (rc != 0)
 			return rc;
 	}
@@ -804,7 +814,8 @@ static void label_lustre(struct mount_opts *mop)
 	if (mop->mo_nosvc)
 		return;
 
-	if (mop->mo_ldd.ldd_flags & (LDD_F_VIRGIN | LDD_F_WRITECONF)) {
+	if (mop->mo_ldd.ldd_flags & (LDD_F_VIRGIN | LDD_F_WRITECONF |
+	    LDD_F_NO_LOCAL_LOGS)) {
 		(void)osd_label_lustre(mop);
 	} else {
 		struct lustre_disk_data ldd;
@@ -924,7 +935,9 @@ int main(int argc, char *const argv[])
 		if (rc)
 			goto out_osd;
 #else
-		rc = -EINVAL;
+		rc = EINVAL;
+		fprintf(stderr, "%s: cannot mount %s: no server support\n",
+			progname, mop.mo_usource);
 		goto out_options;
 #endif
 	}
@@ -993,7 +1006,7 @@ int main(int argc, char *const argv[])
 				 * Try with 'lustre' instead.  Eventually this
 				 * can be removed (e.g. 2.18 or whenever).
 				 */
-				if (rc == -ENODEV &&
+				if (errno == ENODEV &&
 				    strcmp(fstype, "lustre_tgt") == 0) {
 					fstype = "lustre";
 					i--;
