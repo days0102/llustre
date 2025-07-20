@@ -423,6 +423,8 @@ AC_DEFUN([LB_CC_NO_STRINGOP_OVERFLOW], [
 	CFLAGS="$saved_flags"
 ])
 
+CFLAGS="$CFLAGS -Wno-error=deprecated-declarations"
+
 #
 # LB_CONDITIONALS
 #

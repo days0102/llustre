@@ -477,9 +477,10 @@ static int enable_default_ext4_features(struct mkfs_opts *mop, char *anchor,
 			      "extents", NULL, maxbuflen);
 		append_unique(anchor, ",", "uninit_bg", NULL, maxbuflen);
 	} else if (IS_MDT(&mop->mo_ldd)) {
-		append_unique(anchor, user_spec ? "," : " -O ",
-			      "dirdata", NULL, maxbuflen);
-		append_unique(anchor, ",", "uninit_bg", NULL, maxbuflen);
+		// append_unique(anchor, user_spec ? "," : " -O ",
+		// 	      "dirdata", NULL, maxbuflen);
+		// append_unique(anchor, ",", "uninit_bg", NULL, maxbuflen);
+		append_unique(anchor, user_spec ? "," : " -O ", "uninit_bg", NULL, maxbuflen);
 		if (enable_64bit)
 			append_unique(anchor, ",", "extents", NULL, maxbuflen);
 		else
