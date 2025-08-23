@@ -2424,16 +2424,25 @@ struct ldlm_res_id {
 /* lock types */
 enum ldlm_mode {
 	LCK_MINMODE	= 0,
-	LCK_EX		= 1,
-	LCK_PW		= 2,
-	LCK_PR		= 4,
-	LCK_CW		= 8,
-	LCK_CR		= 16,
+	LCK_EX		= 1,	/* 在创建新文件之前，MDS 请求对父级的 EX 锁定*/
+	LCK_PW		= 2,	/* 客户端从 OST 请求写锁时，将发出带有 PW 模式的锁定。*/
+	LCK_PR		= 4,	/* 客户端从 OST 请求读锁时，将发出带有 PR 模式的锁定。*/
+	LCK_CW		= 8,	/* 如果客户在打开文件操作期间请求写锁，MDS 授予 CW 锁定类型。 */
+	LCK_CR		= 16,	/* 当客户端执行路径查找时，MDS 会在路径上授予inodebit CR 锁 */
 	LCK_NL		= 32,
 	LCK_GROUP	= 64,
 	LCK_COS		= 128,
 	LCK_MAXMODE
 };
+/** 锁兼容模式
+   NL CR CW PR PW EX 
+NL 1  1  1  1  1  1 
+CR 1  1  1  1  1  0 
+CW 1  1  1  0  0  0 
+PR 1  1  0  1  0  0 
+PW 1  1  0  0  0  0 
+EX 1  0  0  0  0  0
+ */
 
 #define LCK_MODE_NUM    8
 
@@ -2459,6 +2468,10 @@ static inline bool ldlm_extent_equal(const struct ldlm_extent *ex1,
 	return ex1->start == ex2->start && ex1->end == ex2->end;
 }
 
+/**
+ * @brief Lustre 定义的四种锁类型之一，inodebit 锁类型。
+ * 保护元数据属性
+ */
 struct ldlm_inodebits {
 	__u64 bits;
 	union {

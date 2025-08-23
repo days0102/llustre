@@ -114,9 +114,9 @@ enum wbc_readdir_policy {
 };
 
 enum wbc_flush_policy {
-	WBC_FLUSH_POL_RQSET	= 0,
-	WBC_FLUSH_POL_BATCH	= 1,
-	WBC_FLUSH_POL_PTLRPCD	= 2,
+	WBC_FLUSH_POL_RQSET	= 0,		/* 按请求集（一定数量）方式刷新；*/
+	WBC_FLUSH_POL_BATCH	= 1,		/* 按批量方式刷新；*/
+	WBC_FLUSH_POL_PTLRPCD	= 2,	/* 由 PTLRPCD 线程控制刷新？*/
 	WBC_FLUSH_POL_DEFAULT	= WBC_FLUSH_POL_PTLRPCD,
 };
 

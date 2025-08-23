@@ -724,6 +724,10 @@ enum ldlm_cancel_flags {
 	LCF_BL_AST	= 0x4, /* Cancel LDLM_FL_BL_AST locks in the same RPC */
 };
 
+/**
+ * @brief ldlm_flock 是用于表示 POSIX flock 风格的锁结构
+ * 用于支持用户空间 fcntl(F_SETLK)、flock() 等系统调用
+ */
 struct ldlm_flock {
 	__u64 start;
 	__u64 end;
