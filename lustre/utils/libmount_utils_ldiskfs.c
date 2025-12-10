@@ -499,7 +499,22 @@ static int enable_default_ext4_features(struct mkfs_opts *mop, char *anchor,
 		 */
 		/*
 		 * Notice: dirdata 在 (Ubuntu 24 LTS + e2fsprogs 1.47.0-2.4) mkfs 存在问题，
-		 * 		   在(Ubuntu 24 LTS + e2fsprogs 1.47.0-2.4)上暂时注释关闭，以正常使用
+		 * 在(Ubuntu 24 LTS + e2fsprogs 1.47.0-2.4)上暂时注释关闭，以正常使用
+		 * 
+		 * 正常的 1.47 版本是支持该特性的，但 ubuntu 上 apt 安装的并不支持
+		 * 
+		 * 或者者编译 e2fsprogs 版本 master-lustre 分支安装
+		 * 
+		 * git clone "https://review.whamcloud.com/tools/e2fsprogs"
+		 * git checkout master-lustre
+		 * 
+		 * sed -i 's/ext2_types-wrapper.h$//g' lib/ext2fs/Makefile.in
+		 * ./configure
+		 * dpkg-buildpackage -b -us -uc
+		 * 
+		 * sudo dpkg -i e2fsprogs_*.deb libext2fs-dev_*.deb \
+		 * comerr-dev_2.1-*.deb libext2fs2_*.deb libext2fs-dev_*.deb \
+		 * libcom-err2_*.deb libss2_*.deb e2fsprogs-l10n_*.deb 
 		 * 
 		 * 如果不同步安装，需要更新 /usr/lib/mount_osd_ldiskfs.so 动态库文件
 		 * 
