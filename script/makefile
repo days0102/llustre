@@ -118,3 +118,37 @@ debug_clean:
 .PHONY: check_ip build_images configure mkfs mount mount_mgt mount_mdt mount_ost mount_client remove
 
 #####################################
+
+wbc:
+	sudo lctl set_param llite.*.wbc.conf="conf flush_mode=aging_keep max_inodes=200000 size=4G" 
+
+wbc_disable:
+	sudo lctl set_param llite.*.wbc.conf="disabled" 
+
+lhsm_enable:
+	sudo lhsmtool_posix --daemon --hsm-root /home/lwz/pcc --archive=2 /home/lwz/script/mnt/lustre/client
+
+pcc_add:
+	sudo lctl pcc add /home/lwz/script/mnt/lustre/client /home/lwz/pcc -p "uid={1000} rwid=2"
+
+
+# 1. --earse-param set to delete the origin param XXXXX NOT Worked
+# 2. --write-conf set to write the new param XXXXX NOT Worked
+
+# 1. change the MGS NID by --earse-param and --write-conf
+# 2. mount MGS
+# 3. sudo lctl replace_nids lustrefs-MDT0000 192.168.203.2@tcp
+# 4. sudo lctl replace_nids lustrefs-OST0000 192.168.203.2@tcp
+# 5. umount MGS
+# 6. mount lustre
+
+tunefs:
+	sudo tunefs.lustre --erase-param --mgsnode=192.168.203.2@tcp --writeconf	/dev/loop30
+	sudo mount -t lustre /dev/loop30 mnt/lustre/mgt
+	sudo lctl replace_nids lustrefs-OST0000 192.168.203.2@tcp
+	sudo lctl replace_nids lustrefs-OST0000 192.168.203.2@tcp
+	# sudo tunefs.lustre --erase-param --mgsnode=192.168.203.2@tcp --writeconf /dev/loop30
+	# sudo tunefs.lustre --erase-param --mgsnode=192.168.203.5@tcp /dev/loop31
+	# sudo tunefs.lustre --erase-param --mgsnode=192.168.203.2@tcp --writeconf --mgsnode=192.168.203.2@tcp /dev/lo1
+	# sudo tunefs.lustre --erase-param --mgsnode=192.168.203.5@tcp /dev/loop32
+	# sudo tunefs.lustre --writeconf --mgsnode=192.168.203.2@tcp /dev/loop32
